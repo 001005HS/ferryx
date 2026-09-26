@@ -53,7 +53,7 @@ export function getUpdateStatus(): UpdateStatus {
 
 let managedExternallyCache: boolean | null = null;
 
-async function updatesManagedExternally(): Promise<boolean> {
+export async function updatesManagedExternally(): Promise<boolean> {
   if (managedExternallyCache === null) {
     try {
       managedExternallyCache = await invoke<boolean>("cmd_updater_managed_externally");
@@ -175,14 +175,17 @@ export function stopUpdatePolling(): void {
 export function startUpdatePolling(intervalMs: number = UPDATE_CHECK_INTERVAL_MS): () => void {
   stopUpdatePolling();
   const generation = pollGeneration;
-  void checkForUpdate();
-  const tick = (): void => {
-    void checkForUpdate().finally(() => {
-      if (pollGeneration === generation) {
-        pollTimer = setTimeout(tick, intervalMs);
-      }
-    });
-  };
-  pollTimer = setTimeout(tick, intervalMs);
+  void updatesManagedExternally().then((managed) => {
+    if (managed || pollGeneration !== generation) return;
+    void checkForUpdate();
+    const tick = (): void => {
+      void checkForUpdate().finally(() => {
+        if (pollGeneration === generation) {
+          pollTimer = setTimeout(tick, intervalMs);
+        }
+      });
+    };
+    pollTimer = setTimeout(tick, intervalMs);
+  });
   return stopUpdatePolling;
 }
