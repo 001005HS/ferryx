@@ -107,6 +107,8 @@ const native = {
   }),
 };
 
+const { noteObservationInteraction } = await import("./lib/notificationCenter/activityRecording");
+
 vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   // The notification coordinator re-consults the authoritative OS permission status before it
@@ -840,6 +842,9 @@ describe("App notification coordinator wiring", () => {
 
     it("records focused observed done as seen despite the focus gate", async () => {
       currentActivityTargets = [target];
+      // Focus alone no longer counts as observation - a window can be frontmost while the user
+      // reads on another monitor - so an actually-present user is seeded here.
+      noteObservationInteraction(Date.now());
       await act(async () => { render(<App />); });
       await nativeFocusTrackingReady;
       nativeFocusChanged?.({ payload: true });
