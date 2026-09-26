@@ -68,8 +68,49 @@ impl TerminalService {
                 .write(id, generation, data)
                 .map_err(|e| PtyError::Other(e.to_string()));
         }
-        self.write_input(id, &data)?;
-        Ok(Box::pin(async { Ok(()) }))
+        // Resolve session synchronously so missing IDs fail immediately with SessionNotFound.
+        let session = self
+            .pty_manager
+            .get_session(id)
+            .ok_or_else(|| PtyError::SessionNotFound(id.to_string()))?;
+
+        // Perform the write asynchronously off the Tokio worker thread to avoid blocking
+        // the reactor when the PTY input queue is full.
+        #[cfg(unix)]
+        {
+            const MAX_CHUNK_SIZE: usize = 65536;
+            Ok(Box::pin(async move {
+                // Chunks are written strictly in order, each under the session's input gate.
+                // The gate is re-taken per chunk, so a second connection writing to the same
+                // session can interleave only at a 64 KiB boundary.
+                for chunk in data.chunks(MAX_CHUNK_SIZE) {
+                    session
+                        .write_input_cancellable(chunk)
+                        .await
+                        .map_err(|e| super::remote::RemoteFailure {
+                            kind: super::remote::RemoteFailureKind::Transport,
+                            message: e.to_string(),
+                        })?;
+                }
+                Ok(())
+            }))
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(Box::pin(async move {
+                tokio::task::spawn_blocking(move || session.write_input(&data))
+                    .await
+                    .map_err(|e| super::remote::RemoteFailure {
+                        kind: super::remote::RemoteFailureKind::Transport,
+                        message: format!("PTY write task panicked: {e}"),
+                    })?
+                    .map_err(|e| super::remote::RemoteFailure {
+                        kind: super::remote::RemoteFailureKind::Transport,
+                        message: e.to_string(),
+                    })
+            }))
+        }
     }
 
     pub fn resize_operation(

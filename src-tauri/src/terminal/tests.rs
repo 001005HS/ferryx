@@ -573,3 +573,182 @@ async fn spawned_pty_advertises_truecolor_support() {
         "a PTY must advertise truecolor so agent TUIs keep their full palette"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_wedged_pty_does_not_block_the_async_runtime_thread() {
+    let service = TerminalService::default();
+    // Raw mode matters: in canonical mode the tty discards input past a full line instead of
+    // blocking the writer, so the queue would never report WouldBlock. The marker is printed
+    // only after `stty` has applied, so the fill below starts against a raw-mode tty.
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.args(["-c", "stty raw -echo; printf 'T3_%s' READY; sleep 30"]);
+    let (session_id, mut rx) = service
+        .pty_manager()
+        .spawn(cmd, 80, 24)
+        .expect("spawn sleep child");
+    let mut seen = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        while !String::from_utf8_lossy(&seen).contains("T3_READY") {
+            let chunk = rx.recv().await.expect("child output closed before ready marker");
+            seen.extend_from_slice(&chunk);
+        }
+    })
+    .await
+    .expect("child must report raw mode within 5s");
+
+    let session = service
+        .pty_manager()
+        .get_session(&session_id)
+        .expect("session exists");
+    let pid = session.pid().expect("child pid");
+
+    // Fill the PTY input queue to a real kernel WouldBlock.
+    let master_fd = session.raw_master_fd().expect("raw master fd");
+    unsafe {
+        let flags = libc::fcntl(master_fd, libc::F_GETFL);
+        if flags >= 0 && (flags & libc::O_NONBLOCK) == 0 {
+            libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let fill_chunk = vec![b'x'; 65536];
+    let mut accepted = 0usize;
+    loop {
+        let n = unsafe {
+            libc::write(
+                master_fd,
+                fill_chunk.as_ptr().cast(),
+                fill_chunk.len(),
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                break;
+            }
+            panic!("unexpected error saturating PTY: {err}");
+        }
+        if n == 0 {
+            panic!("PTY write returned zero while saturating queue");
+        }
+        accepted += n as usize;
+        assert!(accepted < 4 * 1024 * 1024, "exceeded 4 MiB saturation cap");
+    }
+
+    // Call write_input_operation - wrap ONLY the synchronous call in Instant timing
+    let call_start = std::time::Instant::now();
+    let op = service
+        .write_input_operation(&session_id, 0, b"x".to_vec())
+        .expect("write_input_operation synchronous call succeeds");
+    let call_duration = call_start.elapsed();
+    assert!(
+        call_duration < Duration::from_millis(100),
+        "synchronous call must return under 100ms, took {call_duration:?}"
+    );
+
+    // Spawn a task to verify the single runtime worker thread is not blocked
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_clone = Arc::clone(&ran);
+    tokio::spawn(async move {
+        ran_clone.store(true, Ordering::Release);
+    });
+
+    // Poll the write future: must remain pending while PTY queue is full
+    let timed_out = timeout(Duration::from_millis(200), op).await;
+    assert!(
+        timed_out.is_err(),
+        "write future must remain pending while PTY queue is saturated"
+    );
+    assert!(
+        ran.load(Ordering::Acquire),
+        "spawned task must have executed during timeout window (reactor was not blocked)"
+    );
+
+    // Clean up: SIGKILL the child pid and close the session
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    let _ = service.close_session(&session_id).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_input_still_reaches_the_child() {
+    let service = TerminalService::default();
+    let cmd = test_shell();
+    let (session_id, mut rx) = service
+        .pty_manager()
+        .spawn(cmd, 80, 24)
+        .expect("spawn shell");
+
+    let op = service
+        .write_input_operation(&session_id, 0, b"printf 'T3_%s\\n' 'OK'\n".to_vec())
+        .expect("write_input_operation returns op");
+    op.await.expect("write future succeeds");
+
+    let mut accumulated = Vec::new();
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Some(chunk)) => {
+                accumulated.extend_from_slice(&chunk);
+                let text = String::from_utf8_lossy(&accumulated);
+                if text.contains("T3_OK") {
+                    found = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    assert!(
+        found,
+        "Expected output containing 'T3_OK', got: {}",
+        String::from_utf8_lossy(&accumulated)
+    );
+
+    let _ = service.close_session(&session_id).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_large_local_paste_is_not_rejected() {
+    let service = TerminalService::default();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.args(["-c", "cat > /dev/null"]);
+    let (session_id, mut rx) = service
+        .pty_manager()
+        .spawn(cmd, 80, 24)
+        .expect("spawn cat child");
+
+    let drain = tokio::spawn(async move {
+        while rx.recv().await.is_some() {}
+    });
+
+    let large_paste = vec![b'A'; 200_000];
+    let op = service
+        .write_input_operation(&session_id, 0, large_paste)
+        .expect("write_input_operation returns op");
+    let res = op.await;
+    assert!(res.is_ok(), "large paste must succeed: {:?}", res.err());
+
+    let _ = service.close_session(&session_id).await;
+    let _ = timeout(Duration::from_secs(2), drain).await;
+}
+
+#[test]
+fn writing_to_an_unknown_session_still_fails_synchronously() {
+    let service = TerminalService::default();
+    let res = service.write_input_operation("nope", 0, b"x".to_vec());
+    // The Ok side is a boxed future with no Debug impl, so report only the error.
+    let err = res.err();
+    assert!(
+        matches!(err, Some(PtyError::SessionNotFound(ref id)) if id == "nope"),
+        "expected PtyError::SessionNotFound(\"nope\"), got: {err:?}"
+    );
+}
