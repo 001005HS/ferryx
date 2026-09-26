@@ -904,6 +904,13 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       const absentAddBtn = screen.getByRole("button", { name: "Add Project on Ungranted Account Box" });
       expect(absentAddBtn).toBeDisabled();
 
+      // An enrolled machine whose grant was never redeemed on this desktop used to be a dead end:
+      // every action disabled, with no way to obtain the grant from here. Offer the way forward.
+      const connectBtn = screen.getByRole("button", { name: "Connect Ungranted Account Box" });
+      expect(connectBtn).not.toBeDisabled();
+      // The granted machine is already usable, so it must NOT show a redundant Connect action.
+      expect(screen.queryByRole("button", { name: "Connect Granted Account Box" })).toBeNull();
+
       // Verify machine-scoped machine
       expect(await screen.findByText("Granted Account Box")).toBeInTheDocument();
       const grantedRow = screen.getByText("Granted Account Box").closest("[data-machine-id]");

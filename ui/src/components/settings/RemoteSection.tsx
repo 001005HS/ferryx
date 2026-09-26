@@ -16,6 +16,7 @@ import {
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
 import {
   DEFAULT_MACHINE_LABEL,
+  nativePairedHostCommands,
   pairedHostInventory,
 } from "../../lib/pairedHostInventory";
 import {
@@ -44,13 +45,18 @@ import {
 } from "../../state/remoteHostStore";
 import {
   AccountSessionError,
+  allocateSession,
   clearStoredAccountSessionToken,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   issueEnrollmentCode,
   listMachines,
+  openTunnel,
+  redeemInTunnel,
+  requestGrant,
   type AccountMachineView,
 } from "../../remote/accountSession";
+import { getOrCreateAttachKey } from "../../remote/accountAttach";
 import { AccountSignIn } from "./AccountSignIn";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
@@ -328,6 +334,61 @@ export function RemoteSection({
   };
 
   // Paired actions
+  // Redeems an account-issued machine grant on THIS desktop. The web client has had this flow
+  // since account enrollment shipped; the desktop never did, so an enrolled machine sat at
+  // "Needs Grant" forever and its projects could not be added. Every piece already existed --
+  // the grant API, the encrypted tunnel, and `paired_host_migrate_legacy` which persists the
+  // redeemed device token -- so this wires them together rather than inventing a new path.
+  const handleConnectAccountMachine = async (host: HostEndpoint) => {
+    if (busy) return;
+    const machine = accountMachines.find((m) => m.machineId === host.machineId);
+    if (!machine || !accountToken) return;
+
+    setBusy(true);
+    setActionError(null);
+    try {
+      const attachKey = await getOrCreateAttachKey();
+      if (!attachKey) throw new Error("ATTACH_KEY_UNSUPPORTED");
+
+      // A mirror grant connects but is refused by every route that lists or opens projects,
+      // which is exactly the state this button exists to leave.
+      const grant = await requestGrant(
+        accountOrigin,
+        accountToken,
+        machine,
+        attachKey.publicKey,
+        { grantScope: "machine" },
+      );
+      const session = await allocateSession(accountOrigin, accountToken, machine.machineId);
+      const tunnel = await openTunnel({
+        relayOrigin: grant.relayOrigin || accountOrigin,
+        machineId: machine.machineId,
+        enrollmentEpoch: machine.enrollmentEpoch,
+        machineAttachPublicKey: grant.machineAttachPublicKey,
+        localKeyPair: attachKey,
+        sessionId: session.sessionId,
+      });
+      try {
+        const pair = await redeemInTunnel(tunnel.transport, grant.pairingToken, machine.displayName);
+        // Persist through the daemon so the grant survives a restart and the local inventory
+        // reports `paired` with machine scope.
+        await nativePairedHostCommands.migrate({
+          relayOrigin: grant.relayOrigin || accountOrigin,
+          machineId: machine.machineId,
+          displayLabel: machine.displayName,
+          deviceToken: pair.token,
+        });
+      } finally {
+        tunnel.close();
+      }
+      await listMachines(accountOrigin, accountToken).then(setAccountMachines).catch(() => undefined);
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : "ACCOUNT_GRANT_FAILED");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCheckPaired = async (host: HostEndpoint) => {
     if (!host.generation || state.nativeStatus !== "ready" || busy) return;
     setBusy(true);
@@ -835,6 +896,19 @@ export function RemoteSection({
                         </div>
 
                         <div className="flex items-center gap-2 shrink-0">
+                          {/* An enrolled machine whose grant was never redeemed on THIS desktop sat
+                              at "Needs Grant" with every action disabled and no way forward. */}
+                          {code === "MACHINE_GRANT_REQUIRED" && isEnrolledAccountMachine ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-label={`Connect ${host.name}`}
+                              disabled={busy || !accountToken}
+                              onClick={() => handleConnectAccountMachine(host)}
+                            >
+                              Connect
+                            </Button>
+                          ) : null}
                           {/* Disable paired Add Project without onOpenProject even if only onOpenSshProject set */}
                           <Button
                             type="button"
