@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { toast } from "sonner";
 
 import {
   listWorktrees as defaultListWorktrees,
@@ -34,6 +35,22 @@ const defaultServices: InactiveProjectWorktreeServices = {
   onWorktreeChanged: defaultOnWorktreeChanged,
 };
 
+function inactiveWorktreesToastId(workspaceId: string): string {
+  return `inactive-worktrees:${workspaceId}`;
+}
+
+function describeListingError(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return String(error);
+}
+
+function projectDisplayName(project: RegisteredProject): string {
+  const parts = project.repoRoot.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? project.workspaceId;
+}
+
 /**
  * The workspace store only holds the active project's worktrees, so sidebar rows
  * for every other registered project would render an empty list. This lists them
@@ -47,6 +64,7 @@ export function useInactiveProjectWorktrees(
   services: InactiveProjectWorktreeServices = defaultServices,
   onRegistered?: (project: RegisteredProject) => void,
 ): Record<string, Worktree[]> {
+  const [retryKey, setRetryKey] = useState(0);
   const [worktreesByProject, setWorktreesByProject] = useState<Record<string, Worktree[]>>(() => {
     const initial: Record<string, Worktree[]> = {};
     for (const project of projects) {
@@ -231,6 +249,8 @@ export function useInactiveProjectWorktrees(
     });
 
     void (async () => {
+      const listingFailures: Array<{ project: RegisteredProject; error: unknown }> = [];
+      const listedIds: string[] = [];
       const resolved = await Promise.all(
         targets.map(async (project) => {
           if (project.target?.kind === "pairedDaemon") {
@@ -250,13 +270,16 @@ export function useInactiveProjectWorktrees(
             }
             try {
               const listed = await services.listWorktrees(project.workspaceId);
+              listedIds.push(project.workspaceId);
               const worktrees = listed.length > 0 ? listed : [plainRootWorktree(project)];
               return [project.workspaceId, worktrees] as const;
             } catch (error) {
               switchDebug("inactive-worktrees.error", { workspaceId: project.workspaceId, error: String(error) });
+              listingFailures.push({ project, error });
               return [project.workspaceId, null] as const;
             }
           }
+          let registrationSucceeded = false;
           try {
             // A rejection means this ID is bound to a different root, so listing
             // would report another repository's worktrees under this project.
@@ -264,6 +287,7 @@ export function useInactiveProjectWorktrees(
               workspaceId: project.workspaceId,
               repoPath: project.repoRoot,
             });
+            registrationSucceeded = true;
             if (!cancelled) onRegisteredRef.current?.(registered);
             switchDebug("inactive-worktrees.registered", {
               requestedWorkspaceId: project.workspaceId,
@@ -277,12 +301,14 @@ export function useInactiveProjectWorktrees(
               resolvedCount: worktrees.length,
               paths: worktrees.map((worktree) => worktree.path),
             });
+            listedIds.push(project.workspaceId);
             return [project.workspaceId, worktrees] as const;
           } catch (error) {
             switchDebug("inactive-worktrees.error", {
               workspaceId: project.workspaceId,
               error: String(error),
             });
+            if (registrationSucceeded) listingFailures.push({ project, error });
             return [project.workspaceId, null] as const;
           }
         }),
@@ -292,6 +318,14 @@ export function useInactiveProjectWorktrees(
           activeProjectId,
         });
         return;
+      }
+      for (const workspaceId of listedIds) toast.dismiss(inactiveWorktreesToastId(workspaceId));
+      for (const { project, error } of listingFailures) {
+        toast.error(`Couldn't load worktrees for ${projectDisplayName(project)}`, {
+          id: inactiveWorktreesToastId(project.workspaceId),
+          description: describeListingError(error),
+          action: { label: "Retry", onClick: () => setRetryKey((key) => key + 1) },
+        });
       }
       switchDebug("inactive-worktrees.load.complete", {
         activeProjectId,
@@ -363,7 +397,7 @@ export function useInactiveProjectWorktrees(
         activeProjectId,
       });
     };
-  }, [activeProjectId, inactiveKey, pairedRefreshKey, services]);
+  }, [activeProjectId, inactiveKey, pairedRefreshKey, services, retryKey]);
 
   return worktreesByProject;
 }
