@@ -15,6 +15,7 @@ import { StatusDot, type StatusDotState } from "./ui/StatusDot";
 
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
+  readonly repoRoot?: string | null;
   readonly activePath: string;
   readonly activeWorkspaceId?: string;
   readonly agents: readonly ActiveAgent[];
@@ -31,6 +32,7 @@ type WorktreeListProps = {
 
 export type WorktreeRowProps = {
   readonly worktree: Worktree;
+  readonly repoRoot?: string | null;
   readonly active: boolean;
   readonly agent: ActiveAgent | undefined;
   readonly status: DirtyState | undefined;
@@ -49,13 +51,47 @@ export function fileManagerActionLabel() {
   return "Open in File Manager";
 }
 
-/** The repository root worktree is the one that is not an `orca/<ws>/<slug>` worktree branch. */
-function isPrimaryWorktree(worktree: Worktree) {
+function isCaseInsensitivePlatform(): boolean {
+  if (typeof process !== "undefined" && process.platform) {
+    return process.platform === "darwin" || process.platform === "win32";
+  }
+  if (typeof navigator !== "undefined") {
+    const p = navigator.platform || navigator.userAgent || "";
+    return /Mac|Win/i.test(p);
+  }
+  return false;
+}
+
+export function normalizeWorktreePath(p: string, caseInsensitive = isCaseInsensitivePlatform()): string {
+  let normalized = p.trim().replace(/\\/g, "/");
+  normalized = normalized.replace(/\/+/g, "/");
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (caseInsensitive) {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+export function isSameWorktreePath(pathA: string, pathB: string, caseInsensitive?: boolean): boolean {
+  return normalizeWorktreePath(pathA, caseInsensitive) === normalizeWorktreePath(pathB, caseInsensitive);
+}
+
+/**
+ * The repository root worktree is identified by comparing its path against the project repo root.
+ * If no repo root is available, falls back to checking if the branch is not an `orca/<ws>/<slug>` worktree branch.
+ */
+export function isPrimaryWorktree(worktree: Worktree, repoRoot?: string | null): boolean {
+  if (repoRoot && repoRoot.trim().length > 0) {
+    return isSameWorktreePath(worktree.path, repoRoot);
+  }
   return worktreeIdentity(worktree) === null;
 }
 
 export const WorktreeRow = memo(function WorktreeRow({
   worktree,
+  repoRoot,
   active,
   agent,
   status,
@@ -77,7 +113,7 @@ export const WorktreeRow = memo(function WorktreeRow({
 
   const isPaired = Boolean(worktree.workspaceId?.startsWith("daemon:"));
   const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:")) || isPaired;
-  const isPrimary = isPrimaryWorktree(worktree);
+  const isPrimary = isPrimaryWorktree(worktree, repoRoot);
   const primary = !isRemote && isPrimary;
   const isRemotePrimary = isRemote && isPrimary;
   const canDelete = !primary && !isPaired;
@@ -294,6 +330,7 @@ const SortableWorktreeRow = memo(function SortableWorktreeRow({
 
 export function WorktreeList({
   worktrees,
+  repoRoot,
   activePath,
   activeWorkspaceId,
   agents,
@@ -334,6 +371,7 @@ export function WorktreeList({
 
         const rowProps: WorktreeRowProps = {
           worktree,
+          repoRoot,
           active,
           agent,
           status,

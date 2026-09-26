@@ -685,6 +685,36 @@ export async function setNativeTerminalAttentionFrame(
   });
 }
 
+export type NativeTerminalScrollBehavior =
+  | { type: "top" }
+  | { type: "bottom" }
+  | { type: "delta"; rows: number }
+  | { type: "row"; offset: number };
+
+export async function scrollNativeTerminal(
+  sessionId: string,
+  behavior: NativeTerminalScrollBehavior,
+  options?: {
+    wheel?: unknown;
+    generation?: number | null;
+  },
+): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_native_terminal_scroll", {
+    sessionId,
+    behavior,
+    ...(options?.wheel !== undefined ? { wheel: options.wheel } : {}),
+    ...(options?.generation != null ? { generation: options.generation } : {}),
+  });
+}
+
+export async function scrollNativeTerminalViewport(
+  sessionId: string,
+  row: number,
+): Promise<void> {
+  return scrollNativeTerminal(sessionId, { type: "row", offset: row });
+}
+
 export async function onNativeTerminalFocus(
   handler: (sessionId: string) => void,
 ): Promise<UnlistenFn> {

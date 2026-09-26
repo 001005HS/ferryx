@@ -144,6 +144,10 @@ pub const CF_UNICODETEXT_ID: u32 = 13;
 pub const CF_HDROP_ID: u32 = 15;
 pub const CF_DIBV5_ID: u32 = 17;
 
+pub fn encode_windows_clipboard_utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 pub fn decode_windows_clipboard_utf16(slice: &[u16]) -> Option<String> {
     if slice.is_empty() {
         return None;
@@ -635,20 +639,131 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (content, types)
 }
 
+#[cfg(target_os = "windows")]
+fn write_native_clipboard(text: &str) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+
+    if text.is_empty() {
+        return false;
+    }
+
+    let utf16 = encode_windows_clipboard_utf16(text);
+    let bytes_len = utf16.len() * std::mem::size_of::<u16>();
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            // SAFETY: UB category: FFI boundary UB.
+            // Runtime invariant: CloseClipboard is called exactly once when ClipboardGuard is dropped
+            // to balance a preceding successful OpenClipboard call for the current thread/task.
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+
+    let mut opened = false;
+    for _ in 0..5 {
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: Calling OpenClipboard with null HWND (0) is explicitly valid per Win32
+        // specification to associate the clipboard with the current process task. Return value is checked
+        // before proceeding.
+        if unsafe { OpenClipboard(std::ptr::null_mut() as HWND) } != 0 {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    if !opened {
+        return false;
+    }
+
+    let _guard = ClipboardGuard;
+
+    // SAFETY: UB category: FFI boundary UB.
+    // Runtime invariant: EmptyClipboard is called while holding the open clipboard.
+    if unsafe { EmptyClipboard() } == 0 {
+        return false;
+    }
+
+    // SAFETY: UB category: FFI boundary UB.
+    // Runtime invariant: GlobalAlloc allocates GMEM_MOVEABLE memory of bytes_len.
+    // If allocation fails, handle is null and we return false.
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes_len) };
+    if handle.is_null() {
+        return false;
+    }
+
+    // SAFETY: UB category: Invalid pointer and FFI boundary UB.
+    // Runtime invariant: handle is a valid non-null allocation from GlobalAlloc.
+    // GlobalLock returns a pointer valid for writing bytes_len bytes.
+    let ptr = unsafe { GlobalLock(handle) } as *mut u16;
+    if ptr.is_null() {
+        // SAFETY: Handle must be freed if lock fails.
+        unsafe {
+            GlobalFree(handle);
+        }
+        return false;
+    }
+
+    // SAFETY: UB category: Out-of-bounds write.
+    // Runtime invariant: ptr points to allocated memory of size bytes_len = utf16.len() * sizeof(u16).
+    unsafe {
+        std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+        GlobalUnlock(handle);
+    }
+
+    // SAFETY: UB category: FFI boundary UB.
+    // Runtime invariant: CF_UNICODETEXT_ID (13) is a standard Win32 format constant.
+    // If SetClipboardData succeeds, the system takes ownership of the memory handle.
+    // If SetClipboardData fails, the caller must free the handle with GlobalFree.
+    let result = unsafe { SetClipboardData(CF_UNICODETEXT_ID, handle as _) };
+    if result.is_null() {
+        unsafe {
+            GlobalFree(handle);
+        }
+        return false;
+    }
+
+    true
+}
+
+/// Writes the selection to the Linux system clipboard using the provided runner.
+///
+/// Order: Wayland (`wl-copy`) first, then X11 (`xclip`), then `xsel`.
+pub fn write_linux_clipboard_with_runner<F>(text: &str, mut runner: F) -> bool
+where
+    F: FnMut(&str, &[&str], Vec<u8>) -> bool,
+{
+    if text.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes().to_vec();
+    if runner("wl-copy", &[], bytes.clone()) {
+        return true;
+    }
+    if runner("xclip", &["-selection", "clipboard", "-i"], bytes.clone()) {
+        return true;
+    }
+    runner("xsel", &["--clipboard", "--input"], bytes)
+}
+
 /// Writes the selection to the system clipboard, Wayland first and X11 second.
 ///
 /// Reports whether a helper accepted the payload; with neither installed the caller keeps its
 /// existing behaviour instead of failing the command.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn write_native_clipboard(text: &str) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-    let bytes = text.as_bytes().to_vec();
-    if run_clipboard_tool("wl-copy", &[], Some(bytes.clone())).is_some() {
-        return true;
-    }
-    run_clipboard_tool("xclip", &["-selection", "clipboard", "-i"], Some(bytes)).is_some()
+    write_linux_clipboard_with_runner(text, |program, args, bytes| {
+        run_clipboard_tool(program, args, Some(bytes)).is_some()
+    })
 }
 
 async fn dispatch_pty_resizes<F, Fut>(
@@ -1660,6 +1775,17 @@ pub async fn cmd_native_terminal_copy_selection<R: Runtime>(
     #[cfg(target_os = "windows")]
     {
         let _ = app;
+        if !text.is_empty() {
+            let selection = text.clone();
+            let written = tokio::task::spawn_blocking(move || write_native_clipboard(&selection))
+                .await
+                .map_err(|err| IpcError::internal(format!("Clipboard write task failed: {err}")))?;
+            if !written {
+                return Err(IpcError::internal(
+                    "Failed to write selection to Windows clipboard",
+                ));
+            }
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -1668,14 +1794,11 @@ pub async fn cmd_native_terminal_copy_selection<R: Runtime>(
             let selection = text.clone();
             let written = tokio::task::spawn_blocking(move || write_native_clipboard(&selection))
                 .await
-                .unwrap_or(false);
+                .map_err(|err| IpcError::internal(format!("Clipboard write task failed: {err}")))?;
             if !written {
-                // No Wayland/X11 clipboard helper accepted the selection. The command keeps its
-                // existing contract, so the miss only has to be diagnosable.
-                tracing::debug!(
-                    session_id = %session_id,
-                    "No system clipboard helper accepted the native terminal selection"
-                );
+                return Err(IpcError::internal(
+                    "Failed to write selection to Linux system clipboard (no Wayland/X11 clipboard helper accepted the selection)",
+                ));
             }
         }
     }
@@ -2550,6 +2673,96 @@ mod tests {
 
         assert_eq!(decode_windows_clipboard_utf16(&[]), None);
         assert_eq!(decode_windows_clipboard_utf16(&[0, 0, 0]), None);
+    }
+
+    #[test]
+    fn test_encode_windows_clipboard_utf16() {
+        let text = "Hello Windows Clipboard! 🚀🦀";
+        let encoded = encode_windows_clipboard_utf16(text);
+        assert_eq!(encoded.last(), Some(&0u16), "must be null-terminated");
+        assert_eq!(
+            decode_windows_clipboard_utf16(&encoded),
+            Some(text.to_string()),
+            "encoded utf16 must round-trip through decode_windows_clipboard_utf16"
+        );
+
+        let empty_encoded = encode_windows_clipboard_utf16("");
+        assert_eq!(empty_encoded, vec![0u16]);
+    }
+
+    #[test]
+    fn test_write_linux_clipboard_with_runner() {
+        // 1. Empty text immediately returns false without invoking any runner
+        let mut invoked: Vec<(String, Vec<String>)> = Vec::new();
+        assert!(
+            !write_linux_clipboard_with_runner("", |cmd, _args, _stdin| {
+                invoked.push((cmd.to_string(), Vec::new()));
+                true
+            }),
+            "empty text must return false"
+        );
+        assert!(invoked.is_empty(), "runner must not be invoked for empty text");
+
+        // 2. Wayland success short-circuits without attempting X11 helpers
+        invoked.clear();
+        let success = write_linux_clipboard_with_runner("selection", |cmd, args, stdin| {
+            invoked.push((cmd.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<String>>()));
+            assert_eq!(stdin, b"selection");
+            cmd == "wl-copy"
+        });
+        assert!(success);
+        assert_eq!(invoked, vec![("wl-copy".to_string(), vec![])]);
+
+        // 3. Wayland failure falls back to xclip with proper flags
+        invoked.clear();
+        let success = write_linux_clipboard_with_runner("selection", |cmd, args, stdin| {
+            invoked.push((cmd.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<String>>()));
+            assert_eq!(stdin, b"selection");
+            cmd == "xclip"
+        });
+        assert!(success);
+        assert_eq!(
+            invoked,
+            vec![
+                ("wl-copy".to_string(), vec![]),
+                (
+                    "xclip".to_string(),
+                    vec!["-selection".to_string(), "clipboard".to_string(), "-i".to_string()]
+                ),
+            ]
+        );
+
+        // 4. Wayland and xclip failure falls back to xsel
+        invoked.clear();
+        let success = write_linux_clipboard_with_runner("selection", |cmd, args, stdin| {
+            invoked.push((cmd.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<String>>()));
+            assert_eq!(stdin, b"selection");
+            cmd == "xsel"
+        });
+        assert!(success);
+        assert_eq!(
+            invoked,
+            vec![
+                ("wl-copy".to_string(), vec![]),
+                (
+                    "xclip".to_string(),
+                    vec!["-selection".to_string(), "clipboard".to_string(), "-i".to_string()]
+                ),
+                (
+                    "xsel".to_string(),
+                    vec!["--clipboard".to_string(), "--input".to_string()]
+                ),
+            ]
+        );
+
+        // 5. All helpers fail returns false
+        invoked.clear();
+        let success = write_linux_clipboard_with_runner("selection", |cmd, args, _stdin| {
+            invoked.push((cmd.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<String>>()));
+            false
+        });
+        assert!(!success);
+        assert_eq!(invoked.len(), 3);
     }
 
     #[test]

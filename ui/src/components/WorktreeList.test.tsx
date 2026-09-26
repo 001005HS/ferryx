@@ -1,10 +1,16 @@
+import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
-import { WorktreeList } from "./WorktreeList";
+import {
+  WorktreeList,
+  isPrimaryWorktree,
+  isSameWorktreePath,
+  normalizeWorktreePath,
+} from "./WorktreeList";
 
 const nativeMenu = vi.hoisted(() => ({
   openNativePopupMenu: vi.fn(),
@@ -637,5 +643,95 @@ describe("WorktreeList actions", () => {
     expect(deleteBtn).toBeDisabled();
     fireEvent.click(deleteBtn);
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("identifies primary worktree by matching repoRoot path and makes external non-root worktrees deletable", () => {
+    const onDelete = vi.fn();
+    const externalWorktree: Worktree = {
+      path: "/repo-external/custom-feature",
+      head: "ext123",
+      branch: "refs/heads/feature/custom-feature", // not an orca/... branch!
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree, externalWorktree]}
+        repoRoot="/repo"
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    // rootWorktree matches repoRoot: marked primary, no delete button
+    const rootRow = screen.getByText("main").closest(".group\\/worktree-row")!;
+    expect(rootRow.textContent).toContain("primary");
+    expect(rootRow.querySelector('button[aria-label="Delete worktree"]')).toBeNull();
+
+    // externalWorktree path does NOT match repoRoot: NOT primary, delete button enabled
+    const extRow = screen.getByText("feature/custom-feature").closest(".group\\/worktree-row")!;
+    expect(extRow.textContent).not.toContain("primary");
+    const deleteBtn = extRow.querySelector('button[aria-label="Delete worktree"]');
+    expect(deleteBtn).not.toBeNull();
+    fireEvent.click(deleteBtn!);
+    expect(onDelete).toHaveBeenCalledWith(externalWorktree);
+
+    // Context menu on externalWorktree has Delete Worktree enabled
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    fireEvent.contextMenu(extRow, { clientX: 100, clientY: 100 });
+    const { items, onAction } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Delete Worktree");
+    expect(deleteItem?.enabled).toBe(true);
+
+    onAction("delete");
+    expect(onDelete).toHaveBeenCalledWith(externalWorktree);
+  });
+
+  it("falls back to branch-shape check when no repoRoot is provided", () => {
+    const externalWorktree: Worktree = {
+      path: "/repo-external/custom-feature",
+      head: "ext123",
+      branch: "refs/heads/feature/custom-feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    // When repoRoot is not provided, branch-shape fallback applies
+    expect(isPrimaryWorktree(rootWorktree)).toBe(true);
+    expect(isPrimaryWorktree(externalWorktree)).toBe(true);
+    expect(isPrimaryWorktree(worktree)).toBe(false);
+
+    // When repoRoot IS provided, path determines primary
+    expect(isPrimaryWorktree(rootWorktree, "/repo")).toBe(true);
+    expect(isPrimaryWorktree(externalWorktree, "/repo")).toBe(false);
+    expect(isPrimaryWorktree(worktree, "/repo")).toBe(false);
+  });
+
+  it("normalizes paths for comparison across trailing separators, slashes, and case", () => {
+    // Trailing slashes
+    expect(isSameWorktreePath("/repo/main/", "/repo/main")).toBe(true);
+    expect(isSameWorktreePath("/repo/main///", "/repo/main")).toBe(true);
+
+    // Windows backslashes
+    expect(isSameWorktreePath("C:\\projects\\ferryx", "C:/projects/ferryx")).toBe(true);
+    expect(isSameWorktreePath("C:\\projects\\ferryx\\", "C:/projects/ferryx")).toBe(true);
+
+    // Case-insensitivity when enabled (Windows and macOS)
+    expect(normalizeWorktreePath("C:\\Projects\\Ferryx", true)).toBe("c:/projects/ferryx");
+    expect(isSameWorktreePath("C:\\Projects\\Ferryx", "c:/projects/ferryx", true)).toBe(true);
+    expect(isSameWorktreePath("/Volumes/T9-Mac/Repo", "/volumes/t9-mac/repo", true)).toBe(true);
+
+    // Case-preservation when disabled (Linux)
+    expect(normalizeWorktreePath("/home/user/Repo", false)).toBe("/home/user/Repo");
+    expect(isSameWorktreePath("/home/user/Repo", "/home/user/repo", false)).toBe(false);
   });
 });

@@ -113,10 +113,25 @@ export function TerminalPane({
   const isSshExpired = isSshSession && !isSpawning && remoteState === "expired";
   const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
   const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
-  const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";
+
+  const affordance = getAgentReconnectAffordance(session, sessions);
+  // A daemon that has not answered yet is a transport-level outage, not a dead shell. Treat it as
+  // reconnecting so the pane never claims "Shell exited" for a session that is still alive. An
+  // in-flight reconnect transaction (`affordance.isReconnecting`) already owns its own progress
+  // affordance, so it is excluded here and keeps rendering the disabled retry button.
+  const isLocalReconnecting =
+    !isSshSession && !affordance.isReconnecting && (remoteState === "reconnecting" || isSpawning);
+  const isLocalDisconnected = !isSshSession && !isSpawning && (remoteState === "disconnected" || remoteState === "missing");
+  const isLocalExited = !isSshSession && (
+    isLocalReconnecting ||
+    isLocalDisconnected ||
+    session.backendSessionId === null ||
+    isStandbyBackendSessionId(session.backendSessionId) ||
+    session.lifecycle === "exited"
+  );
+  const isExited = isSshSession ? showSshOverlay : isLocalExited;
   const isSuspended =
     !isExited && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
-  const affordance = getAgentReconnectAffordance(session, sessions);
   const isAgentSession = Boolean(
     (session.agentType && session.agentType.trim().length > 0) ||
       affordance.agentType ||
@@ -131,7 +146,12 @@ export function TerminalPane({
   const logo = resolveAgentLogo(effectiveAgentType);
   const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
-  const isPending = pendingLocal || isSpawning || (isSshSession ? isSshReconnecting : affordance.isReconnecting);
+  const isPending = pendingLocal || isSpawning || (isSshSession ? isSshReconnecting : affordance.isReconnecting || isLocalReconnecting);
+  const canReattach = Boolean(
+    session.backendSessionId &&
+    !isStandbyBackendSessionId(session.backendSessionId) &&
+    onReconnect
+  );
   const affordanceDescription = resolveAffordanceErrorDescription(affordance);
   const errorDescription =
     replacementError ??
@@ -156,10 +176,13 @@ export function TerminalPane({
       }
       return;
     }
-    if (!affordance.canReconnect || !onReconnect) return;
+    if ((!affordance.canReconnect && !canReattach) || !onReconnect) return;
     setPendingLocal(true);
+    setReplacementError(null);
     try {
       await onReconnect(session.id);
+    } catch (error) {
+      setReplacementError(toIpcError(error).message);
     } finally {
       setPendingLocal(false);
     }
@@ -343,9 +366,11 @@ export function TerminalPane({
                     : isSshLegacyLost
                       ? "Legacy SSH session lost"
                       : "SSH disconnected"
-                : isAgentSession
-                  ? "Session disconnected"
-                  : "Shell exited"}
+                : isLocalReconnecting
+                  ? "Reconnecting session..."
+                  : isAgentSession
+                    ? "Session disconnected"
+                    : "Shell exited"}
             </h2>
 
             {isAgentSession ? (
@@ -396,7 +421,12 @@ export function TerminalPane({
               </div>
             ) : isAgentSession ? (
               <div className="mt-4 flex w-full flex-col items-center gap-2">
-                {affordance.canReconnect ? (
+                {isLocalReconnecting ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                    <span>Reconnecting session...</span>
+                  </div>
+                ) : affordance.canReconnect ? (
                   <Button
                     type="button"
                     size="sm"
@@ -427,6 +457,29 @@ export function TerminalPane({
                       <span>Reconnect</span>
                     )}
                   </Button>
+                ) : canReattach ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={isPending}
+                    aria-busy={isPending}
+                    aria-label={isPending ? `Reconnecting ${agentName} session` : `Reconnect ${agentName} session`}
+                    onClick={handleReconnect}
+                    className="w-full max-w-[220px]"
+                  >
+                    {isPending ? (
+                      <>
+                        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                        <span>Reconnecting session...</span>
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="size-3.5" aria-hidden="true" />
+                        <span>Reconnect</span>
+                      </>
+                    )}
+                  </Button>
                 ) : isPending ? (
                   <Button
                     type="button"
@@ -455,18 +508,51 @@ export function TerminalPane({
                 ) : null}
               </div>
             ) : (
-              <div className="mt-4 flex w-full flex-col items-center">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={isPending || !onOpenNewShell}
-                  aria-label="Open new shell"
-                  onClick={handleOpenNewShell}
-                  className="w-full max-w-[220px]"
-                >
-                  <span>Open new shell</span>
-                </Button>
+              <div className="mt-4 flex w-full flex-col items-center gap-2">
+                {isLocalReconnecting ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                    <span>Reconnecting to session...</span>
+                  </div>
+                ) : (
+                  <>
+                    {canReattach ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={isPending}
+                        aria-busy={isPending}
+                        aria-label={isPending ? "Reconnecting shell" : "Reconnect shell"}
+                        onClick={handleReconnect}
+                        className="w-full max-w-[220px]"
+                      >
+                        {isPending ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                            <span>Reconnecting...</span>
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="size-3.5" aria-hidden="true" />
+                            <span>Reconnect shell</span>
+                          </>
+                        )}
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={canReattach ? "ghost" : "secondary"}
+                      disabled={isPending || !onOpenNewShell}
+                      aria-label="Open new shell"
+                      onClick={handleOpenNewShell}
+                      className="w-full max-w-[220px]"
+                    >
+                      <span>Open new shell</span>
+                    </Button>
+                  </>
+                )}
               </div>
             )}
           </div>

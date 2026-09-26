@@ -29,6 +29,21 @@ use crate::remote::account_protocol::{
 
 pub const GRANT_TTL: Duration = Duration::from_secs(600);
 
+/// Freshness window for determining machine online status from `last_seen_at`.
+///
+/// In Ferryx, daemons establish active presence through control channels and periodic
+/// keepalives. When the account service is hosted separately or without a direct
+/// in-memory handle to the relay's control-channel registry, machine liveness is
+/// derived from the recency of `last_seen_at`.
+///
+/// A 300-second (5-minute) freshness window provides an optimal balance: it tolerates
+/// transient network reconnects, relay restarts, and client backoff cycles (which typically
+/// operate on 30-60 second intervals) without prematurely showing an active daemon as
+/// OFFLINE, while reliably reporting machines offline after 5 minutes of silence.
+pub const MACHINE_ONLINE_FRESHNESS_WINDOW_SECS: u64 = 300;
+
+pub type MachineLivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct AccountState {
     pub data_dir: PathBuf,
     pub origin: String,
@@ -40,6 +55,7 @@ pub struct AccountState {
     login_attempts: Mutex<HashMap<String, Vec<Instant>>>,
     challenges: Mutex<HashMap<String, EnrollChallenge>>,
     signing_key: Mutex<Option<Arc<SigningKey>>>,
+    liveness_probe: Mutex<Option<MachineLivenessProbe>>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +130,34 @@ impl AccountState {
             login_attempts: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
             signing_key: Mutex::new(None),
+            liveness_probe: Mutex::new(None),
         }
+    }
+
+    pub fn with_liveness_probe(self, probe: MachineLivenessProbe) -> Self {
+        *self.liveness_probe.lock() = Some(probe);
+        self
+    }
+
+    pub fn set_liveness_probe(&self, probe: Option<MachineLivenessProbe>) {
+        *self.liveness_probe.lock() = probe;
+    }
+
+    pub fn is_machine_online(&self, machine: &MachineRecord, now: u64) -> bool {
+        if let Some(ref probe) = *self.liveness_probe.lock() {
+            if probe(&machine.machine_id) {
+                return true;
+            }
+        }
+        if machine.last_seen_at == 0 {
+            return false;
+        }
+        machine.last_seen_at.abs_diff(now) <= MACHINE_ONLINE_FRESHNESS_WINDOW_SECS
+    }
+
+    pub fn machine_view(&self, record: &MachineRecord, now: u64) -> MachineViewResponse {
+        let online = self.is_machine_online(record, now);
+        MachineViewResponse::from_record(record, online)
     }
 
     pub fn signing_key(&self) -> Result<Arc<SigningKey>, String> {
@@ -327,6 +370,23 @@ pub struct MachineViewResponse {
     pub last_seen_at: u64,
 }
 
+impl MachineViewResponse {
+    pub fn from_record(record: &MachineRecord, online: bool) -> Self {
+        Self {
+            machine_record_id: record.machine_record_id.clone(),
+            machine_id: record.machine_id.clone(),
+            display_name: record.display_name.clone(),
+            public_key: record.public_key.clone(),
+            attach_public_key: record.attach_public_key.clone(),
+            relay_origin: record.relay_origin.clone(),
+            platform: record.platform.clone(),
+            online,
+            enrollment_epoch: record.enrollment_epoch,
+            last_seen_at: record.last_seen_at,
+        }
+    }
+}
+
 fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
     value
@@ -388,6 +448,20 @@ pub fn enrolled_machine_by_id(state: &AccountState, machine_id: &str) -> Option<
         })
         .ok()
         .flatten()
+}
+
+pub fn touch_enrolled_machine(state: &AccountState, machine_id: &str) -> bool {
+    let now = now_secs();
+    state
+        .mutate(|store| {
+            if let Some(m) = store.machines.values_mut().find(|m| m.machine_id == machine_id) {
+                m.last_seen_at = now;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .unwrap_or(false)
 }
 
 async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiError> {
@@ -731,12 +805,13 @@ pub async fn list_machines(
     headers: HeaderMap,
 ) -> Result<Json<Vec<MachineViewResponse>>, ApiError> {
     let user = require_user(&state, &headers)?;
+    let now = now_secs();
     state.read(|store| {
         Ok(store
             .machines
             .values()
             .filter(|machine| machine.owner_user_id == user.user_id)
-            .map(MachineViewResponse::from)
+            .map(|machine| state.machine_view(machine, now))
             .collect())
     })
     .map(Json)
@@ -744,18 +819,10 @@ pub async fn list_machines(
 
 impl From<&MachineRecord> for MachineViewResponse {
     fn from(record: &MachineRecord) -> Self {
-        Self {
-            machine_record_id: record.machine_record_id.clone(),
-            machine_id: record.machine_id.clone(),
-            display_name: record.display_name.clone(),
-            public_key: record.public_key.clone(),
-            attach_public_key: record.attach_public_key.clone(),
-            relay_origin: record.relay_origin.clone(),
-            platform: record.platform.clone(),
-            online: false,
-            enrollment_epoch: record.enrollment_epoch,
-            last_seen_at: record.last_seen_at,
-        }
+        let now = now_secs();
+        let online = record.last_seen_at > 0
+            && record.last_seen_at.abs_diff(now) <= MACHINE_ONLINE_FRESHNESS_WINDOW_SECS;
+        Self::from_record(record, online)
     }
 }
 
@@ -1812,6 +1879,87 @@ mod tests {
         assert_eq!(
             grants_after_no_delivered, 0,
             "absent delivered response must not leave orphan grant in store"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_online_status_freshness_and_liveness_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let now = now_secs();
+
+        // 1. Fresh machine (last_seen_at = now) -> online: true
+        let (session_token, fresh_machine) = setup_test_user_and_machine(&state, "https://relay.test");
+        let view = state.machine_view(&fresh_machine, now);
+        assert!(view.online, "a machine seen within the freshness window must report online: true");
+
+        // From<&MachineRecord> fallback also reports true for fresh machine
+        let from_view = MachineViewResponse::from(&fresh_machine);
+        assert!(from_view.online, "From conversion must also report online: true for fresh machine");
+
+        // 2. Stale machine (last_seen_at = now - 600s, beyond 300s window) -> online: false
+        let mut stale_machine = fresh_machine.clone();
+        stale_machine.last_seen_at = now.saturating_sub(MACHINE_ONLINE_FRESHNESS_WINDOW_SECS + 300);
+        let stale_view = state.machine_view(&stale_machine, now);
+        assert!(!stale_view.online, "a stale machine must report online: false");
+
+        // 3. Machine never seen (last_seen_at = 0) -> online: false
+        let mut unseen_machine = fresh_machine.clone();
+        unseen_machine.last_seen_at = 0;
+        let unseen_view = state.machine_view(&unseen_machine, now);
+        assert!(!unseen_view.online, "a machine with last_seen_at == 0 must report online: false");
+
+        // 4. Stale machine with live control channel probe -> online: true
+        let live_machine_id = stale_machine.machine_id.clone();
+        state.set_liveness_probe(Some(Arc::new(move |id| id == live_machine_id)));
+        let live_view = state.machine_view(&stale_machine, now);
+        assert!(
+            live_view.online,
+            "a machine with a live control channel probe must report online: true even if last_seen_at is stale"
+        );
+
+        // 5. Test through HTTP GET /api/account/v1/machines endpoint
+        state.set_liveness_probe(None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+
+        let machines_response = list_machines(State(state.clone()), headers)
+            .await
+            .expect("list_machines succeeds")
+            .0;
+        assert_eq!(machines_response.len(), 1);
+        assert!(
+            machines_response[0].online,
+            "list_machines endpoint must report newly enrolled machine online: true"
+        );
+
+        // Update the machine in store to be stale
+        state
+            .mutate(|store| {
+                if let Some(m) = store.machines.get_mut(&fresh_machine.machine_record_id) {
+                    m.last_seen_at = now.saturating_sub(MACHINE_ONLINE_FRESHNESS_WINDOW_SECS + 100);
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+        let stale_response = list_machines(State(state.clone()), headers2)
+            .await
+            .expect("list_machines succeeds")
+            .0;
+        assert_eq!(stale_response.len(), 1);
+        assert!(
+            !stale_response[0].online,
+            "list_machines endpoint must report stale machine online: false"
         );
     }
 }

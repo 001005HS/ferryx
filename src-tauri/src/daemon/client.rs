@@ -645,9 +645,14 @@ pub struct DaemonAttachment {
 }
 
 /// Pure function determining whether a daemon self-upgrade should be requested.
-/// Returns `true` if:
-/// 1. `daemon_version` is provided and differs from `own_version` (CalVer package date version)
+///
+/// Returns `true` only when this binary is strictly NEWER than the running daemon:
+/// 1. `daemon_version` is provided and orders BEFORE `own_version` (CalVer package date version).
 /// 2. Or, for legacy daemons without version metadata, fallback to `own_mtime > daemon_mtime`.
+///
+/// The comparison is deliberately asymmetric. A symmetric `!=` made an OLDER client reconnecting
+/// to a NEWER daemon request a downgrade, which produced a second handover hop moments after the
+/// first and destroyed sessions the first hop had not finished adopting.
 pub fn should_request_upgrade(
     daemon_version: Option<&str>,
     own_version: &str,
@@ -655,12 +660,36 @@ pub fn should_request_upgrade(
     own_mtime: Option<u64>,
 ) -> bool {
     if let Some(daemon_ver) = daemon_version {
-        return daemon_ver != own_version;
+        return match compare_calver(own_version, daemon_ver) {
+            Some(std::cmp::Ordering::Greater) => true,
+            Some(_) => false,
+            // Unparseable on either side: fall back to inequality so a genuinely different build
+            // still upgrades rather than silently pinning an old daemon forever.
+            None => daemon_ver != own_version,
+        };
     }
     match (daemon_mtime, own_mtime) {
         (Some(daemon), Some(own)) => own > daemon,
         _ => false,
     }
+}
+
+/// Orders two CalVer strings (`YYYY.MDD.N`) numerically per dot-separated component.
+/// Returns `None` when either side is not fully numeric, so callers can pick their own fallback.
+fn compare_calver(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let parse = |value: &str| -> Option<Vec<u64>> {
+        value.split('.').map(|part| part.parse::<u64>().ok()).collect()
+    };
+    let (left_parts, right_parts) = (parse(left)?, parse(right)?);
+    let width = left_parts.len().max(right_parts.len());
+    for index in 0..width {
+        let l = left_parts.get(index).copied().unwrap_or(0);
+        let r = right_parts.get(index).copied().unwrap_or(0);
+        if l != r {
+            return Some(l.cmp(&r));
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 pub(crate) fn parse_attach_error_response(
@@ -4647,7 +4676,6 @@ mod tests {
             None,
             None
         ));
-
         // Version identical -> false
         assert!(!should_request_upgrade(
             Some("2026.902.2"),
@@ -4688,6 +4716,69 @@ mod tests {
             None
         ));
         assert!(!should_request_upgrade(None, "2026.902.2", None, None));
+    }
+
+    /// A handover that destroyed 26 of 37 live sessions started here: an older GUI reconnecting to
+    /// the freshly upgraded daemon asked for ANOTHER upgrade, because the comparison was `!=`
+    /// rather than "am I newer". The second hop killed sessions the first had not yet adopted.
+    #[test]
+    fn an_older_binary_never_requests_an_upgrade_from_a_newer_daemon() {
+        // Older client, newer daemon: must NOT trigger a downgrade hop.
+        assert!(!should_request_upgrade(
+            Some("2026.925.9"),
+            "2026.925.8",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2026.926.1"),
+            "2026.925.9",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2027.101.1"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // The forward direction still upgrades.
+        assert!(should_request_upgrade(
+            Some("2026.925.8"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // Component width differences order numerically, not lexicographically:
+        // "2026.925.10" is newer than "2026.925.9" even though it sorts earlier as a string.
+        assert!(should_request_upgrade(
+            Some("2026.925.9"),
+            "2026.925.10",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2026.925.10"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // A non-numeric build string cannot be ordered, so inequality remains the fallback.
+        assert!(should_request_upgrade(
+            Some("dev-local"),
+            "2026.925.9",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("dev-local"),
+            "dev-local",
+            None,
+            None
+        ));
     }
 
     #[tokio::test]

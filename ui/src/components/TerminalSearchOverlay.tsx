@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { scrollNativeTerminal } from "../lib/tauri";
 import { IconButton } from "./ui/IconButton";
 
 export type NativeTerminalSearchMatch = {
@@ -95,6 +96,10 @@ export function TerminalSearchOverlay({
           setNativeMatches(matches);
           setResultCount(matches.length);
           setResultIndex(0);
+          const first = matches[0];
+          if (first) {
+            void scrollNativeTerminal(sessionId, { type: "row", offset: first.row }).catch(() => {});
+          }
         } else {
           setNativeMatches([]);
           setResultCount(0);
@@ -135,13 +140,18 @@ export function TerminalSearchOverlay({
       if (nativeMatches.length > 0) {
         setResultIndex((prev) => {
           const current = prev ?? 0;
-          return (current + 1) % nativeMatches.length;
+          const next = (current + 1) % nativeMatches.length;
+          const target = nativeMatches[next];
+          if (target) {
+            void scrollNativeTerminal(sessionId, { type: "row", offset: target.row }).catch(() => {});
+          }
+          return next;
         });
       } else {
         performNativeSearch(query);
       }
     }
-  }, [nativeMatches.length, performNativeSearch, query, sessionId]);
+  }, [nativeMatches, performNativeSearch, query, sessionId]);
 
   const handleFindPrevious = useCallback(() => {
     if (!query) return;
@@ -149,13 +159,18 @@ export function TerminalSearchOverlay({
       if (nativeMatches.length > 0) {
         setResultIndex((prev) => {
           const current = prev ?? 0;
-          return (current - 1 + nativeMatches.length) % nativeMatches.length;
+          const prevIndex = (current - 1 + nativeMatches.length) % nativeMatches.length;
+          const target = nativeMatches[prevIndex];
+          if (target) {
+            void scrollNativeTerminal(sessionId, { type: "row", offset: target.row }).catch(() => {});
+          }
+          return prevIndex;
         });
       } else {
         performNativeSearch(query);
       }
     }
-  }, [nativeMatches.length, performNativeSearch, query, sessionId]);
+  }, [nativeMatches, performNativeSearch, query, sessionId]);
 
   const handleQueryChange = (newQuery: string) => {
     setQuery(newQuery);

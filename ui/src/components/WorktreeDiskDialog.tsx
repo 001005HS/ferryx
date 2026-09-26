@@ -11,7 +11,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "../lib/cn";
-import { WORKTREE_DISK_UNUSED_DAYS_KEY } from "../lib/storageKeys";
+import { getMigratedItem, PROJECTS_STORAGE_KEY, WORKTREE_DISK_UNUSED_DAYS_KEY } from "../lib/storageKeys";
 import {
   cancelWorktreeDiskScan,
   deleteWorktree,
@@ -21,6 +21,7 @@ import {
   previewWorktreeDelete,
   startWorktreeDiskScan,
   toIpcError,
+  type RegisteredProject,
 } from "../lib/tauri";
 import {
   worktreeIdentity,
@@ -34,7 +35,9 @@ import {
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
 import { WorktreeDeleteDialog } from "./WorktreeDeleteDialog";
+import { isPrimaryWorktree, isSameWorktreePath, normalizeWorktreePath } from "./WorktreeList";
 
+export { isPrimaryWorktree, isSameWorktreePath, normalizeWorktreePath };
 export type { DiskScanSnapshot, DiskScanStatus, WorktreeDiskRow };
 
 export type WorktreeDiskServices = {
@@ -50,6 +53,7 @@ export type WorktreeDiskServices = {
 export type WorktreeDiskDialogProps = {
   workspaceId: string;
   projectName?: string;
+  repoRoot?: string | null;
   onClose: () => void;
   services?: WorktreeDiskServices;
 };
@@ -85,12 +89,8 @@ export function worktreeSlug(worktree: Worktree): string {
   return parts[parts.length - 1] || worktree.path;
 }
 
-export function isPrimaryWorktree(worktree: Worktree): boolean {
-  return worktreeIdentity(worktree) === null;
-}
-
-export function isCleanupCandidate(row: WorktreeDiskRow, unusedDaysThreshold: number): boolean {
-  if (isPrimaryWorktree(row.worktree)) return false;
+export function isCleanupCandidate(row: WorktreeDiskRow, unusedDaysThreshold: number, repoRoot?: string | null): boolean {
+  if (isPrimaryWorktree(row.worktree, repoRoot)) return false;
   if (row.worktree.prunable !== null) return true;
   if (row.lastCommitAt !== null) {
     const ageSeconds = Date.now() / 1000 - row.lastCommitAt;
@@ -99,8 +99,8 @@ export function isCleanupCandidate(row: WorktreeDiskRow, unusedDaysThreshold: nu
   return false;
 }
 
-export function candidateReason(row: WorktreeDiskRow, unusedDaysThreshold: number): string | null {
-  if (isPrimaryWorktree(row.worktree)) return null;
+export function candidateReason(row: WorktreeDiskRow, unusedDaysThreshold: number, repoRoot?: string | null): string | null {
+  if (isPrimaryWorktree(row.worktree, repoRoot)) return null;
   if (row.worktree.prunable !== null) return "Prunable";
   if (row.lastCommitAt !== null) {
     const ageSeconds = Date.now() / 1000 - row.lastCommitAt;
@@ -161,10 +161,26 @@ function createDefaultServices(): WorktreeDiskServices {
 export function WorktreeDiskDialog({
   workspaceId,
   projectName,
+  repoRoot,
   onClose,
   services,
 }: WorktreeDiskDialogProps) {
   const resolvedServices = useMemo(() => services ?? createDefaultServices(), [services]);
+  const resolvedRepoRoot = useMemo(() => {
+    if (repoRoot !== undefined) return repoRoot;
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const stored: unknown = JSON.parse(getMigratedItem(PROJECTS_STORAGE_KEY) ?? "[]");
+        if (Array.isArray(stored)) {
+          const found = stored.find((p: RegisteredProject) => p?.workspaceId === workspaceId);
+          if (found?.repoRoot) return found.repoRoot;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }, [repoRoot, workspaceId]);
 
   const [snapshot, setSnapshot] = useState<DiskScanSnapshot | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(null);
@@ -351,8 +367,8 @@ export function WorktreeDiskDialog({
   }, [snapshot?.rows]);
 
   const candidateCount = useMemo(() => {
-    return (snapshot?.rows ?? []).filter((row) => isCleanupCandidate(row, unusedDays)).length;
-  }, [snapshot?.rows, unusedDays]);
+    return (snapshot?.rows ?? []).filter((row) => isCleanupCandidate(row, unusedDays, resolvedRepoRoot)).length;
+  }, [snapshot?.rows, unusedDays, resolvedRepoRoot]);
 
   const isScanning = snapshot?.status === "running";
   const isFailed = snapshot?.status === "failed" || error !== null;
@@ -591,9 +607,9 @@ export function WorktreeDiskDialog({
                 <tbody className="divide-y divide-border/60">
                   {sortedRows.map((row) => {
                     const slug = worktreeSlug(row.worktree);
-                    const isRoot = isPrimaryWorktree(row.worktree);
-                    const isCandidate = isCleanupCandidate(row, unusedDays);
-                    const reason = candidateReason(row, unusedDays);
+                    const isRoot = isPrimaryWorktree(row.worktree, resolvedRepoRoot);
+                    const isCandidate = isCleanupCandidate(row, unusedDays, resolvedRepoRoot);
+                    const reason = candidateReason(row, unusedDays, resolvedRepoRoot);
                     const isDirty = row.isDirty === true;
 
                     return (

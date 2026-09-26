@@ -109,6 +109,10 @@ const native = {
 
 vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  // The notification coordinator re-consults the authoritative OS permission status before it
+  // trusts an earlier denial, so the mock has to answer it or every dispatch rejects.
+  getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" })),
+  requestNotificationPermission: vi.fn(async () => ({ granted: true })),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
   watchDagPairedProject: vi.fn((workspaceId: string, remotePath: string) =>
     Promise.resolve({ projectPath: `paired:${workspaceId}:${remotePath}`, runs: [] }),
@@ -283,12 +287,18 @@ vi.mock("./components/TerminalSplitView", () => ({
   },
 }));
 
+// The factory must not close over ordinary module-scope bindings: `vi.mock` is hoisted above
+// them, and `workspaceStore` now imports this store at module scope, so the factory runs before
+// a plain `const` would be initialised. `vi.hoisted` lifts the box alongside the mock.
+const inboxBox = vi.hoisted(() => ({ current: null as ReturnType<typeof import("./lib/notificationCenter/notificationCenterStore").createNotificationCenterStore> | null }));
+vi.mock("./lib/notificationCenter/notificationCenterStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/notificationCenter/notificationCenterStore")>();
+  if (!inboxBox.current) inboxBox.current = actual.createNotificationCenterStore();
+  return { ...actual, get notificationCenterStore() { return inboxBox.current!; } };
+});
 const inboxModule = await vi.importActual<typeof import("./lib/notificationCenter/notificationCenterStore")>("./lib/notificationCenter/notificationCenterStore");
-let inbox = inboxModule.createNotificationCenterStore();
-vi.mock("./lib/notificationCenter/notificationCenterStore", () => ({
-  ...inboxModule,
-  get notificationCenterStore() { return inbox; },
-}));
+if (!inboxBox.current) inboxBox.current = inboxModule.createNotificationCenterStore();
+let inbox = inboxBox.current;
 const { notificationEntryId } = await import("./lib/notificationCenter/types");
 const { NotificationCenterButton } = await import("./components/notification/NotificationCenterButton");
 const { App } = await import("./App");
@@ -355,6 +365,7 @@ describe("App notification coordinator wiring", () => {
     inbox.dispose();
     localStorage.clear();
     inbox = inboxModule.createNotificationCenterStore();
+    inboxBox.current = inbox;
     sidebarProps = {};
     renderNotificationCenter = false;
     saveNotificationSettings({ enabled: true, terminalBell: true, agentTaskComplete: true });
@@ -1090,6 +1101,7 @@ describe("App notification coordinator wiring", () => {
       cleanup();
       inbox.dispose();
       inbox = inboxModule.createNotificationCenterStore();
+    inboxBox.current = inbox;
       await act(async () => { render(<App />); });
       expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
     });
