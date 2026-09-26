@@ -1045,3 +1045,227 @@ async fn a_multi_session_v5_handover_preserves_every_session_id() {
         );
     }
 }
+
+/// Kills a daemon the harness did not launch (a successor spawned by its predecessor), so a
+/// failing assertion cannot leak it.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(self.0 as i32, libc::SIGKILL);
+        }
+    }
+}
+
+/// Connects to whichever daemon now owns the canonical socket and returns its pid.
+async fn current_daemon_pid(socket_path: &Path, not_pid: u32, budget: Duration) -> u32 {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Ok(stream) = UnixStream::connect(socket_path).await {
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut hs = serde_json::to_string(&DaemonRequest::Handshake {
+                version: DAEMON_PROTOCOL_VERSION,
+                token: None,
+            })
+            .expect("serialize handshake");
+            hs.push('\n');
+            if write_half.write_all(hs.as_bytes()).await.is_ok() {
+                let mut line = String::new();
+                if let Ok(Ok(n)) =
+                    timeout(Duration::from_secs(5), reader.read_line(&mut line)).await
+                {
+                    if n > 0 {
+                        if let Ok(DaemonResponse::HandshakeOk { pid, .. }) =
+                            serde_json::from_str(line.trim())
+                        {
+                            if pid != not_pid {
+                                return pid;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no successor answered on the canonical socket within {budget:?}"
+        );
+        // The successor binds the socket on its own schedule and emits no event this test can
+        // subscribe to, so readiness is polled on a short bounded interval.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The path an app update takes: one UpgradeBinary request to a busy daemon, which prepares the
+/// handover and spawns its own successor. Every session id must survive and stay interactive.
+#[tokio::test]
+async fn an_upgrade_binary_request_hands_every_session_to_the_new_daemon() {
+    // 1. Launch D1 and spawn 4 interactive /bin/sh sessions.
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let canonical_repo = daemons.repo();
+    let pid_d1 = daemons.pid(d1);
+
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("Client connect to D1");
+    let ws_id = "ws-upgrade-binary";
+    client1
+        .register_workspace(ws_id, &canonical_repo)
+        .await
+        .expect("register ws on D1");
+
+    // 2. Spawn 4 /bin/sh sessions with request ids format!("req-upgrade-s{i}").
+    let mut sessions = Vec::new();
+    for i in 0..4 {
+        let client_req_id = format!("req-upgrade-s{i}");
+        let session_id = client1
+            .spawn_with_shell(
+                &client_req_id,
+                ws_id,
+                80,
+                24,
+                Some("/bin/sh"),
+                Some(&canonical_repo),
+            )
+            .await
+            .expect("spawn shell on D1");
+
+        let mut attach = TestAttachStream::attach(&socket_path, pid_d1, &session_id, None)
+            .await
+            .expect("attach to session on D1");
+
+        client1
+            .write_input(&session_id, b"stty -echo\n")
+            .await
+            .expect("disable echo");
+
+        client1
+            .write_input(&session_id, b"printf 'V5_CHILD_PID=%s\\n' \"$$\"\n")
+            .await
+            .expect("report child pid");
+
+        let child_pid = attach
+            .await_child_pid(Duration::from_secs(10))
+            .await
+            .expect("shell must report its pid");
+        assert!(
+            process_is_alive(child_pid),
+            "session child {child_pid} must be alive"
+        );
+
+        sessions.push((session_id, child_pid));
+    }
+
+    // 3. before = list_sessions() on D1, then before_sorted
+    let before = client1.list_sessions().await.expect("list_sessions on D1");
+    let mut before_sorted = before.clone();
+    before_sorted.sort();
+
+    // 4. Send the upgrade request, using the daemon's own binary as the new binary
+    let upgrade = client1
+        .send_request(&DaemonRequest::UpgradeBinary {
+            new_binary_path: Some(env!("CARGO_BIN_EXE_ferryx").to_string()),
+        })
+        .await
+        .expect("UpgradeBinary on D1");
+    assert!(
+        matches!(upgrade, DaemonResponse::UpgradeScheduled),
+        "a busy daemon must schedule a handover, got {upgrade:?}"
+    );
+
+    // 5. Connect to the successor on canonical socket, guard with KillOnDrop
+    let pid_d2 = current_daemon_pid(&socket_path, pid_d1, Duration::from_secs(60)).await;
+    let _successor = KillOnDrop(pid_d2);
+    assert_ne!(pid_d2, pid_d1, "the successor must be a new process");
+
+    // 6. Wait for D1 to exit with a 20 second budget
+    let d1_child = &mut daemons.children[d1];
+    let exited = timeout(Duration::from_secs(20), async {
+        loop {
+            match d1_child.try_wait() {
+                Ok(Some(_status)) => return true,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(exited, "Predecessor daemon D1 must exit after UpgradeBinary handover");
+
+    // 7. Connect to successor, list sessions, print C6_SESSION_IDS, and assert equality
+    let mut client_d2 = TestDaemonClient::connect(&socket_path, pid_d2)
+        .await
+        .expect("connect to the successor");
+    let after = client_d2.list_sessions().await.expect("list_sessions on D2");
+    let mut after_sorted = after.clone();
+    after_sorted.sort();
+
+    eprintln!("C6_SESSION_IDS case=upgrade-binary before={before_sorted:?} after={after_sorted:?}");
+    assert_eq!(
+        before_sorted, after_sorted,
+        "an UpgradeBinary handover must keep every session id"
+    );
+
+    // 8. For every session: describe_session reports running, process_is_alive(pid),
+    // and split-nonce round trip with UPGRADE_ prefix
+    for (s_id, child_pid) in &sessions {
+        let desc = client_d2
+            .describe_session(s_id)
+            .await
+            .expect("describe_session on D2");
+        assert!(
+            desc.running,
+            "session {s_id} must still be running after handover: {desc:?}"
+        );
+        assert!(
+            process_is_alive(*child_pid),
+            "child process {child_pid} for session {s_id} must survive handover"
+        );
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let split = nonce / 2;
+        let rest = nonce - split;
+        let post_marker = format!("UPGRADE_POST_{s_id}_{split}_{rest}");
+        let end_marker = format!("UPGRADE_END_{s_id}_{split}_{rest}");
+
+        let mut attach_d2 = TestAttachStream::attach(&socket_path, pid_d2, s_id, None)
+            .await
+            .expect("attach to transferred session on D2");
+
+        client_d2
+            .write_input(
+                s_id,
+                format!(
+                    "printf 'UPGRADE_%s_%s\\n' 'POST_{s_id}_{split}' '{rest}'; printf 'UPGRADE_%s_%s\\n' 'END_{s_id}_{split}' '{rest}'\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write split-nonce input on D2");
+
+        let round_trip = attach_d2
+            .await_pattern_in_history_or_stream(&end_marker, Duration::from_secs(10))
+            .await
+            .expect("post-handover round-trip must complete on D2");
+
+        assert_eq!(
+            round_trip.matches(&post_marker).count(),
+            1,
+            "post-handover marker must arrive exactly once: {round_trip}"
+        );
+
+        assert!(
+            process_is_alive(*child_pid),
+            "child {child_pid} must survive the post-handover round-trip"
+        );
+    }
+}
+
