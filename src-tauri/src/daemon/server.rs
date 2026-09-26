@@ -3491,19 +3491,53 @@ impl DaemonServer {
                                 let sessions = self.terminal_service.list_sessions();
                                 let requested = sessions.len();
                                 let mut count = 0;
+                                let mut failures: Vec<String> = Vec::new();
                                 let transfer_id = uuid::Uuid::new_v4().to_string();
                                 let mut seq = 1;
                                 for session_id in sessions {
-                                    if let Ok(export) = self.terminal_service.pty_manager().export_session(&session_id) {
-                                        if crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export).is_ok() {
-                                            count += 1;
-                                            seq += 1;
+                                    // A session dropped here dies when this predecessor retires: it
+                                    // has already promised the successor a handover, and nothing
+                                    // downstream can recover a session that was never sent. Name
+                                    // every casualty instead of silently skipping it.
+                                    match self.terminal_service.pty_manager().export_session(&session_id) {
+                                        Ok(export) => {
+                                            match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
+                                                Ok(()) => {
+                                                    count += 1;
+                                                    seq += 1;
+                                                }
+                                                Err(error) => {
+                                                    tracing::error!(
+                                                        session_id = %session_id,
+                                                        %error,
+                                                        "Failed to send a session to the successor; it will not survive this handover"
+                                                    );
+                                                    failures.push(format!("{session_id}: send failed: {error}"));
+                                                }
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(
+                                                session_id = %session_id,
+                                                %error,
+                                                "Failed to export a session for handover; it will not survive this handover"
+                                            );
+                                            failures.push(format!("{session_id}: export failed: {error}"));
                                         }
                                     }
                                 }
                                 let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
                                 // The gap between what this predecessor was asked for and what it
                                 // could actually export is the shape of a lossy handover.
+                                if !failures.is_empty() {
+                                    tracing::error!(
+                                        requested,
+                                        transferred = count,
+                                        lost = failures.len(),
+                                        casualties = %failures.join("; "),
+                                        "Handover will lose sessions: they could not be exported or sent"
+                                    );
+                                }
                                 tracing::info!(
                                     requested,
                                     transferred = count,
