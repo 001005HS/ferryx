@@ -14,6 +14,7 @@ import {
   snapBoundsToDevicePixels,
 } from "./NativeTerminalPane";
 import {
+  NativeTerminalQueueOverflowError,
   getTerminalInputDropCount,
   getTerminalInputDropTotals,
   resetTerminalInputDropCountsForTest,
@@ -1745,6 +1746,30 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     } finally {
       consoleErrorSpy.mockRestore();
     }
+  });
+
+  it("tells the user when input was dropped by queue overflow instead of failing silently", async () => {
+    // A dropped keystroke that says nothing is the worst outcome: the user believes they typed it.
+    const session = createSession("term-session-overflow");
+    const { getByTestId, getByRole } = render(
+      <NativeTerminalPane sessionId="term-session-overflow" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    await act(async () => {});
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        throw new NativeTerminalQueueOverflowError();
+      }
+      return undefined;
+    });
+
+    await act(async () => {
+      fireEvent.input(textarea, { target: { value: "q" } });
+    });
+
+    expect(getByRole("alert")).toHaveTextContent("Input dropped");
   });
 
   it("encodes and forwards non-printable control keys on keydown without duplicating printable input", async () => {
