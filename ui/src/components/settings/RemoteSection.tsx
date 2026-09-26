@@ -69,11 +69,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 
 const explanations: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
-  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry.",
-  MACHINE_GRANT_REQUIRED: "Needs machine access. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN; revoked credentials cannot reconnect.",
+  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.",
+  MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
-  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity and PIN scope, then retry. Saved projects have not been removed.",
+  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity and machine grant, then retry. Saved projects have not been removed.",
   OFFLINE: "Machine is offline. Saved projects remain available in the workspace; reconnect to the owning daemon.",
   UNCHECKED: "Check the remote machine capabilities before adding a project.",
   READY: "Machine project capabilities verified.",
@@ -1002,7 +1002,16 @@ export function RemoteSection({
                               size="sm"
                               aria-label={`Re-pair ${host.name}`}
                               disabled={busy}
-                              onClick={() => setRepairHostId(host.hostId)}
+                              onClick={() => {
+                                // An enrolled account machine re-pairs by redeeming a fresh machine grant,
+                                // the same identity-checked path as Connect. Anything else enrolls first.
+                                if (isEnrolledAccountMachine && accountToken) {
+                                  setRepairHostId(null);
+                                  void handleConnectAccountMachine(host);
+                                  return;
+                                }
+                                setRepairHostId(host.hostId);
+                              }}
                             >
                               Re-pair
                             </Button>
@@ -1024,8 +1033,10 @@ export function RemoteSection({
                           </div>
 
                           {repairHostId === host.hostId ? (
-                            <p role="status" data-code="REPAIR_REQUIRES_IDENTITY_SUPPORT" className="text-xs text-muted-foreground">
-                              Obtain a fresh machine-access PIN from the owner. Identity-checked re-pair is not supported by this desktop API yet. No credentials have been replaced. You can explicitly forget credentials and pair a new connection; verify the returned machine identity.
+                            <p role="status" data-code="REPAIR_REQUIRES_ENROLLMENT" className="text-xs text-muted-foreground">
+                              Re-pairing goes through your Ferryx account. Sign in above, issue an enrollment code, and run{" "}
+                              <code className="font-mono">ferryx-cli account enroll --code &lt;code&gt;</code> on that machine. It then
+                              appears in this list and can be connected. No credentials have been replaced.
                             </p>
                           ) : null}
 

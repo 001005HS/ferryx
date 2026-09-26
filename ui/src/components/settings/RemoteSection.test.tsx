@@ -7,6 +7,21 @@ import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type Pa
 import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
 import type { AccountMachineView } from "../../remote/accountSession";
 
+const grantMocks = vi.hoisted(() => ({
+  attachKey: vi.fn(),
+  requestGrant: vi.fn(),
+}));
+
+vi.mock("../../remote/accountAttach", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../remote/accountAttach")>()),
+  getOrCreateAttachKey: grantMocks.attachKey,
+}));
+
+vi.mock("../../remote/accountSession", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../remote/accountSession")>()),
+  requestGrant: grantMocks.requestGrant,
+}));
+
 const { isTauriMock, invokeMock } = vi.hoisted(() => ({
   isTauriMock: vi.fn(() => true),
   invokeMock: vi.fn(),
@@ -926,6 +941,127 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       fireEvent.click(screen.getByRole("button", { name: "Details for Ungranted Account Box" }));
       expect(screen.getByText("unknown")).toBeInTheDocument();
       expect(screen.getByText("needsMachineGrant")).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("re-pair explains the account enrollment path instead of a retired PIN", async () => {
+    const unassociatedHostView: HostView = {
+      hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "legacy-unassociated-box"),
+      machineId: "legacy-unassociated-box",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      displayLabel: "Legacy Box",
+      grantScope: "machine",
+      generation: "1",
+      authStatus: "paired",
+      online: true,
+    };
+    const { store, inventory } = createTestInventory([unassociatedHostView]);
+    await inventory.refresh();
+
+    await act(async () => {
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
+          accountSessionToken="test-token"
+        />,
+      );
+    });
+
+    expect(await screen.findByText("Legacy Box")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Details for Legacy Box" }));
+
+    const repairButton = screen.getByRole("button", { name: "Re-pair Legacy Box" });
+    fireEvent.click(repairButton);
+
+    const statusEl = screen
+      .getAllByRole("status")
+      .find((el) => el.getAttribute("data-code") === "REPAIR_REQUIRES_ENROLLMENT");
+    expect(statusEl).toBeDefined();
+    if (!statusEl) return;
+    expect(statusEl.textContent).toContain("enrollment code");
+    expect(statusEl.textContent).toContain("ferryx-cli account enroll");
+    expect(screen.queryByText(/machine-access PIN/)).toBeNull();
+  });
+
+  it("re-pair on an enrolled account machine re-issues its machine grant", async () => {
+    grantMocks.attachKey.mockResolvedValue({ publicKey: "test-attach-public-key" });
+    grantMocks.requestGrant.mockRejectedValue(new Error("GRANT_STOP_FOR_TEST"));
+
+    const machineScopedMachine: AccountMachineView = {
+      machineRecordId: "rec-machine",
+      machineId: "mach-with-machine-scope",
+      displayName: "Granted Account Box",
+      publicKey: "pk-machine",
+      attachPublicKey: "apk-machine",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      platform: "linux",
+      online: true,
+      enrollmentEpoch: 1,
+      lastSeenAt: Date.now(),
+    };
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [machineScopedMachine],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const grantedHostView: HostView = {
+        hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "mach-with-machine-scope"),
+        machineId: "mach-with-machine-scope",
+        relayOrigin: DEFAULT_RELAY_ORIGIN,
+        displayLabel: "Granted Account Box",
+        grantScope: "machine",
+        generation: "1",
+        authStatus: "paired",
+        online: true,
+      };
+      const { store, inventory } = createTestInventory([grantedHostView]);
+      await inventory.refresh();
+
+      await act(async () => {
+        render(
+          <RemoteSection
+            store={store}
+            inventory={inventory}
+            accountOrigin={DEFAULT_RELAY_ORIGIN}
+            accountSessionToken="test-token"
+          />,
+        );
+      });
+
+      expect(await screen.findByText("Granted Account Box")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Details for Granted Account Box" }));
+
+      const repairButton = screen.getByRole("button", { name: "Re-pair Granted Account Box" });
+      await act(async () => {
+        fireEvent.click(repairButton);
+      });
+
+      expect(grantMocks.requestGrant).toHaveBeenCalledTimes(1);
+      expect(grantMocks.requestGrant).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ grantScope: "machine" }),
+      );
+      expect(screen.queryByRole("status", { name: /REPAIR_REQUIRES_ENROLLMENT/ })).toBeNull();
+      const statusElements = screen.queryAllByRole("status");
+      for (const el of statusElements) {
+        expect(el).not.toHaveAttribute("data-code", "REPAIR_REQUIRES_ENROLLMENT");
+      }
     } finally {
       vi.unstubAllGlobals();
     }

@@ -68,7 +68,7 @@ const explanations: Record<string, string> = {
   MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
-  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity, and PIN scope, then retry. Saved projects have not been removed.",
+  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity, and machine grant, then retry. Saved projects have not been removed.",
   OFFLINE: "Machine is offline. Saved projects remain available in the workspace; reconnect to the owning daemon.",
   UNCHECKED: "Check the remote machine capabilities before adding a project.",
   READY: "Machine project capabilities verified.",
@@ -92,7 +92,7 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
     case "PAIRED_HOST_STALE_GENERATION":
       return "Credentials changed during this request. Refresh the inventory and retry.";
     case "MACHINE_GRANT_REQUIRED":
-      return "Needs machine access. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN.";
+      return explanations.MACHINE_GRANT_REQUIRED;
     case "PAIRED_HOST_UNAUTHORIZED":
     case "UNAUTHORIZED":
       return "Authorization rejected. Check machine permissions and retry.";
@@ -103,7 +103,7 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
       if (typeof error === "object" && error.message && error.message !== code && error.message !== "PAIRED_HOST_UNAVAILABLE") {
         return error.message;
       }
-      return explanations[code] ?? "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry.";
+      return explanations[code] ?? "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.";
   }
 }
 
