@@ -28,7 +28,7 @@ async fn run() {
     let mut input = daemon.stdin.take().unwrap();
     let mut output = BufReader::new(daemon.stdout.take().unwrap());
     for request in [
-        DaemonRequest::Handshake { version: ferryx_lib::daemon::protocol::DAEMON_PROTOCOL_VERSION },
+        DaemonRequest::Handshake { version: ferryx_lib::daemon::protocol::DAEMON_PROTOCOL_VERSION, token: None },
         DaemonRequest::SshPassword { host:host.clone(), password:Some(Password::new(secret.clone())) },
         DaemonRequest::SshPassword { host:host.clone(), password:None },
     ] {
