@@ -2496,7 +2496,15 @@ impl NativeTerminalSurfaceHostState {
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.set_pty_writes_suppressed(true);
                                 if verdict == ReplayVerdict::Rebuild {
-                                    sess.terminal.reset();
+                                    // Keep the grid and scrollback: a reset wiped every line the
+                                    // user was reading. Return the VT parser to ground (CAN, ST,
+                                    // SGR 0; close any open synchronized update) and mark the
+                                    // seam, the way the Gap arm does, then replay on top.
+                                    let _ = sess.terminal.feed(b"\x18\x1b\\\x1b[0m");
+                                    let _ = sess.terminal.finish_synchronized_output();
+                                    let _ = sess.terminal.feed_str(
+                                        "\r\n\x1b[33m[Ferryx: output stream resynced — output below may repeat lines above]\x1b[0m\r\n",
+                                    );
                                 }
                                 let parsed_segments: Vec<HistorySegment> = segments
                                     .into_iter()
@@ -2550,7 +2558,7 @@ impl NativeTerminalSurfaceHostState {
                                         }
                                     }
                                 }
-                                if was_at_bottom || verdict == ReplayVerdict::Rebuild {
+                                if was_at_bottom {
                                     let _ = sess.terminal.scroll_viewport(
                                         crate::native_terminal::ScrollViewport::Bottom,
                                     );
@@ -8230,6 +8238,149 @@ mod tests {
             assert!(
                 !notice_matches.is_empty(),
                 "in-band gap notice line must be present in the terminal"
+            );
+        }
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn lagged_rebuild_preserves_scrollback_and_marks_the_resync() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-lagged-rebuild-preserves-content";
+        let (tx, messages) = tokio::sync::mpsc::channel(10);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: bytes::Bytes::from(
+                (0..30)
+                    .map(|i| format!("scrollback line {i}\r\n"))
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach session");
+
+        // Verify initial content and scrollback are present
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "terminal should have scrollback rows from initial 30 lines"
+            );
+            let matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid");
+            assert!(
+                !matches.is_empty(),
+                "scrollback line 0 should be present before lagged recovery"
+            );
+        }
+
+        // Scroll the viewport up so the user is NOT at the bottom
+        let offset_before = {
+            let mut sessions = state.sessions.lock();
+            let session = sessions.get_mut(session_id).expect("session exists");
+            session
+                .terminal
+                .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
+                .expect("scroll to top");
+            let sb = session.terminal.scrollbar().expect("scrollbar");
+            let max_offset = sb.total.saturating_sub(sb.len);
+            assert!(max_offset > 0, "test setup must have scrollable range");
+            assert_ne!(
+                sb.offset, max_offset,
+                "viewport must not be at bottom before lagged recovery"
+            );
+            sb.offset
+        };
+
+        // Deliver a Lagged recovery that classify_replay must rebuild (replay_is_delta: None)
+        tx.send(DaemonStreamMessage::Lagged {
+            session_id: session_id.into(),
+            requested_after_sequence: 1,
+            available_from_sequence: 50,
+            start_sequence: Some(50),
+            end_sequence: Some(60),
+            history: bytes::Bytes::from_static(b"replayed after overflow\r\n"),
+            segments: Vec::new(),
+            replay_is_delta: None,
+        })
+        .await
+        .expect("send lagged recovery");
+
+        // Await processing of the lagged recovery by waiting for last_sequence update
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut processed = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let sessions = state.sessions.lock();
+            if let Some(session) = sessions.get(session_id) {
+                if session.last_sequence.is_some_and(|seq| seq >= 60) {
+                    processed = true;
+                    break;
+                }
+            }
+        }
+        assert!(processed, "pump task should have processed the lagged message");
+
+        // Assert scrollback survived, resync notice landed, replay content landed, and viewport did not jump
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "scrollback rows must survive the lagged rebuild"
+            );
+            let earlier_matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid for earlier content");
+            assert!(
+                !earlier_matches.is_empty(),
+                "earlier content in scrollback must survive the lagged rebuild"
+            );
+
+            let notice_matches = session
+                .terminal
+                .search_grid("output stream resynced", false)
+                .expect("search grid for resync notice");
+            assert!(
+                !notice_matches.is_empty(),
+                "in-band resync notice line must be present in the terminal"
+            );
+
+            let replay_matches = session
+                .terminal
+                .search_grid("replayed after overflow", false)
+                .expect("search grid for replay content");
+            assert!(
+                !replay_matches.is_empty(),
+                "replayed content must be present in the terminal"
+            );
+
+            let offset_after = session
+                .terminal
+                .scrollbar()
+                .expect("scrollbar")
+                .offset;
+            assert_eq!(
+                offset_after, offset_before,
+                "viewport scroll offset must not jump when user is scrolled up"
             );
         }
 
