@@ -748,8 +748,13 @@ impl PtyManager {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
+        // The reader is stopped so the successor can own the stream, but a failed export leaves
+        // this session behind with a dead reader: still registered, still counted as live, and
+        // producing nothing. Only stop it once the export has actually succeeded, so a failure
+        // leaves the session exactly as it was and the predecessor keeps serving it.
+        let export = session.export_for_transfer_with_hub(hub)?;
         session.stop_reader();
-        session.export_for_transfer_with_hub(hub)
+        Ok(export)
     }
 
     /// Non-unix stub for `export_session`.
@@ -841,6 +846,55 @@ impl PtyManager {
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// A handover on 2026-09-26 moved 18 of 20 sessions; the two casualties left no trace.
+    /// Part of why a failed export is unrecoverable was this ordering: the reader was stopped
+    /// BEFORE the export was attempted, so a session whose export failed stayed registered with a
+    /// dead reader - alive to `list_sessions`, silent to the user, and unrecoverable by the
+    /// predecessor that was still supposed to be serving it.
+    #[tokio::test]
+    async fn a_failed_export_leaves_the_session_readable_by_the_predecessor() {
+        let manager = PtyManager::new();
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+
+        let session = manager.get_session(&session_id).expect("session registered");
+        assert!(
+            !session.is_reader_finished(),
+            "a freshly spawned session must have a live reader"
+        );
+
+        // Force the export to fail the way it fails in the field: the master descriptor is gone,
+        // so there is nothing to hand the successor.
+        session.close_io();
+        let failed = manager.export_session(&session_id);
+        assert!(failed.is_err(), "exporting a session with no master must fail");
+        assert!(
+            !session.is_reader_finished(),
+            "a FAILED export must leave the reader running: this session is staying with the \
+             predecessor, and stopping its reader silently strands it"
+        );
+
+        let _ = manager.close_session(&session_id);
+    }
+
+    /// The other half of the contract: a SUCCESSFUL export does stop the reader, because the
+    /// successor now owns the stream and two readers on one master would race.
+    #[tokio::test]
+    async fn a_successful_export_stops_the_reader() {
+        let manager = PtyManager::new();
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        let export = manager.export_session(&session_id).expect("export succeeds");
+        assert!(
+            session.is_reader_finished(),
+            "a successful export hands the stream over, so the reader stops"
+        );
+        drop(export);
+        let _ = manager.close_session(&session_id);
+    }
+
     use super::*;
 
     #[tokio::test]
