@@ -32,6 +32,7 @@ import {
   type Worktree,
   type WorktreeDiskRow,
 } from "../lib/types";
+import { unmanagedWorktreeDeleteError } from "../lib/unmanagedWorktree";
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
 import { WorktreeDeleteDialog } from "./WorktreeDeleteDialog";
@@ -125,33 +126,21 @@ function createDefaultServices(): WorktreeDiskServices {
     previewDelete: async (workspaceId, worktree) => {
       const identity = worktreeIdentity(worktree);
       if (!identity) {
-        throw {
-          code: "INVALID_NAMESPACE",
-          message: "Only Ferryx-managed worktrees can be deleted from this UI.",
-          details: { path: worktree.path },
-        };
+        throw unmanagedWorktreeDeleteError(worktree.path);
       }
       return previewWorktreeDelete({ workspaceId, worktree: identity });
     },
     deleteSafe: async (workspaceId, worktree) => {
       const identity = worktreeIdentity(worktree);
       if (!identity) {
-        throw {
-          code: "INVALID_NAMESPACE",
-          message: "Only Ferryx-managed worktrees can be deleted from this UI.",
-          details: { path: worktree.path },
-        };
+        throw unmanagedWorktreeDeleteError(worktree.path);
       }
       await deleteWorktree({ workspaceId, worktree: identity, deleteBranch: true });
     },
     deleteDestructive: async (workspaceId, worktree) => {
       const identity = worktreeIdentity(worktree);
       if (!identity) {
-        throw {
-          code: "INVALID_NAMESPACE",
-          message: "Only Ferryx-managed worktrees can be deleted from this UI.",
-          details: { path: worktree.path },
-        };
+        throw unmanagedWorktreeDeleteError(worktree.path);
       }
       await deleteWorktreeDestructive({ workspaceId, worktree: identity, deleteBranch: true });
     },

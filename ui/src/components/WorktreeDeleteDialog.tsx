@@ -19,6 +19,7 @@ import {
   type StructuredIpcError,
   type Worktree,
 } from "../lib/types";
+import { unmanagedWorktreeDeleteError } from "../lib/unmanagedWorktree";
 
 // Destructive deletion is irreversible, so the confirmation has to name what is being
 // discarded rather than describing it in the abstract. Long lists are truncated with a
@@ -316,9 +317,5 @@ function PreviewRow({ label, value, mono = false, icon, dataState }: { label: st
 function requireIdentity(worktree: Worktree) {
   const identity = worktreeIdentity(worktree);
   if (identity) return identity;
-  throw {
-    code: "INVALID_NAMESPACE",
-    message: "Only Ferryx-managed worktrees can be deleted from this UI.",
-    details: { path: worktree.path },
-  } satisfies StructuredIpcError;
+  throw unmanagedWorktreeDeleteError(worktree.path);
 }
