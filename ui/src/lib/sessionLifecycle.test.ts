@@ -90,7 +90,10 @@ describe("sessionLifecycle", () => {
     restoreSessionRecentScrollback("session-a", history);
     const stored = getSessionRecentScrollback("session-a");
     expect(stored).toBeDefined();
-    expect(stored!.length).toBe(256_000);
+    // This text is persisted inside session_state.json, which is saved by rewriting the whole
+    // file. At 256 KB per session the file reached 8.4 MB and a burst of session churn dirtied
+    // 2.1 GB in 142 seconds, freezing the app; the bound is deliberately small.
+    expect(stored!.length).toBe(24_000);
     expect(stored!.endsWith("tail")).toBe(true);
   });
 

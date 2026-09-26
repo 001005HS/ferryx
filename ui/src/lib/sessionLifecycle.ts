@@ -11,7 +11,19 @@ export type { SessionProcessState } from "./types";
 export type SessionLifecycleAction = "suspend" | "resume" | "restart" | "hibernate";
 
 export const STANDBY_BACKEND_PREFIX = "standby:";
-const MAX_PERSISTED_SCROLLBACK_CHARS = 256_000;
+/**
+ * Per-session cap on the scrollback carried in the persisted session state.
+ *
+ * This text is only used to redisplay recent output when a suspended session is reopened, but it
+ * lives inside `session_state.json`, which is saved by rewriting the WHOLE file atomically. At the
+ * previous 256 KB the file reached 8.4 MB across 63 sessions -- 97% of it scrollback -- and a burst
+ * of session churn rewrote it about 255 times in 142 seconds, dirtying 2.1 GB and tripping macOS's
+ * disk-write limit while the app sat unresponsive.
+ *
+ * 24 KB still covers several screens of a standard terminal, which is all the redisplay needs, and
+ * it bounds the whole file to well under 2 MB at the same session count.
+ */
+const MAX_PERSISTED_SCROLLBACK_CHARS = 24_000;
 
 export function createStandbyBackendSessionId(sessionId: string): string {
   return `${STANDBY_BACKEND_PREFIX}${sessionId}`;
