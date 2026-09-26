@@ -381,7 +381,15 @@ export function RemoteSection({
       } finally {
         tunnel.close();
       }
-      await listMachines(accountOrigin, accountToken).then(setAccountMachines).catch(() => undefined);
+      await listMachines(accountOrigin, accountToken)
+        .then(setAccountMachines)
+        .catch((error: unknown) => {
+          // The grant itself succeeded; only the refresh failed, so say that rather than
+          // leaving a stale "Needs Grant" row with no explanation.
+          setActionError(
+            `Connected, but the machine list could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
     } catch (failure) {
       setActionError(failure instanceof Error ? failure.message : "ACCOUNT_GRANT_FAILED");
     } finally {
