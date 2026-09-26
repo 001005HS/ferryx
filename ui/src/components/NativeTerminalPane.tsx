@@ -21,6 +21,7 @@ import {
   isStructuredIpcError,
   onNativeTerminalCopyOrInterrupt,
   onNativeTerminalFocus,
+  onNativeTerminalInputReceipt,
   onNativeTerminalPaste,
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
@@ -86,6 +87,8 @@ function isGeometryEqual(a: GeometryState | null, b: GeometryState | null): bool
 interface NativeTerminalReceipt {
   readonly presented: boolean;
   readonly renderDeferred?: boolean;
+  /** Present on every receipt; needed to route an out-of-band receipt to the pane that owns it. */
+  readonly sessionId?: string;
   readonly cursorCol: number;
   readonly cursorRow: number;
   readonly cellWidthPx: number;
@@ -691,6 +694,25 @@ export function NativeTerminalPane({
     });
   }, []);
 
+  // The input receipt is no longer returned by the send command, so the anchor follows the
+  // event instead. Only receipts for the session this pane owns may move its candidate window.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onNativeTerminalInputReceipt((receipt) => {
+      if (disposed) return;
+      if (!receipt || receipt.sessionId !== surfaceOwnerRef.current?.sessionId) return;
+      updateImeAnchor(receipt);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [updateImeAnchor]);
+
   const updateScrollbar = useCallback((metrics: NativeTerminalScrollbarPayload | undefined) => {
     if (!metrics) return;
     scrollbarRevisionRef.current += 1;
@@ -1024,12 +1046,15 @@ export function NativeTerminalPane({
         return;
       }
       try {
-        const receipt = await terminalInputQueue.enqueue(
+        // The command resolves as soon as the PTY write lands; the receipt that positions the IME
+        // candidate window now arrives on `native_terminal_input_receipt`. Waiting for it here used
+        // to hold this session's queue slot for the whole round trip, delaying the next keystroke.
+        await terminalInputQueue.enqueue(
           currentSessionId,
           generation,
           payloadBytes,
           async () => {
-            return invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
+            return invoke<void>("cmd_native_terminal_send_input", {
               sessionId: currentSessionId,
               input,
               ...(generation != null ? { generation } : {}),
@@ -1037,7 +1062,6 @@ export function NativeTerminalPane({
           },
         );
         if (!isCurrentOwner()) return;
-        updateImeAnchor(receipt);
         switchDebug("terminal.surface.input.sent", {
           backendSessionId: currentSessionId,
           hasKeyEvent: "keyEvent" in input && Boolean(input.keyEvent),

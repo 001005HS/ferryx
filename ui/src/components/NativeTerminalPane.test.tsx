@@ -68,6 +68,16 @@ const tauriWindowMocks = vi.hoisted(() => {
 
 const nativeTerminalEventMocks = vi.hoisted(() => ({
   scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
+  inputReceiptListeners: [] as Array<
+    (payload: {
+      sessionId: string;
+      presented: boolean;
+      cursorCol: number;
+      cursorRow: number;
+      cellWidthPx: number;
+      cellHeightPx: number;
+    }) => void
+  >,
   focusListeners: [] as Array<(sessionId: string) => void>,
   pasteListeners: [] as Array<() => void>,
   copyOrInterruptListeners: [] as Array<() => void>,
@@ -88,6 +98,26 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
     nativeTerminalEventMocks.scrollbarListener = handler;
     return () => undefined;
   }),
+  onNativeTerminalInputReceipt: vi.fn(
+    async (
+      handler: (payload: {
+        sessionId: string;
+        presented: boolean;
+        cursorCol: number;
+        cursorRow: number;
+        cellWidthPx: number;
+        cellHeightPx: number;
+      }) => void,
+    ) => {
+      nativeTerminalEventMocks.inputReceiptListeners.push(handler);
+      return () => {
+        nativeTerminalEventMocks.inputReceiptListeners =
+          nativeTerminalEventMocks.inputReceiptListeners.filter(
+            (candidate) => candidate !== handler,
+          );
+      };
+    },
+  ),
   onNativeTerminalFocus: vi.fn(async (handler: (sessionId: string) => void) => {
     nativeTerminalEventMocks.focusListeners.push(handler);
     return () => {
@@ -131,6 +161,9 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   onNativeTerminalPaste: nativeTerminalEventMocks.onNativeTerminalPaste,
   onNativeTerminalCopyOrInterrupt: nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
+  // Input receipts arrive out of band now; without a mock this reaches the real Tauri event
+  // bridge, which is absent under jsdom and throws on every render.
+  onNativeTerminalInputReceipt: nativeTerminalEventMocks.onNativeTerminalInputReceipt,
   setNativeTerminalScrollbarOverlay: nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame: nativeTerminalEventMocks.setNativeTerminalAttentionFrame,
   attachTerminal: vi.fn(async (request) => tauriCoreMocks.invoke("cmd_terminal_attach", request)),
@@ -214,6 +247,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     tauriWindowMocks.reset();
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.inputReceiptListeners = [];
     nativeTerminalEventMocks.pasteListeners = [];
     nativeTerminalEventMocks.copyOrInterruptListeners = [];
     nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
@@ -1460,6 +1494,62 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("moves the IME anchor from an out-of-band input receipt, and ignores receipts for other sessions", async () => {
+    // T2: the send command no longer returns a receipt, so the candidate window follows the
+    // `native_terminal_input_receipt` event. A receipt addressed to a different session must not
+    // drag this pane's anchor.
+    tauriCoreMocks.invoke.mockResolvedValue({
+      cols: 80,
+      rows: 24,
+      rebuiltRows: 1,
+      reusedRows: 23,
+      cursorCol: 3,
+      cursorRow: 2,
+      cellWidthPx: 10,
+      cellHeightPx: 20,
+    });
+    const session = createSession("term-session-1");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+
+    await waitFor(() => {
+      expect(textarea.style.left).toBe("30px");
+      expect(textarea.style.top).toBe("40px");
+    });
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.inputReceiptListeners.length).toBeGreaterThan(0);
+    });
+
+    const emitReceipt = (payload: {
+      sessionId: string;
+      cursorCol: number;
+      cursorRow: number;
+    }) => {
+      act(() => {
+        for (const listener of nativeTerminalEventMocks.inputReceiptListeners) {
+          listener({
+            presented: true,
+            cellWidthPx: 10,
+            cellHeightPx: 20,
+            ...payload,
+          });
+        }
+      });
+    };
+
+    emitReceipt({ sessionId: "some-other-session", cursorCol: 9, cursorRow: 9 });
+    expect(textarea.style.left).toBe("30px");
+    expect(textarea.style.top).toBe("40px");
+
+    emitReceipt({ sessionId: "term-session-1", cursorCol: 5, cursorRow: 6 });
+    await waitFor(() => {
+      expect(textarea.style.left).toBe("50px");
+      expect(textarea.style.top).toBe("120px");
+    });
+  });
+
   it("forwards a primary pointer press for native selection without cancelling the gesture", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,
@@ -2140,10 +2230,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expectedChordCalls: 0,
     },
     {
-      description: "surfaces an error and sends no chord when the clipboard held no image",
+      description: "degrades to the agent's paste chord without an error toast when the clipboard held no image",
       result: null,
       expectedPaste: null,
-      expectedChordCalls: 0,
+      expectedChordCalls: 1,
     },
   ])(
     "sends a clipboard image to the SSH host owning a remote pane and $description",
@@ -2195,9 +2285,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           expectedPaste === null ? [] : [expectedPaste],
         );
         if (result === null) {
-          expect(toastMocks.error).toHaveBeenCalledWith(
-            "No clipboard image could be read to send to the remote host.",
-          );
+          // A host that cannot read a clipboard image is not a failure: the pane hands the paste
+          // back to the terminal, so the agent reads the clipboard through its own paste chord.
+          expect(toastMocks.error).not.toHaveBeenCalled();
         }
       });
     },
@@ -3259,7 +3349,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(sendInputCalls).toHaveLength(0);
   });
 
-  it("silent-failure surface: when invoke resolves null for the upload command -> toast.error called and still NO 0x16 sent", async () => {
+  it("degrades to the agent's paste chord with no error toast when the remote host cannot read a clipboard image", async () => {
     const workspaceId = `ssh:${"c".repeat(64)}`;
     const sessionId = "term-session-ssh-dom-paste-null";
     const session = { ...createSession(sessionId), workspaceId };
@@ -3288,16 +3378,54 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pasteEvent.defaultPrevented).toBe(true);
 
     await waitFor(() => {
-      expect(toastMocks.error).toHaveBeenCalledWith(
-        "No clipboard image could be read to send to the remote host.",
+      const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
       );
+      expect(chordCalls).toHaveLength(1);
     });
 
-    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd, args]) =>
-        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
-    );
-    expect(sendInputCalls).toHaveLength(0);
+    expect(toastMocks.error).not.toHaveBeenCalled();
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
+  });
+
+  it("degrades to the agent's paste chord with no error toast when this platform cannot read a clipboard image", async () => {
+    const sessionId = "term-session-local-dom-paste-null";
+    const session = createSession(sessionId);
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return null;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+    toastMocks.error.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+      );
+      expect(chordCalls).toHaveLength(1);
+    });
+
+    expect(toastMocks.error).not.toHaveBeenCalled();
   });
 
   it("routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste", () => {

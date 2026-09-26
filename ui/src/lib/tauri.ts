@@ -656,6 +656,29 @@ export async function onNativeTerminalAgentState(
   return listen<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
 }
 
+export interface NativeTerminalInputReceiptPayload {
+  readonly sessionId: string;
+  readonly presented: boolean;
+  readonly cursorCol: number;
+  readonly cursorRow: number;
+  readonly cellWidthPx: number;
+  readonly cellHeightPx: number;
+  readonly effectiveScaleFactor?: number | null;
+}
+
+/**
+ * Input receipts arrive out of band so a keystroke never waits for the main-thread rendezvous.
+ * They carry only the IME candidate-window anchor.
+ */
+export async function onNativeTerminalInputReceipt(
+  handler: (payload: NativeTerminalInputReceiptPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
+    handler(event.payload),
+  );
+}
+
 export async function onNativeTerminalScrollbar(
   handler: (payload: NativeTerminalScrollbarPayload) => void,
 ): Promise<UnlistenFn> {

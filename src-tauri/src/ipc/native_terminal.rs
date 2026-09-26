@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::DaemonClient;
@@ -8,6 +8,14 @@ use crate::ipc::{IpcError, IpcErrorCode};
 
 pub const NATIVE_TERMINAL_RECEIPT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(250);
+
+/// Event carrying an input receipt that is no longer awaited inline.
+///
+/// The receipt only positions the IME candidate window, but waiting for it used to hold the UI's
+/// per-session input queue open for the whole round trip, so the next keystroke could not start
+/// until the previous one's receipt arrived. Emitting it lets the command return as soon as the
+/// PTY write lands, while the anchor still updates a moment later.
+pub const NATIVE_TERMINAL_INPUT_RECEIPT_EVENT: &str = "native_terminal_input_receipt";
 use crate::native_terminal::composition::{CellMetrics, LogicalBounds, SurfaceCompositionLayout};
 use crate::native_terminal::snapshot_slot::{PresentedFrame, SnapshotSlot};
 use crate::native_terminal::surface_host::{
@@ -1395,7 +1403,7 @@ pub async fn send_native_terminal_input_with_writer<R: Runtime, F, Fut>(
     session_id: &str,
     input: &NativeTerminalInput,
     write_op: F,
-) -> Result<NativeTerminalBoundsReceipt, IpcError>
+) -> Result<(), IpcError>
 where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = Result<(), IpcError>>,
@@ -1418,17 +1426,31 @@ where
     } else {
         state.emit_scrollbar_if_changed(Some(app), session_id);
     }
-    dispatch_native_terminal_receipt(app, state, session_id)
-        .await
-        .map_err(|mut error| {
-            if let Some(ref mut details) = error.details {
-                if let Some(obj) = details.as_object_mut() {
-                    obj.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
-                    return error;
-                }
+
+    // The receipt only repositions the IME candidate window. Awaiting it here held the caller's
+    // per-session input queue open for the whole main-thread rendezvous, so the NEXT keystroke
+    // could not start until this one's receipt arrived. Deliver it out of band instead: the write
+    // is already durable, and the anchor updates a moment later.
+    let receipt_app = app.clone();
+    let receipt_state = state.clone();
+    let receipt_session = session_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        match dispatch_native_terminal_receipt(&receipt_app, &receipt_state, &receipt_session).await
+        {
+            Ok(receipt) => {
+                let _ = receipt_app.emit(NATIVE_TERMINAL_INPUT_RECEIPT_EVENT, receipt);
             }
-            error.with_details(serde_json::json!({ "inputWritten": true }))
-        })
+            Err(error) => {
+                // A missed anchor update is cosmetic; the keystroke already landed.
+                tracing::debug!(
+                    session_id = %receipt_session,
+                    %error,
+                    "Native terminal input receipt unavailable; IME anchor keeps its last value"
+                );
+            }
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1439,7 +1461,7 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
     generation: Option<u64>,
-) -> Result<NativeTerminalBoundsReceipt, IpcError> {
+) -> Result<(), IpcError> {
     let write_session_id = session_id.clone();
     send_native_terminal_input_with_writer(
         &app,
@@ -3140,15 +3162,10 @@ mod tests {
         .await;
 
         assert!(write_invoked, "terminal write must have been executed");
-        let error = result.expect_err("receipt collection without main window must fail");
-        assert_eq!(
-            error
-                .details
-                .as_ref()
-                .and_then(|d| d.get("inputWritten"))
-                .and_then(|v| v.as_bool()),
-            Some(true),
-            "post-write receipt failure must retain inputWritten: true"
-        );
+        // The receipt is no longer awaited inline, so a keystroke succeeds even when no main
+        // window exists to produce one. Previously this surfaced as a command error carrying
+        // inputWritten: true, which forced every caller to distinguish "the key was lost" from
+        // "only the IME anchor was lost" -- and made the next keystroke wait for the rendezvous.
+        result.expect("a written keystroke must succeed even when no receipt can be collected");
     }
 }
