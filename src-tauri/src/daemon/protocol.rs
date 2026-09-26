@@ -144,6 +144,11 @@ pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
     Handshake {
         version: u32,
+        /// Per-boot bearer token the loopback transport checks on the first frame before it
+        /// dispatches anything. Unix authenticates by socket ownership and mode, so it stays
+        /// absent there; a client that presents none is rejected by a token-enforcing daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     Ping,
     #[serde(rename_all = "camelCase")]
@@ -1381,6 +1386,40 @@ mod tests {
         match decoded {
             DaemonResponse::DescribeSessionOk { session } => {
                 assert_eq!(session.last_output_age_ms, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handshake_token_wire_shape_and_backward_compatibility() {
+        // The server reads the token from the raw first line, so it has to be a top-level
+        // `token` field beside `version` for a token-enforcing transport to authenticate.
+        let with_token = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token: Some("abc".to_string()),
+        };
+        let with_token_json = serde_json::to_string(&with_token).expect("serialize handshake");
+        assert!(with_token_json.contains(r#""token":"abc""#));
+
+        // Back-compat: unix connections carry no token, and an absent token must not put a
+        // `token` key on the wire at all.
+        let without_token = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token: None,
+        };
+        let without_token_json =
+            serde_json::to_string(&without_token).expect("serialize handshake");
+        assert!(!without_token_json.contains("token"));
+
+        // Back-compat: a frame written before the field existed still decodes.
+        let legacy: DaemonRequest =
+            serde_json::from_str(r#"{"type":"handshake","version":5}"#)
+                .expect("deserialize legacy handshake");
+        match legacy {
+            DaemonRequest::Handshake { version, token } => {
+                assert_eq!(version, DAEMON_PROTOCOL_VERSION);
+                assert_eq!(token, None);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
