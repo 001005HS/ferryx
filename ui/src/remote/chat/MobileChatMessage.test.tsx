@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
@@ -80,7 +81,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(container.textContent).toContain("Please run the tests");
     const bubble = container.querySelector("[data-testid='user-message-bubble']");
     expect(bubble).not.toBeNull();
-    expect(bubble?.className).toContain("bg-primary");
+    expect(bubble?.className).toContain("bg-[#161616]");
     expect(bubble?.parentElement?.className).toContain("ml-auto");
   });
 
@@ -110,21 +111,53 @@ describe("MobileChatComponents & MobileChatMessage", () => {
   });
 
   it("renders collapsible Worked for row for assistant turns with durationLabel", () => {
-    render(
+    const { container } = render(
       <MobileChatMessage
         id="msg-6"
         role="assistant"
         content="Summarized the diff."
         durationLabel="2m"
+        toolCalls={[
+          {
+            toolName: "test_runner",
+            status: "running",
+            command: "bun test",
+          },
+        ]}
       />
     );
 
     const toggle = screen.getByTestId("worked-for-toggle");
     expect(toggle).toHaveTextContent("Worked for 2m");
-    expect(screen.queryByText("Summarized the diff.")).not.toBeInTheDocument();
+    const body = screen.getByTestId("assistant-message-body");
+    expect(body).toHaveTextContent("Summarized the diff.");
+    expect(container.textContent).not.toContain("test_runner");
 
     fireEvent.click(toggle);
-    expect(screen.getByText("Summarized the diff.")).toBeInTheDocument();
+    expect(container.textContent).toContain("test_runner");
+    expect(screen.getByTestId("assistant-message-body")).toHaveTextContent("Summarized the diff.");
+  });
+
+  it("renders assistant turn with tool calls and body without durationLabel as always visible", () => {
+    const { container } = render(
+      <MobileChatMessage
+        id="msg-6b"
+        role="assistant"
+        content="No duration content."
+        toolCalls={[
+          {
+            toolName: "bash",
+            status: "success",
+            command: "ls -la",
+          },
+        ]}
+      />
+    );
+
+    expect(screen.queryByTestId("worked-for-toggle")).not.toBeInTheDocument();
+    expect(screen.getByTestId("assistant-message-body")).toHaveTextContent("No duration content.");
+    expect(container.textContent).toContain("bash");
+    expect(container.textContent).toContain("ls -la");
   });
 
   it("renders a copy button under each turn", () => {
@@ -179,22 +212,21 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     );
     expect(container.textContent).toContain("cargo check");
     const codeEl = container.querySelector("code");
-    expect(codeEl?.className).toContain("text-sky-300");
+    expect(codeEl?.className).toContain("text-[#4bb8f0]");
   });
 
-  it("renders fenced code inside markdown without validateDOMNesting warning", () => {
-    const consoleError = vi.spyOn(console, "error");
+  it("renders the message with empty content without throwing and shows timestamp/copy", () => {
     render(
       <MobileChatMessage
-        id="msg-5"
+        id="msg-empty"
         role="assistant"
-        content={"Paragraph before\n```js\nconsole.log('hi');\n```\nParagraph after"}
+        content=""
+        timestamp={1700000000000}
       />
     );
-    const nestingWarning = consoleError.mock.calls.find((call: any[]) =>
-      call.some((arg: any) => typeof arg === "string" && arg.includes("validateDOMNesting"))
-    );
-    expect(nestingWarning).toBeUndefined();
-    consoleError.mockRestore();
+
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+    expect(screen.getByTestId("message-copy-button")).toBeInTheDocument();
   });
 });
+

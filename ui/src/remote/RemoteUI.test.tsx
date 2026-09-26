@@ -223,6 +223,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The pane list now lives inside the worktree sheet, so pane queries open it first.
+async function openWorktreeSheet(): Promise<HTMLElement> {
+  const existing = screen.queryByRole("tablist", { name: /terminal tabs/i });
+  if (existing) return existing;
+  // act() flushes the sheet open without touching timers, which some suites fake.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+  });
+  return screen.getByRole("tablist", { name: /terminal tabs/i });
+}
+
 describe("selection request lifetime", () => {
   const snapshot = (tabId: string) => ({
     ...focusedState,
@@ -303,7 +314,7 @@ describe("selection request lifetime", () => {
     vi.useFakeTimers();
     try {
       const host = await mountSelectionHost();
-      const target = screen.getByRole("tab", { name: "dev" });
+      const target = within(await openWorktreeSheet()).getByRole("tab", { name: "dev" });
       await act(async () => {
         fireEvent.click(target);
         await host.postA.promise;
@@ -314,9 +325,10 @@ describe("selection request lifetime", () => {
       expect(target).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(target).toBeEnabled();
+      await openWorktreeSheet();
       expect(screen.getByRole("button", { name: "Next terminal tab" })).toBeEnabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
-      expect(screen.getByRole("tab", { name: "editor" })).toHaveAttribute("aria-selected", "true");
+      expect(within(await openWorktreeSheet()).getByRole("tab", { name: "editor" })).toHaveAttribute("aria-selected", "true");
       expect(host.readCount()).toBe(1);
       host.unmount();
       expect(vi.getTimerCount()).toBe(0);
@@ -337,8 +349,9 @@ describe("selection request lifetime", () => {
     vi.useFakeTimers();
     try {
       const host = await mountSelectionHost();
+      const sheet = await openWorktreeSheet();
       await act(async () => {
-        fireEvent.click(screen.getByRole("tab", { name: "dev" }));
+        fireEvent.click(within(sheet).getByRole("tab", { name: "dev" }));
         await host.postA.promise;
       });
       // Desktop replaces A with tests, releasing the picker before A settles.
@@ -347,7 +360,7 @@ describe("selection request lifetime", () => {
         host.publish("tests");
         await host.refresh.promise;
       });
-      const targetB = screen.getByRole("tab", { name: "editor" });
+      const targetB = within(await openWorktreeSheet()).getByRole("tab", { name: "editor" });
       expect(targetB).toBeEnabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
       await act(async () => {
@@ -366,7 +379,7 @@ describe("selection request lifetime", () => {
       });
       expect(targetB).toBeDisabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
-      expect(screen.getByRole("tab", { name: "tests" })).toHaveAttribute("aria-selected", "true");
+      expect(within(await openWorktreeSheet()).getByRole("tab", { name: "tests" })).toHaveAttribute("aria-selected", "true");
       if (!acceptedB) {
         // A's success must not accept B. Only B's own headers may start the
         // event-triggered refresh; a stale snapshot still cannot confirm B.
@@ -406,6 +419,7 @@ describe("Remote UI Components", () => {
     });
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); });
     expect(request).toHaveBeenCalledWith(expect.stringContaining("/api/v1/workspace/select"), expect.objectContaining({
@@ -430,6 +444,7 @@ describe("Remote UI Components", () => {
     const request = vi.fn<typeof fetch>(async (_input, init) => init?.method === "POST" ? response.promise : jsonResponse(focusedState));
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); fireEvent.click(button); });
     expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
@@ -468,7 +483,25 @@ describe("Remote UI Components", () => {
     const dialog = screen.getByRole("dialog", { name: "Workspace context" });
     expect(dialog.querySelector(".overflow-y-auto")).toHaveClass("overflow-x-hidden", "min-h-0");
     expect(within(dialog).getByRole("heading", { name: workspaceId })).toHaveClass("min-w-0", "truncate");
+    await openWorktreeSheet();
     expect(screen.getByRole("button", { name: "New terminal tab" })).toBeEnabled();
+  });
+
+  it("keeps the hook order stable when a session token is cleared", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", EventWebSocket);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
+    await act(async () => { render(<RemoteApp />); });
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
+    // Disconnect drops the session token, so the same mount renders the login
+    // screen; a hook declared below that early return changes the hook count.
+    await openWorktreeSheet();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
+    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal")).toBeNull();
   });
 
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
@@ -1051,9 +1084,12 @@ describe("Remote UI Components", () => {
     expect(terminal).toHaveAttribute("data-session-id", "session-tab-1");
 
     // Ordinal indicator
+    await openWorktreeSheet();
     expect(screen.getByText("1 / 3")).toBeInTheDocument();
 
+    await openWorktreeSheet();
     const prevBtn = screen.getByRole("button", { name: /Previous terminal tab/i });
+    await openWorktreeSheet();
     const nextBtn = screen.getByRole("button", { name: /Next terminal tab/i });
     expect(prevBtn).toBeDisabled();
     expect(nextBtn).toBeEnabled();
@@ -1098,6 +1134,7 @@ describe("Remote UI Components", () => {
         "session-tab-2",
       );
     });
+    await openWorktreeSheet();
     expect(screen.getByText("2 / 3")).toBeInTheDocument();
     expect(prevBtn).toBeEnabled();
     expect(nextBtn).toBeEnabled();
@@ -1182,6 +1219,7 @@ describe("Remote UI Components", () => {
         "session-tab-2",
       );
     });
+    await openWorktreeSheet();
     expect(screen.getByText("2 / 3")).toBeInTheDocument();
     expect(prevBtn).toBeEnabled();
     expect(nextBtn).toBeEnabled();
@@ -1210,7 +1248,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     expect(tablist).toBeInTheDocument();
 
     const editorTab = within(tablist).getByRole("tab", { name: /editor/i });
@@ -1293,8 +1331,10 @@ describe("Remote UI Components", () => {
       "data-session-id",
       "focused-terminal",
     );
+    await openWorktreeSheet();
     expect(screen.getByLabelText("Terminal position: Tab 1 of 3")).toHaveTextContent("1 / 3");
 
+    await openWorktreeSheet();
     fireEvent.click(screen.getByRole("button", { name: "Next terminal tab" }));
 
     await waitFor(() => {
@@ -1331,8 +1371,10 @@ describe("Remote UI Components", () => {
         "dev-server-terminal",
       );
     });
+    await openWorktreeSheet();
     expect(screen.getByLabelText("Terminal position: Tab 2 of 3")).toHaveTextContent("2 / 3");
 
+    await openWorktreeSheet();
     fireEvent.click(screen.getByRole("button", { name: "Previous terminal tab" }));
 
     await waitFor(() => {
@@ -1365,6 +1407,7 @@ describe("Remote UI Components", () => {
         "focused-terminal",
       );
     });
+    await openWorktreeSheet();
     expect(screen.getByLabelText("Terminal position: Tab 1 of 3")).toHaveTextContent("1 / 3");
   });
 
@@ -1477,7 +1520,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     expect(tablist).toBeInTheDocument();
 
     const workingTab = within(tablist).getByRole("tab", { name: /editor.*working/i });
@@ -1505,7 +1548,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
 
-    const tablist = await screen.findByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     // One entry is enough to render the list, and no mirrored terminal is required to browse it.
     expect(within(tablist).getAllByRole("tab")).toHaveLength(1);
     expect(within(tablist).getByRole("tab", { name: /editor/i })).toBeInTheDocument();
@@ -1537,7 +1580,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
 
-    const tablist = await screen.findByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     fireEvent.click(within(tablist).getByRole("tab", { name: /build.*feature\/remote-safe/i }));
 
     await waitFor(() =>
@@ -1577,7 +1620,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     const claudeTab = within(tablist).getByRole("tab", { name: /claude agent/i });
     const unknownTab = within(tablist).getByRole("tab", { name: /unknown agent/i });
     const plainTab = within(tablist).getByRole("tab", { name: /plain terminal/i });
@@ -1683,7 +1726,7 @@ describe("Remote UI Components", () => {
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
 
     // Click dev server tab
@@ -1763,7 +1806,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
     await screen.findByTestId("remote-terminal");
-    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+    fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
     const optimisticTerminal = screen.getByTestId("remote-terminal");
     const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
@@ -1818,7 +1861,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
     await screen.findByTestId("remote-terminal");
-    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+    fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
     const optimisticTerminal = screen.getByTestId("remote-terminal");
     const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
@@ -1873,7 +1916,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
     await screen.findByTestId("remote-terminal");
-    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+    fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
     const optimisticTerminal = screen.getByTestId("remote-terminal");
     const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
@@ -1886,8 +1929,9 @@ describe("Remote UI Components", () => {
       }));
     });
 
+    const devServerPane = within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i });
     await waitFor(() => {
-      expect(screen.getByRole("tab", { name: /dev server/i })).toBeEnabled();
+      expect(devServerPane).toBeEnabled();
     });
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
       "data-instance-id",
@@ -1933,7 +1977,7 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
     await screen.findByTestId("remote-terminal");
-    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+    fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
     const firstInstanceId = screen.getByTestId("remote-terminal").getAttribute("data-instance-id");
 
     act(() => {
@@ -1944,7 +1988,8 @@ describe("Remote UI Components", () => {
         }),
       }));
     });
-    await waitFor(() => expect(screen.getByRole("tab", { name: /dev server/i })).toBeEnabled());
+    const devServerPaneInList = within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i });
+    await waitFor(() => expect(devServerPaneInList).toBeEnabled());
 
     fireEvent.click(screen.getByTestId("remote-terminal"));
     const replacement = screen.getByTestId("remote-terminal");
@@ -1995,7 +2040,7 @@ describe("Remote UI Components", () => {
     await screen.findByTestId("remote-terminal");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
 
     // Wait for POST to complete
@@ -2074,7 +2119,7 @@ describe("Remote UI Components", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+      const tablist = await openWorktreeSheet();
       fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
 
       // Optimistically shows session-dev
@@ -2123,7 +2168,7 @@ describe("Remote UI Components", () => {
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
 
     fireEvent.click(devTab);
@@ -2166,18 +2211,19 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
 
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
 
-    // Click Disconnect
-    fireEvent.click(screen.getByRole("button", { name: /Disconnect/i }));
+    // Disconnect now lives in the Machines drawer, behind a confirmation step.
+    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
     expect(screen.queryByRole("heading", { name: /Sign In to Ferryx/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Confirm disconnect/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
@@ -2196,16 +2242,18 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    fireEvent.click(screen.getByRole("button", { name: /^Disconnect$/i }));
+    await openWorktreeSheet();
+    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Confirm disconnect/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm disconnect" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(screen.getByRole("button", { name: /^Disconnect$/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Confirm disconnect/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove pairing" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm disconnect" })).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
   });
@@ -2222,10 +2270,12 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    fireEvent.click(screen.getByRole("button", { name: /^Disconnect$/i }));
-    expect(screen.getByRole("button", { name: /Confirm disconnect/i })).toBeInTheDocument();
+    await openWorktreeSheet();
+    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
+    expect(screen.getByRole("button", { name: "Confirm disconnect" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
@@ -2275,7 +2325,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const tablist = await openWorktreeSheet();
     // User requested tab-2 (session-dev)
     fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
 

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
+  ChevronLeft,
   Maximize2,
   Minimize2,
   Terminal as TerminalIcon,
@@ -44,8 +45,14 @@ export interface MobileChatWorkspaceProps {
   readonly createWebSocket?: (pathAndQuery: string) => any;
 
   readonly className?: string;
+  readonly warnings?: readonly string[];
   readonly composerPlaceholder?: string;
   readonly disabled?: boolean;
+
+  readonly headerTitle?: string;
+  readonly headerSubtitle?: string;
+  readonly onBack?: () => void;
+  readonly headerActions?: React.ReactNode;
 }
 
 export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
@@ -66,8 +73,13 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   isAccountSession,
   createWebSocket,
   className,
+  warnings,
   composerPlaceholder,
   disabled = false,
+  headerTitle,
+  headerSubtitle,
+  onBack,
+  headerActions,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -111,26 +123,41 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     <div
       data-testid="mobile-chat-workspace"
       className={cn(
-        "relative flex flex-col w-full h-full min-h-0 bg-zinc-950 text-zinc-100 overflow-hidden select-none",
+        "relative flex flex-col w-full h-full min-h-0 bg-[#0a0a0a] text-[#f5f5f5] overflow-hidden select-none",
         className
       )}
     >
       <header
         data-testid="mobile-chat-header"
-        className="flex items-center justify-between px-3 py-2 bg-zinc-950/90 border-b border-border/60 backdrop-blur-md shrink-0 z-10"
+        className="flex items-center justify-between px-3 py-2 bg-[#0a0a0a] border-b border-[#191919] backdrop-blur-md shrink-0 z-10"
       >
         <div className="flex items-center gap-2 min-w-0">
-          <div className="flex size-7 items-center justify-center rounded-md bg-zinc-900 border border-border/70 text-zinc-300 shrink-0 shadow-xs">
-            <TerminalIcon className="size-3.5 text-zinc-300" />
-          </div>
+          {onBack && (
+            <button
+              type="button"
+              data-testid="thread-header-back"
+              aria-label="Back"
+              onClick={onBack}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] hover:text-[#f5f5f5]"
+            >
+              <ChevronLeft className="size-4" aria-hidden="true" />
+            </button>
+          )}
           <div className="flex flex-col min-w-0">
-            <span className="text-xs font-semibold tracking-tight text-foreground/90 font-mono">
-              Agent Workspace
+            <span className="text-base font-medium text-[#f5f5f5] tracking-tight font-mono">
+              {headerTitle ?? "Agent Workspace"}
             </span>
-            {workspaceLabel ? (
+            {headerSubtitle ? (
               <span
                 data-testid="chat-header-subtitle"
-                className="text-[10px] text-muted-foreground font-mono truncate"
+                className="font-mono text-xs text-[#838383] truncate"
+              >
+                {headerSubtitle}
+              </span>
+            ) : workspaceLabel ? (
+              <span
+                data-testid="chat-header-subtitle"
+                className="font-mono text-xs text-[#838383] truncate"
               >
                 {workspaceLabel}
                 {worktreeLabel ? ` · ${worktreeLabel}` : ""}
@@ -138,7 +165,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             ) : (
               <div className="flex items-center gap-1.5">
                 <span className="inline-block size-1.5 rounded-full bg-emerald-500 shrink-0" />
-                <span className="text-[10px] text-muted-foreground font-mono truncate">
+                <span className="font-mono text-xs text-[#838383] truncate">
                   Session: {sessionId ? sessionId.slice(0, 8) : "default"}
                 </span>
               </div>
@@ -159,18 +186,21 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             <button
               type="button"
               data-testid="terminal-toggle-button"
+              aria-label={isTerminalOpen ? "Hide terminal" : "Show terminal"}
+              aria-pressed={isTerminalOpen}
               onClick={() => setIsTerminalOpen((prev) => !prev)}
               className={cn(
-                "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono font-medium border transition-colors",
+                "flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors",
                 isTerminalOpen
-                  ? "bg-zinc-800 text-zinc-100 border-zinc-600 shadow-xs"
-                  : "bg-zinc-900/90 text-zinc-400 border-border/80 hover:bg-zinc-800/80 hover:text-zinc-200"
+                  ? "bg-[#1a1b1b] text-[#f5f5f5] border-[#191919] shadow-xs"
+                  : "bg-[#111111]/90 text-[#838383] border-[#191919] hover:bg-[#141414] hover:text-[#f5f5f5]"
               )}
             >
-              <TerminalIcon className="size-3" />
-              <span>&gt;_ PTY</span>
+              <TerminalIcon className="size-3.5" aria-hidden="true" />
             </button>
           )}
+
+          {headerActions}
         </div>
       </header>
 
@@ -178,23 +208,32 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         ref={scrollContainerRef}
         onScroll={handleScroll}
         data-testid="chat-message-stream"
-        className="flex-1 min-h-0 overflow-y-auto px-3.5 py-4 space-y-3.5 scroll-smooth overscroll-contain select-text"
+        className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5 scroll-smooth overscroll-contain select-text"
       >
+        {warnings && warnings.length > 0 ? (
+          <div
+            data-testid="chat-history-warning"
+            role="status"
+            className="mb-3 rounded-md border border-[#191919] bg-[#111111] px-3 py-2 font-mono text-xs text-[#838383]"
+          >
+            {warnings.join(" ")}
+          </div>
+        ) : null}
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
             className="flex flex-col items-start justify-center min-h-[40vh] max-w-md mx-auto w-full px-2 my-auto select-none"
           >
-            <div className="w-full rounded-lg border border-border/50 bg-zinc-900/40 px-3 py-2.5 space-y-1">
+            <div className="w-full rounded-lg border border-[#191919] bg-[#111111] px-3 py-2.5 space-y-1">
               <div
                 data-testid="chat-empty-context"
-                className="font-mono text-[11px] text-muted-foreground/80 truncate"
+                className="font-mono text-xs text-[#838383] truncate"
               >
                 {workspaceLabel
                   ? `${workspaceLabel}${worktreeLabel ? ` · ${worktreeLabel}` : ""}`
                   : "ferryx remote"}
               </div>
-              <p className="text-[11px] text-muted-foreground/60 font-mono">
+              <p className="font-mono text-xs text-[#838383]">
                 Prompts run against the focused terminal.
               </p>
             </div>
@@ -232,9 +271,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               setIsAtBottom(true);
               scrollToBottom(true);
             }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-800/95 hover:bg-zinc-700 text-zinc-200 text-xs font-medium shadow-lg border border-zinc-700/80 backdrop-blur-md active:scale-95 transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#1a1b1b]/95 hover:bg-[#141414] text-[#f5f5f5] text-xs font-medium shadow-lg border border-[#191919] backdrop-blur-md active:scale-95 transition-all"
           >
-            <ArrowDown className="size-3.5 text-sky-400 animate-bounce" />
+            <ArrowDown className="size-3.5 text-[#4bb8f0] animate-bounce" />
             <span>Scroll to latest</span>
           </button>
         </div>
@@ -244,7 +283,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         <div
           data-testid="terminal-drawer"
           className={cn(
-            "absolute inset-x-0 bottom-0 z-30 flex flex-col bg-zinc-950/95 border-t border-border backdrop-blur-xl shadow-2xl transition-all duration-300 ease-in-out",
+            "absolute inset-x-0 bottom-0 z-30 flex flex-col bg-[#0a0a0a]/95 border-t border-[#191919] backdrop-blur-xl shadow-2xl transition-all duration-300 ease-in-out",
             !isTerminalOpen
               ? "translate-y-full pointer-events-none"
               : isTerminalExpanded
@@ -252,10 +291,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               : "h-[45vh] translate-y-0"
           )}
         >
-          <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/90 border-b border-border select-none">
+          <div className="flex items-center justify-between px-3 py-2 bg-[#111111]/90 border-b border-[#191919] select-none">
             <div className="flex items-center gap-2">
               <TerminalIcon className="size-3.5 text-emerald-400" />
-              <span className="text-xs font-mono font-semibold text-zinc-200">
+              <span className="text-xs font-mono font-semibold text-[#f5f5f5]">
                 {terminalTitle}
               </span>
             </div>
@@ -265,7 +304,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 type="button"
                 data-testid="terminal-expand-button"
                 onClick={() => setIsTerminalExpanded((prev) => !prev)}
-                className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80 active:scale-95 transition-colors"
+                className="p-1.5 rounded-md text-[#838383] hover:text-[#f5f5f5] hover:bg-[#1a1b1b]/80 active:scale-95 transition-colors"
                 title={isTerminalExpanded ? "Collapse" : "Expand"}
               >
                 {isTerminalExpanded ? (
@@ -278,7 +317,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 type="button"
                 data-testid="terminal-close-button"
                 onClick={() => setIsTerminalOpen(false)}
-                className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80 active:scale-95 transition-colors"
+                className="p-1.5 rounded-md text-[#838383] hover:text-[#f5f5f5] hover:bg-[#1a1b1b]/80 active:scale-95 transition-colors"
                 title="Close terminal"
               >
                 <X className="size-3.5" />

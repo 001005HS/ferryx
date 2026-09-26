@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ChevronLeft } from "lucide-react";
 
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { useTerminalSettings } from "../lib/terminalSettings";
@@ -1099,44 +1100,53 @@ export function RemoteTerminal({
   };
 
   return (
-    <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-foreground ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
-      {!embedded ? (
-        <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2">
-          <div className="flex min-w-0 items-center gap-2">
-            {onBack ? (
-              <button type="button" onClick={onBack} className="rounded-md border border-border bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground">
-                Back
-              </button>
+    <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-[#f5f5f5] ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
+      <div className="flex h-11 shrink-0 items-center justify-between border-b border-[#191919] bg-[#0a0a0a] px-2">
+        <div className="flex min-w-0 items-center gap-2">
+          {onBack ? (
+            <button
+              type="button"
+              data-testid="remote-terminal-back"
+              aria-label="Back to chat"
+              onClick={onBack}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] transition-colors hover:text-[#f5f5f5]"
+            >
+              <ChevronLeft className="size-4" aria-hidden="true" />
+            </button>
+          ) : null}
+          <div className="flex min-w-0 flex-col justify-center">
+            <span className="truncate text-sm font-medium text-[#f5f5f5]">Terminal</span>
+            {title ? (
+              <span className="truncate font-mono text-[11px] text-[#838383]">{title}</span>
             ) : null}
-            <span className="truncate font-mono text-xs text-muted-foreground">{title ?? "Desktop terminal"}</span>
           </div>
-          <span className="flex items-center gap-2">
-            {inputOverflow ? (
-              <span
-                data-testid="remote-terminal-overflow-indicator"
-                role="status"
-                className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 font-mono text-[10px] text-rose-300"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
-                <span>Input overflow</span>
-              </span>
-            ) : null}
-            {pendingInputBytes > 0 ? (
-              <span
-                data-testid="remote-terminal-buffered-indicator"
-                className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span>Buffered input</span>
-              </span>
-            ) : null}
-            <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-muted-foreground/70">{BUILD_STAMP}</span>
-            <span role="status" className="font-mono text-[10px] text-muted-foreground">
-              {connected ? "Live" : "Connecting"}
-            </span>
-          </span>
         </div>
-      ) : null}
+        <span className="flex items-center gap-2">
+          {inputOverflow ? (
+            <span
+              data-testid="remote-terminal-overflow-indicator"
+              role="status"
+              className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 font-mono text-[10px] text-rose-300"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+              <span>Input overflow</span>
+            </span>
+          ) : null}
+          {pendingInputBytes > 0 ? (
+            <span
+              data-testid="remote-terminal-buffered-indicator"
+              className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+              <span>Buffered input</span>
+            </span>
+          ) : null}
+          <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
+          <span role="status" className="font-mono text-[10px] text-[#838383]">
+            {connected ? "Live" : "Connecting"}
+          </span>
+        </span>
+      </div>
       <div
         ref={surfaceRef}
         data-testid="remote-terminal-grid"
@@ -1269,7 +1279,7 @@ export function RemoteTerminal({
       >
         {embedded && !connected ? (
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center gap-2 pt-1.5">
-            <span role="status" className="rounded-full border border-border bg-card/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm">Connecting</span>
+            <span role="status" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">Connecting</span>
             {inputOverflow ? (
               <span
                 data-testid="remote-terminal-overflow-indicator"

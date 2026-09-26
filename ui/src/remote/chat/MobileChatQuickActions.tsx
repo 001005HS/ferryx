@@ -88,13 +88,13 @@ export const MobileChatQuickActions: React.FC<MobileChatQuickActionsProps> = ({
             className={cn(
               "inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all active:scale-95 disabled:pointer-events-none disabled:opacity-50",
               isStopAction && isRunning
-                ? "bg-red-500/15 text-red-400 border border-red-500/30 hover:bg-red-500/25 active:bg-red-500/35"
+                ? "bg-[#ff6467]/15 text-[#ff6467] border border-[#ff6467]/30 hover:bg-[#ff6467]/25 active:bg-[#ff6467]/35"
                 : isStopAction
-                ? "bg-zinc-800/80 text-zinc-400 border border-zinc-700/50 hover:bg-zinc-800 active:bg-zinc-700"
-                : "bg-zinc-800/90 text-zinc-200 border border-zinc-700/60 hover:bg-zinc-700/80 hover:text-zinc-100 active:bg-zinc-600"
+                ? "bg-[#1a1b1b]/80 text-[#838383] border border-[#191919] hover:bg-[#1a1b1b] active:bg-[#141414]"
+                : "bg-[#1a1b1b]/90 text-[#f5f5f5] border border-[#191919] hover:bg-[#141414] hover:text-[#f5f5f5] active:bg-[#111111]"
             )}
           >
-            <Icon className={cn("size-3.5 shrink-0", isStopAction && isRunning ? "text-red-400 animate-pulse" : "text-zinc-400")} />
+            <Icon className={cn("size-3.5 shrink-0", isStopAction && isRunning ? "text-[#ff6467] animate-pulse" : "text-[#838383]")} />
             <span>{action.label}</span>
           </button>
         );

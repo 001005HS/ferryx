@@ -301,16 +301,16 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     <div className="flex flex-col">
       {/* Header with Back button if provided */}
       {onBack && (
-        <div className="flex items-center justify-between px-2 py-1 bg-neutral-950 border-b border-neutral-800 text-xs">
+        <div className="flex items-center justify-between px-2 py-1 bg-[#0a0a0a] border-b border-[#191919] text-xs">
           <button
             type="button"
             data-testid="remote-browser-workspace-back-btn"
             onClick={onBack}
-            className="flex items-center gap-1 text-neutral-400 hover:text-white transition"
+            className="flex items-center gap-1 text-[#838383] hover:text-[#f5f5f5] transition"
           >
             ← Back to Sessions
           </button>
-          <span className="font-mono text-neutral-400 text-[11px] truncate max-w-[200px]">
+          <span className="font-mono text-[#838383] text-[11px] truncate max-w-[200px]">
             {browserId}
           </span>
           <button
@@ -319,8 +319,8 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
             onClick={() => setShowImeBar((prev) => !prev)}
             className={`text-[11px] px-1.5 py-0.5 rounded border transition ${
               showImeBar
-                ? "bg-blue-900/60 border-blue-600 text-blue-200"
-                : "bg-neutral-800 border-neutral-700 text-neutral-400"
+                ? "bg-[#346bf1]/20 border-[#346bf1]/60 text-[#346bf1]"
+                : "bg-[#1a1b1b] border-[#191919] text-[#838383]"
             }`}
           >
             IME Input
@@ -351,16 +351,16 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         <form
           onSubmit={handleImeSubmit}
           data-testid="remote-browser-ime-bar"
-          className="flex items-center gap-2 p-1.5 bg-neutral-950 border-b border-neutral-800 text-xs"
+          className="flex items-center gap-2 p-1.5 bg-[#0a0a0a] border-b border-[#191919] text-xs"
         >
-          <span className="text-neutral-400 text-[11px] shrink-0">Mobile IME:</span>
+          <span className="text-[#838383] text-[11px] shrink-0">Mobile IME:</span>
           <input
             type="text"
             data-testid="remote-browser-ime-ref-input"
             value={imeTargetRef}
             onChange={(e) => setImeTargetRef(e.target.value)}
             placeholder="Target Ref (e.g. e1)"
-            className="w-20 px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-xs font-mono"
+            className="w-20 px-1.5 py-0.5 rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] text-xs font-mono"
           />
           <input
             type="text"
@@ -375,13 +375,13 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
               }
             }}
             placeholder="Type confirmed text..."
-            className="flex-1 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-xs"
+            className="flex-1 px-2 py-0.5 rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] text-xs"
           />
           <button
             type="submit"
             data-testid="remote-browser-ime-send-btn"
             disabled={driver.driverState !== "driving" || !imeText.trim() || isComposing}
-            className="px-2 py-0.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs font-medium transition"
+            className="px-2 py-0.5 bg-[#346bf1] hover:bg-[#346bf1]/90 disabled:opacity-40 text-[#f5f5f5] rounded text-xs font-medium transition"
           >
             Send Fill
           </button>
@@ -392,7 +392,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       {(driver.error || browserError) && (
         <div
           data-testid="remote-browser-driver-error"
-          className="px-2 py-1 bg-red-950/80 border-b border-red-800 text-red-200 text-xs flex items-center justify-between"
+          className="px-2 py-1 bg-[#ff6467]/15 border-b border-[#ff6467]/30 text-[#ff6467] text-xs flex items-center justify-between"
         >
           <span>{driver.error ? driver.error.message : browserError?.message}</span>
         </div>
