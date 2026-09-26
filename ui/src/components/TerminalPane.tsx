@@ -147,6 +147,15 @@ export function TerminalPane({
   const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
   const isPending = pendingLocal || isSpawning || (isSshSession ? isSshReconnecting : affordance.isReconnecting || isLocalReconnecting);
+  // A lazily restored shell carries a frontend-only standby id: no process runs and a new one
+  // starts on demand. Nothing crashed, so "Shell exited" told users the wrong story. Name the
+  // real state instead: starting, not running, or failed to start.
+  const isStandbyShell =
+    !isSshSession &&
+    !isAgentSession &&
+    isStandbyBackendSessionId(session.backendSessionId) &&
+    !isLocalReconnecting &&
+    !isLocalDisconnected;
   const canReattach = Boolean(
     session.backendSessionId &&
     !isStandbyBackendSessionId(session.backendSessionId) &&
@@ -368,9 +377,15 @@ export function TerminalPane({
                       : "SSH disconnected"
                 : isLocalReconnecting
                   ? "Reconnecting session..."
-                  : isAgentSession
-                    ? "Session disconnected"
-                    : "Shell exited"}
+                  : isStandbyShell
+                    ? replacementError
+                      ? "Couldn't start shell"
+                      : isPending
+                        ? "Starting shell..."
+                        : "Shell not running"
+                    : isAgentSession
+                      ? "Session disconnected"
+                      : "Shell exited"}
             </h2>
 
             {isAgentSession ? (
@@ -514,6 +529,11 @@ export function TerminalPane({
                     <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
                     <span>Reconnecting to session...</span>
                   </div>
+                ) : isStandbyShell && isPending ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                    <span>Starting a new shell in this directory...</span>
+                  </div>
                 ) : (
                   <>
                     {canReattach ? (
@@ -545,11 +565,11 @@ export function TerminalPane({
                       size="sm"
                       variant={canReattach ? "ghost" : "secondary"}
                       disabled={isPending || !onOpenNewShell}
-                      aria-label="Open new shell"
+                      aria-label={isStandbyShell ? "Start shell" : "Open new shell"}
                       onClick={handleOpenNewShell}
                       className="w-full max-w-[220px]"
                     >
-                      <span>Open new shell</span>
+                      <span>{isStandbyShell ? "Start shell" : "Open new shell"}</span>
                     </Button>
                   </>
                 )}

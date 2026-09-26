@@ -213,6 +213,75 @@ describe("TerminalPane native routing contract", () => {
     await waitFor(() => expect(onOpenNewShell).toHaveBeenCalledWith("session-standby"));
     expect(onOpenNewShell).toHaveBeenCalledTimes(1);
   });
+
+  it("shows a restored standby shell as starting while its shell spawns, never as Shell exited", () => {
+    const standby = createExitedSession({
+      id: "session-standby-starting",
+      backendSessionId: "standby:session-standby-starting",
+      agentType: null,
+      providerSession: null,
+      agentSessionId: null,
+    });
+    // The spawn never settles, so the pane stays in its starting state for the assertions.
+    const onOpenNewShell = vi.fn(() => new Promise<void>(() => undefined));
+    setSessionSleeping(standby.id, true);
+    render(<TerminalPane session={standby} active={true} onOpenNewShell={onOpenNewShell} />);
+
+    expect(onOpenNewShell).toHaveBeenCalledWith("session-standby-starting");
+    expect(screen.getByText("Starting shell...")).toBeInTheDocument();
+    expect(screen.queryByText("Shell exited")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+  });
+
+  it("shows a standby shell that nothing is starting as not running, with a way to start it", () => {
+    const standby = createExitedSession({
+      id: "session-standby-idle",
+      backendSessionId: "standby:session-standby-idle",
+      agentType: null,
+      providerSession: null,
+      agentSessionId: null,
+    });
+    // Not sleeping, so nothing starts it automatically.
+    setSessionSleeping(standby.id, false);
+    const onOpenNewShell = vi.fn(() => new Promise<void>(() => undefined));
+    render(<TerminalPane session={standby} active={false} onOpenNewShell={onOpenNewShell} />);
+
+    expect(screen.getByText("Shell not running")).toBeInTheDocument();
+    expect(screen.queryByText("Shell exited")).toBeNull();
+    expect(onOpenNewShell).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Start shell" }));
+    expect(onOpenNewShell).toHaveBeenCalledWith("session-standby-idle");
+  });
+
+  it("reports why a standby shell failed to start", async () => {
+    const standby = createExitedSession({
+      id: "session-standby-failed",
+      backendSessionId: "standby:session-standby-failed",
+      agentType: null,
+      providerSession: null,
+      agentSessionId: null,
+    });
+    const onOpenNewShell = vi.fn().mockRejectedValue(new Error("CWD does not exist: /repo/gone"));
+    setSessionSleeping(standby.id, true);
+    render(<TerminalPane session={standby} active={true} onOpenNewShell={onOpenNewShell} />);
+
+    expect(await screen.findByText("Couldn't start shell")).toBeInTheDocument();
+    expect(screen.getByText(/CWD does not exist: \/repo\/gone/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start shell" })).toBeEnabled();
+  });
+
+  it("still reports Shell exited for a local shell whose backend is gone", () => {
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: null, providerSession: null })}
+        active={true}
+        onOpenNewShell={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+    expect(screen.queryByText("Not started yet")).toBeNull();
+  });
   it("calls reconnect once with the local session id and disables repeat activation while pending", () => {
     // Given: an exited Omo session with an authoritative provider reference.
     const onReconnect = vi.fn(() => new Promise<void>(() => undefined));
