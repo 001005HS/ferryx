@@ -672,6 +672,23 @@ fn relative_label(root: &Path, canonical: &Path) -> Option<String> {
         .map(|f| f.to_string_lossy().into_owned())
 }
 
+/// The desktop's own tab label for a session, so the phone names a session exactly as the desktop
+/// does. `None` when the session is not a desktop tab: the phone then numbers the rows itself,
+/// which keeps sessions in one project distinguishable (a directory name would repeat on every row).
+fn desktop_tab_title(
+    session_id: &str,
+    active: Option<&RemoteActiveDesktopSelection>,
+) -> Option<String> {
+    active.and_then(|selection| {
+        selection
+            .terminal_tabs
+            .iter()
+            .find(|tab| tab.session_id.as_deref() == Some(session_id))
+            .map(|tab| tab.label.trim().to_string())
+            .filter(|label| !label.is_empty())
+    })
+}
+
 pub(crate) async fn get_active_running_sessions(
     state: &RemoteGatewayState,
     cache: &WorkspaceSnapshotCache,
@@ -703,8 +720,8 @@ pub(crate) async fn get_active_running_sessions(
                 .find(|project| project.workspace_id == id)
             {
                 sessions.push(RemoteTerminalSession {
+                    title: desktop_tab_title(&session_id, active.as_ref()),
                     session_id: details.session_id,
-                    title: None,
                     workspace_id: Some(id.to_owned()),
                     worktree_label: Some(super::ssh::label(project)),
                     running: true,
@@ -747,13 +764,12 @@ pub(crate) async fn get_active_running_sessions(
                     None
                 }
             });
+        // Without a desktop connection there are no tab labels; keep the historical "Terminal".
+        let title = desktop_tab_title(&session_id, active.as_ref())
+            .or_else(|| active.is_none().then(|| "Terminal".to_string()));
         sessions.push(RemoteTerminalSession {
             session_id: details.session_id,
-            title: if active.is_none() {
-                Some("Terminal".to_string())
-            } else {
-                None
-            },
+            title,
             workspace_id,
             worktree_label,
             running: true,
@@ -1022,6 +1038,9 @@ async fn get_workspace_state(
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryQuery {
     pub limit: Option<usize>,
+    /// `before` is accepted as an alias, the usual name for a backwards page cursor. Serde drops
+    /// unknown keys silently, so `?before=<n>` used to return the newest page again.
+    #[serde(alias = "before")]
     pub cursor: Option<usize>,
 }
 
@@ -6028,6 +6047,82 @@ mod tests {
         pty.close_session(&session_id)
             .await
             .expect("close fixture PTY");
+    }
+
+    #[tokio::test]
+    async fn remote_sessions_use_the_desktop_tab_label_as_the_title() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
+
+        let (session_id, mut rx) = pty
+            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn session");
+        hub.register_session(&session_id);
+        let session_id_clone = session_id.clone();
+        let hub_clone = Arc::clone(&hub);
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                hub_clone.publish(&session_id_clone, chunk);
+            }
+        });
+
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("default".to_string()),
+            session_id: Some(session_id.clone()),
+            terminal_tabs: vec![RemoteTerminalTabInfo {
+                id: "tab-1".to_string(),
+                label: "api server".to_string(),
+                activity_state: None,
+                agent_type: None,
+                worktree_slug: None,
+                worktree_label: None,
+                session_id: Some(session_id.clone()),
+            }],
+            ..Default::default()
+        });
+
+        let cache = WorkspaceSnapshotCache::build(&registry);
+        let sessions = get_active_running_sessions(&state, &cache, &[]).await;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, session_id);
+        assert_eq!(sessions[0].title, Some("api server".to_string()));
+
+        // A session that is not a desktop tab gets no invented name, so the phone keeps numbering it.
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("default".to_string()),
+            terminal_tabs: vec![RemoteTerminalTabInfo {
+                id: "tab-2".to_string(),
+                label: "someone else".to_string(),
+                activity_state: None,
+                agent_type: None,
+                worktree_slug: None,
+                worktree_label: None,
+                session_id: Some("not-this-session".to_string()),
+            }],
+            ..Default::default()
+        });
+        let sessions = get_active_running_sessions(&state, &cache, &[]).await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, None);
+
+        pty.close_session(&session_id)
+            .await
+            .expect("close fixture PTY");
+    }
+
+    #[test]
+    fn agent_history_query_accepts_before_as_the_cursor() {
+        let query: AgentHistoryQuery =
+            serde_json::from_value(serde_json::json!({ "before": 1712, "limit": 200 }))
+                .expect("before must deserialize");
+        assert_eq!(query.cursor, Some(1712));
+        let query: AgentHistoryQuery = serde_json::from_value(serde_json::json!({ "cursor": 900 }))
+            .expect("cursor still deserializes");
+        assert_eq!(query.cursor, Some(900));
     }
 
     /// Starting the gateway in `Loopback`-equivalent (`Off`-free, no
