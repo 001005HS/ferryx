@@ -36,7 +36,7 @@ describe("NotificationCenterPopover", () => {
 
   it("renders empty state when there are no notifications", () => {
     render(<NotificationCenterPopover onClose={vi.fn()} store={store} />);
-    expect(screen.getByText("No new notifications")).toBeInTheDocument();
+    expect(screen.getByText("Nothing needs you right now")).toBeInTheDocument();
     expect(screen.getByTestId("notification-empty-state")).toBeInTheDocument();
   });
 
@@ -440,7 +440,7 @@ describe("NotificationCenterPopover", () => {
     expect(popover.style.left).toBe("50px");
   });
 
-  it("header: 'Mark all read' marks all read and clears the popover, with no separate Clear all button", () => {
+  it("header: 'Mark all read' clears the unread count but keeps blocked work visible, with no separate Clear all button", () => {
     store.recordActivity({
       workspaceId: "ws-1",
       sessionId: "s-1",
@@ -467,10 +467,10 @@ describe("NotificationCenterPopover", () => {
     expect(screen.getByText("2 unread")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Clear all" })).toBeNull();
 
-    // Mark all read removes all notifications from the view immediately
+    // Reading is not resolving: the terminal still blocked on the user stays in the list.
     fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
-    expect(screen.getByText("No new notifications")).toBeInTheDocument();
     expect(screen.queryByText("2 unread")).toBeNull();
+    expect(screen.getByTestId("notification-section-needs-you")).toBeInTheDocument();
     expect(store.getSnapshot().entries.every((e) => "seen" in e.read)).toBe(true);
   });
 

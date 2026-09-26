@@ -785,26 +785,38 @@ describe("Sidebar navigation", () => {
     expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
   });
 
-  it("renders notification center button in footer with no-drag class and reflects store unread count", async () => {
-    renderSidebar();
-    const bellBtn = screen.getByTestId("notification-center-button");
-    expect(bellBtn).toBeInTheDocument();
-    expect(bellBtn).toHaveClass("no-drag");
-    expect(screen.queryByTestId("notification-center-badge")).toBeNull();
+  it("leads with the inbox and folds the worktree tree behind the folder pill", () => {
+    const attention = {
+      rows: [{
+        id: "row-1", revision: 1, workspaceId: "default", sessionId: "sess-1", state: "needs-you" as const,
+        who: "omo", location: "default / main", text: "Deploy — Ship it now?", at: Date.now(),
+      }],
+      onOpen: vi.fn(),
+      onDismiss: vi.fn(),
+      onDismissAll: vi.fn(),
+      openSessionCount: 3,
+      worktreeListOpen: false,
+      onWorktreeListOpenChange: vi.fn(),
+    };
+    const onSelectWorktree = vi.fn();
+    const view = renderSidebar({ attention, projects, activeProjectId: "maho-workspace", onSelectWorktree });
+    const pill = screen.getByRole("button", { name: /워크트리 전환/ });
+    expect(pill).toHaveTextContent("maho-workspace");
+    expect(pill).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("worktree-region")).not.toBeVisible();
+    expect(screen.getByTestId("attention-row-text")).toHaveTextContent("Deploy — Ship it now?");
 
-    notificationCenterStore.recordActivity({
-      workspaceId: "default",
-      sessionId: "sess-1",
-      labels: { terminalTitle: "Term" },
-      subject: "terminal",
-      occurredAt: Date.now(),
-      observed: false,
-      previousState: "working",
-      state: "done",
-    });
+    fireEvent.click(pill);
+    expect(attention.onWorktreeListOpenChange).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "모두 읽음" }));
+    expect(attention.onDismissAll).toHaveBeenCalledTimes(1);
 
-    await waitFor(() => {
-      expect(screen.getByTestId("notification-center-badge")).toHaveTextContent("1");
-    });
+    view.rerender(<Sidebar {...baseProps({ attention: { ...attention, worktreeListOpen: true }, projects, activeProjectId: "maho-workspace", onSelectWorktree })} />);
+    expect(screen.getByTestId("worktree-region")).toBeVisible();
+    expect(screen.queryByTestId("attention-row")).toBeNull();
+    const group = screen.getByRole("list", { name: "maho-workspace worktrees" });
+    fireEvent.click(within(group).getByRole("button", { name: /main/ }));
+    expect(onSelectWorktree).toHaveBeenCalledWith(worktree);
+    expect(attention.onWorktreeListOpenChange).toHaveBeenLastCalledWith(false);
   });
 });

@@ -15,21 +15,17 @@ import { Bell, TerminalSquare, Trash2, X } from "lucide-react";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
 import { notificationCenterStore, type NotificationCenterStore } from "../../lib/notificationCenter/notificationCenterStore";
-import {
-  filterEntries,
-  groupEntries,
-  type AttentionFilter,
-} from "../../lib/notificationCenter/attentionView";
 import type { NotificationEntry } from "../../lib/notificationCenter/types";
 import { StatusDot, type StatusDotState } from "../ui/StatusDot";
-import { AttentionInbox } from "../../features/ferryx/control/AttentionInbox";
-import { targetKey, type Agent } from "../../features/ferryx/control/client";
 import {
-  buildDesktopInventory,
-  isUnreadAgent,
-  type DesktopWorkspace,
-} from "../../features/ferryx/control/desktopInventory";
-import { AttentionAskPanel } from "./AttentionAskPanel";
+  buildAttentionRows,
+  filterRows,
+  groupRows,
+  rowDisplayEntry,
+  rowDotState,
+  type AttentionFilter,
+} from "../../features/ferryx/control/attentionRows";
+import type { Agent } from "../../features/ferryx/control/client";
 import { useNotificationCenter } from "./useNotificationCenter";
 
 export const POPOVER_WIDTH = 380;
@@ -112,9 +108,8 @@ export interface NotificationCenterPopoverProps {
   isSessionNavigable?: IsSessionNavigable;
   store?: NotificationCenterStore;
   attentionInventory?: {
-    workspaces: DesktopWorkspace[];
-    unavailableHosts?: readonly string[];
-    onSelectAgent: (agent: Agent) => void;
+    agents: readonly Agent[];
+    localKeyOf: (agent: Agent) => string | null;
   };
 }
 
@@ -133,11 +128,20 @@ export function NotificationCenterPopover({
   store = notificationCenterStore,
   attentionInventory,
 }: NotificationCenterPopoverProps): ReactNode {
-  const { entries, unreadCount, markAllRead, dismissEntry } = useNotificationCenter(store);
-  const [tab, setTab] = useState<"attention" | "ask" | "agents">("attention");
+  const { allEntries, unreadCount, markAllRead, dismissSession } = useNotificationCenter(store);
   const [filter, setFilter] = useState<AttentionFilter>("all");
-  const visibleEntries = filterEntries(entries, filter);
-  const groups = groupEntries(visibleEntries);
+  const rows = buildAttentionRows(
+    allEntries,
+    attentionInventory?.agents ?? [],
+    attentionInventory?.localKeyOf ?? (() => null),
+  );
+  const visibleRows = filterRows(rows, filter);
+  const groups = groupRows(visibleRows).map((group) => ({
+    section: group.section,
+    title: group.title,
+    items: group.rows.map(rowDisplayEntry),
+  }));
+  const dotByEntryId = new Map(visibleRows.map((row) => [row.key, rowDotState(row)]));
   const modalRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
@@ -256,16 +260,14 @@ export function NotificationCenterPopover({
             ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {tab === "attention" ? (
-              <button
-                type="button"
-                onClick={() => markAllRead()}
-                disabled={unreadCount === 0}
-                className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 transition-colors"
-              >
-                Mark all read
-              </button>
-            ) : null}
+            <button
+              type="button"
+              onClick={() => markAllRead()}
+              disabled={unreadCount === 0}
+              className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 transition-colors"
+            >
+              Mark all read
+            </button>
             <button
               type="button"
               aria-label="Close notifications"
@@ -277,103 +279,37 @@ export function NotificationCenterPopover({
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex items-center gap-1 border-b border-border px-3 py-1.5">
-          <button
-            type="button"
-            data-testid="notification-tab-attention"
-            aria-pressed={tab === "attention"}
-            onClick={() => setTab("attention")}
-            className={
-              tab === "attention"
-                ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
-                : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-            }
-          >
-            Needs you
-          </button>
-          <button
-            type="button"
-            data-testid="notification-tab-ask"
-            aria-pressed={tab === "ask"}
-            onClick={() => setTab("ask")}
-            className={
-              tab === "ask"
-                ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
-                : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-            }
-          >
-            Ask
-          </button>
-          {attentionInventory ? (
+        {/* Filter */}
+        <div className="flex items-center gap-1 border-b border-border px-3 py-1.5" role="group" aria-label="Filter">
+          {([
+            ["all", "All"],
+            ["unread", "Unread"],
+            ["needs-you", "Needs you"],
+          ] as [AttentionFilter, string][]).map(([id, label]) => (
             <button
+              key={id}
               type="button"
-              data-testid="notification-tab-agents"
-              aria-pressed={tab === "agents"}
-              onClick={() => setTab("agents")}
+              data-testid={`notification-filter-${id}`}
+              aria-pressed={filter === id}
+              onClick={() => setFilter(id)}
               className={
-                tab === "agents"
-                  ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
+                filter === id
+                  ? "rounded px-2 py-0.5 text-[11px] bg-accent text-foreground"
                   : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               }
             >
-              All agents
+              {label}
             </button>
-          ) : null}
+          ))}
         </div>
 
-        {tab === "attention" ? (
-          <div className="flex items-center gap-1 px-3 py-1.5" role="group" aria-label="Filter">
-            {([
-              ["all", "All"],
-              ["unread", "Unread"],
-              ["needs-you", "Needs you"],
-            ] as [AttentionFilter, string][]).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                data-testid={`notification-filter-${id}`}
-                aria-pressed={filter === id}
-                onClick={() => setFilter(id)}
-                className={
-                  filter === id
-                    ? "rounded px-2 py-0.5 text-[11px] bg-accent text-foreground"
-                    : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        ) : null}
-
         {/* Content */}
-        {tab === "ask" ? (
-          <AttentionAskPanel className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-sleek" />
-        ) : tab === "agents" && attentionInventory ? (
-          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-sleek">
-            <AttentionInbox
-              snapshot={buildDesktopInventory(
-                attentionInventory.workspaces,
-                attentionInventory.unavailableHosts ?? [],
-              )}
-              onSelect={(target) => {
-                const live = buildDesktopInventory(
-                  attentionInventory.workspaces,
-                  attentionInventory.unavailableHosts ?? [],
-                );
-                const agent = live.items.find((item) => targetKey(item.target) === targetKey(target));
-                if (agent) attentionInventory.onSelectAgent(agent);
-              }}
-              isUnread={(agent) => isUnreadAgent(agent, attentionInventory.workspaces)}
-            />
-          </div>
-        ) : entries.length === 0 ? (
+        {rows.length === 0 ? (
           <div
             data-testid="notification-empty-state"
             className="flex flex-col items-center justify-center p-8 text-center text-xs text-muted-foreground"
           >
-            No new notifications
+            Nothing needs you right now
           </div>
         ) : groups.length === 0 ? (
           <div
@@ -397,7 +333,7 @@ export function NotificationCenterPopover({
               const relativeTime = formatRelativeTime(entry.lastOccurredAt);
               const agentLogo = resolveAgentLogo(entry.labels.agentLabel);
               const isMonochrome = isMonochromeAgentLogo(entry.labels.agentLabel);
-              const statusDotState = reasonToStatusDotState(entry.reason);
+              const statusDotState = dotByEntryId.get(entry.id) ?? reasonToStatusDotState(entry.reason);
 
               const handleRowClick = () => {
                 if (!isNavigable) return;
@@ -493,7 +429,7 @@ export function NotificationCenterPopover({
                       aria-label="Dismiss notification"
                       onClick={(event) => {
                         event.stopPropagation();
-                        dismissEntry(entry.id);
+                        dismissSession(entry.workspaceId, entry.sessionId);
                       }}
                       className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                     >

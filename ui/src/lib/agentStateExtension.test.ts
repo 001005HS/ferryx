@@ -1,0 +1,200 @@
+// @vitest-environment node
+import { readFileSync, rmSync } from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import { transformSync } from "esbuild";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+const EXTENSION_PATH = path.resolve(
+  __dirname,
+  "../../../src-tauri/resources/agent-extensions/ferryx-agent-state.ts",
+);
+const SOCKET_PATH = "/tmp/ferryx-ext-test.sock";
+
+type Captured = { state: string; detail?: string };
+
+const captured: Captured[] = [];
+let moduleCounter = 0;
+let server: net.Server;
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for the extension to publish");
+}
+
+async function loadExtension() {
+  process.env.FERRYX_AGENT_STATE_SOCKET = SOCKET_PATH;
+  process.env.FERRYX_SESSION_ID = "session-ext-test";
+  delete process.env.FERRYX_AGENT_STATE_PORT;
+  delete process.env.FERRYX_AGENT_STATE_TOKEN;
+
+  const source = readFileSync(EXTENSION_PATH, "utf8");
+  const compiled = transformSync(source, { loader: "ts", format: "esm", target: "es2022" }).code;
+  moduleCounter += 1;
+  const url = `data:text/javascript;base64,${Buffer.from(compiled, "utf8").toString("base64")}#${moduleCounter}`;
+  const mod = await import(url);
+  return mod.default as (pi: unknown) => void;
+}
+
+function makeHarness() {
+  const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+  const busHandlers = new Map<string, (data: unknown) => void>();
+
+  const pi = {
+    on(event: string, handler: (event: unknown, ctx?: unknown) => void) {
+      handlers.set(event, handler);
+    },
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        busHandlers.set(channel, handler);
+        return () => {};
+      },
+    },
+  };
+
+  return {
+    pi,
+    busHandlers,
+    tuiCtx: { mode: "tui", isIdle: () => false },
+    emit(event: string, ctx?: unknown) {
+      handlers.get(event)?.({}, ctx);
+    },
+    bus(channel: string, data: unknown) {
+      busHandlers.get(channel)?.(data);
+    },
+  };
+}
+
+describe("ferryx-agent-state extension", () => {
+  beforeAll(async () => {
+    try {
+      rmSync(SOCKET_PATH);
+    } catch {}
+    server = net.createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+      });
+      socket.on("close", () => {
+        for (const line of buffer.split("\n")) {
+          if (line.trim().length === 0) continue;
+          const payload = JSON.parse(line) as { type?: string; state?: string; detail?: string };
+          if (payload.type === "agentState" && typeof payload.state === "string") {
+            captured.push({ state: payload.state, detail: payload.detail });
+          }
+        }
+      });
+      socket.end();
+    });
+    await new Promise<void>((resolve) => server.listen(SOCKET_PATH, resolve));
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    try {
+      rmSync(SOCKET_PATH);
+    } catch {}
+  });
+
+  beforeEach(() => {
+    captured.length = 0;
+  });
+
+  it("subscribes to the events senpi actually emits", async () => {
+    const load = await loadExtension();
+    const h = makeHarness();
+    load(h.pi);
+
+    expect(h.busHandlers.has("herdr:blocked")).toBe(true);
+    expect(h.busHandlers.has("ask-user:asked")).toBe(true);
+    expect(h.busHandlers.has("ferryx:blocked")).toBe(false);
+  });
+
+  it("a waiting question publishes blocked with its text, and answering publishes working", async () => {
+    const load = await loadExtension();
+    const h = makeHarness();
+    load(h.pi);
+
+    h.emit("session_start", h.tuiCtx);
+    h.emit("agent_start", h.tuiCtx);
+    await waitFor(() => captured.length >= 1);
+
+    h.bus("ask-user:asked", {
+      request: {
+        requestId: "q1",
+        waitForAnswer: true,
+        questions: [{ header: "Auth method", question: "Which library should we use?" }],
+      },
+    });
+
+    await waitFor(() => captured.at(-1)?.state === "blocked");
+    expect(captured.at(-1)?.detail).toBe("Auth method — Which library should we use?");
+
+    h.bus("herdr:blocked", { active: false, id: "q1" });
+
+    await waitFor(() => captured.at(-1)?.state === "working");
+    expect(captured.at(-1)?.detail).toBeUndefined();
+  });
+
+  it("a question the agent keeps working through never publishes blocked", async () => {
+    const load = await loadExtension();
+    const h = makeHarness();
+    load(h.pi);
+
+    h.emit("session_start", h.tuiCtx);
+    h.emit("agent_start", h.tuiCtx);
+    await waitFor(() => captured.length >= 1);
+    const baseline = captured.length;
+
+    h.bus("ask-user:asked", {
+      request: {
+        requestId: "q2",
+        waitForAnswer: false,
+        questions: [{ header: "Style", question: "Which style do you prefer?" }],
+      },
+    });
+    h.bus("herdr:blocked", { active: false, id: "q2" });
+    h.emit("agent_settled", { mode: "tui", isIdle: () => true });
+
+    await waitFor(() => captured.length > baseline);
+    expect(captured.slice(baseline).some((entry) => entry.state === "blocked")).toBe(false);
+    expect(captured.at(-1)?.state).toBe("idle");
+  });
+
+  it("a host dialog with no question event still blocks and carries its label", async () => {
+    const load = await loadExtension();
+    const h = makeHarness();
+    load(h.pi);
+
+    h.emit("session_start", h.tuiCtx);
+    h.emit("agent_start", h.tuiCtx);
+    await waitFor(() => captured.length >= 1);
+
+    h.bus("herdr:blocked", { active: true, id: "host-1", label: "Pick a workspace" });
+
+    await waitFor(() => captured.at(-1)?.state === "blocked");
+    expect(captured.at(-1)?.detail).toBe("Pick a workspace");
+  });
+
+  it("settling the turn clears the blocked detail", async () => {
+    const load = await loadExtension();
+    const h = makeHarness();
+    load(h.pi);
+
+    h.emit("session_start", h.tuiCtx);
+    h.bus("ask-user:asked", {
+      request: { requestId: "q3", waitForAnswer: true, questions: [{ header: "H", question: "Q?" }] },
+    });
+    await waitFor(() => captured.at(-1)?.state === "blocked");
+
+    h.bus("herdr:blocked", { active: false, id: "q3" });
+    h.emit("agent_settled", { mode: "tui", isIdle: () => true });
+
+    await waitFor(() => captured.at(-1)?.state === "idle");
+    expect(captured.at(-1)?.detail).toBeUndefined();
+  });
+});

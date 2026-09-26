@@ -349,6 +349,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     });
 
     // Clicking "Add worktree to local" in sidebar should NOT open AddWorktreeDialog
+    act(() => { screen.getByRole("button", { name: /워크트리 전환/ }).click(); });
     const addWorktreeBtn = screen.getByRole("button", { name: "Add worktree to local" });
     act(() => {
       addWorktreeBtn.click();

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
-import { NotificationCenterButton } from "../components/notification";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { buildAttentionRows, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
@@ -130,6 +131,7 @@ export function ActivitySurfaceHarness() {
     ruleId: string,
     manifestId?: string,
     isSnapshot = false,
+    detail?: string,
   ) =>
     dispatch({
       type: "SESSION_SCREEN_ACTIVITY",
@@ -139,6 +141,7 @@ export function ActivitySurfaceHarness() {
       ruleId,
       manifestId,
       isSnapshot,
+      detail,
     } as WorkspaceAction);
 
   const lifecycle = (backendSessionId: string, state: "exited" | "failed") =>
@@ -149,6 +152,8 @@ export function ActivitySurfaceHarness() {
 
   const tabActivity = useMemo(() => selectTabActivitySummaries(state), [state]);
   const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(state), [state]);
+  const inbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
+  const attentionRows = useMemo(() => buildAttentionRows(inbox.entries, liveActivityLookup(state, [])), [inbox, state]);
 
   const scenarios: Array<{ id: string; label: string; run: () => void }> = [
     {
@@ -263,6 +268,11 @@ export function ActivitySurfaceHarness() {
         title("session-bg", "tab-bg", "\u280b omo: building");
       },
     },
+    {
+      id: "qa-omo-ask-background",
+      label: "background tab: omo asks a question",
+      run: () => screen("session-bg", "tab-bg", "blocked", "extension", "omo", false, "Auth method — Which library should we use?"),
+    },
     { id: "qa-reset", label: "reset", run: () => {
       stateRef.current = initialState();
       setState(stateRef.current);
@@ -312,19 +322,18 @@ export function ActivitySurfaceHarness() {
         />
       </div>
 
-      <div data-testid="harness-notifications" className="mt-4 flex max-w-xs items-center gap-2 border border-border p-2">
-        <NotificationCenterButton
-          store={notificationCenterStore}
-          isSessionNavigable={(sessionId: string) => Boolean(state.sessions[sessionId])}
-          onNavigateToSession={({ sessionId, revision }) => {
-            const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === sessionId);
+      <div data-testid="harness-notifications" className="mt-4 flex h-80 w-[300px] flex-col border border-border bg-worktree-sidebar text-worktree-sidebar-foreground">
+        <AttentionInbox
+          rows={attentionRows}
+          openSessionCount={Object.keys(state.sessions).length}
+          onOpen={(row) => {
+            const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === row.sessionId);
             if (!tab) return;
             dispatch({ type: "ACTIVATE_TAB", tabId: tab.id } as WorkspaceAction);
-            const entry = notificationCenterStore.getSnapshot().entries.find((candidate) => candidate.sessionId === sessionId);
-            if (entry) notificationCenterStore.markEntriesRead([{ id: entry.id, expectedRevision: revision }]);
+            notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }]);
           }}
+          onDismiss={(row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }])}
         />
-        <span className="text-xs text-muted-foreground">Notification center</span>
       </div>
 
       <pre data-testid="harness-state" className="mt-4 overflow-auto text-[10px] leading-tight text-muted-foreground">

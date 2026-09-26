@@ -673,6 +673,9 @@ pub enum DaemonStreamMessage<'a> {
         agent: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_session: Option<AgentProviderSession>,
+        /// The question or blocker text behind a `blocked` state, when the producer knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_snapshot: bool,
         #[serde(default, skip_serializing_if = "AgentStateOrigin::is_self_reported")]
@@ -752,6 +755,9 @@ pub struct AgentStateReport {
     pub agent: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_session")]
     pub provider_session: Option<AgentProviderSession>,
+    /// Present when the agent can name what it is blocked on, so the inbox can show the question.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Serialize one daemon streaming message using the production newline-delimited JSON frame.
@@ -899,6 +905,7 @@ mod tests {
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("working"),
             agent: Some(Cow::Borrowed("omo")),
+            detail: None,
             provider_session: Some(AgentProviderSession {
                 key: AgentProviderSessionKey::SessionId,
                 id: "provider-1".to_string(),
@@ -935,6 +942,7 @@ mod tests {
             state: Cow::Borrowed("blocked"),
             agent: None,
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::Agent,
         };
@@ -973,6 +981,7 @@ mod tests {
                 state: Cow::Borrowed("idle"),
                 agent: None,
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin: AgentStateOrigin::Agent,
             })
@@ -987,6 +996,7 @@ mod tests {
             state: Cow::Borrowed("idle"),
             agent: None,
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::ProcessReleased,
         })

@@ -430,6 +430,7 @@ mod tests {
             state: "working".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         let mut states = hub.subscribe(&id);

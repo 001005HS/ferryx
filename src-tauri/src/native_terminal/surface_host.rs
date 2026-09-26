@@ -97,6 +97,8 @@ pub struct NativeTerminalAgentStatePayload {
     pub manifest_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_snapshot: bool,
 }
@@ -1167,6 +1169,7 @@ fn take_native_terminal_events(
                             rule_id: detection.rule_id,
                             manifest_id: detection.manifest_id,
                             provider_session: None,
+                            detail: None,
                             is_snapshot: false,
                         },
                     ));
@@ -1461,6 +1464,7 @@ impl NativeTerminalSurfaceHostState {
                 rule_id: "manual-reset".to_string(),
                 manifest_id: "".to_string(),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
             };
             emit_native_terminal_event(
@@ -2649,6 +2653,7 @@ impl NativeTerminalSurfaceHostState {
                         state,
                         agent,
                         provider_session,
+                        detail,
                         is_snapshot,
                         origin,
                         ..
@@ -2717,6 +2722,7 @@ impl NativeTerminalSurfaceHostState {
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),
                                             provider_session: provider_session.clone(),
+                                            detail: detail.as_ref().map(|value| value.to_string()),
                                             is_snapshot,
                                         },
                                     ),
@@ -6955,6 +6961,7 @@ mod tests {
             state: "blocked".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         })
@@ -7045,6 +7052,7 @@ mod tests {
                 state: reported_state.into(),
                 agent: Some("omo".into()),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
             })
@@ -7145,6 +7153,7 @@ mod tests {
                 state: reported_state.into(),
                 agent: Some("omo".into()),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin,
             })
@@ -7198,6 +7207,7 @@ mod tests {
             state: "idle".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
         })
@@ -7272,6 +7282,7 @@ mod tests {
             session_id: session_id.into(),
             state: "working".into(),
             agent: Some("omo".into()),
+            detail: None,
             provider_session: Some(crate::daemon::protocol::AgentProviderSession {
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: conversation.to_string(),

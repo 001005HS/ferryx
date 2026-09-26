@@ -68,6 +68,7 @@ pub async fn publish_discovered(owner: &DaemonServer, root: &Path, session: &Val
         session_id: id.into(),
         state: "idle".into(),
         agent: Some("omo".into()),
+        detail: None,
         provider_session: Some(AgentProviderSession {
             key: AgentProviderSessionKey::SessionId,
             id: provider_id.clone(),

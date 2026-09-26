@@ -363,6 +363,7 @@ impl LegacyPeer {
                 state: snapshot.state.as_str().into(),
                 agent: snapshot.agent.as_deref().map(Into::into),
                 provider_session: snapshot.provider_session.clone(),
+                detail: snapshot.detail.as_deref().map(Into::into),
                 is_snapshot: true,
                 origin: snapshot.origin,
             };
@@ -403,6 +404,7 @@ impl LegacyPeer {
                             state: report.state.state.as_str().into(),
                             agent: report.state.agent.as_deref().map(Into::into),
                             provider_session: report.state.provider_session,
+                            detail: report.state.detail.as_deref().map(Into::into),
                             is_snapshot: report.is_snapshot,
                             origin: report.state.origin,
                         };
@@ -417,6 +419,7 @@ impl LegacyPeer {
                             let message = DaemonStreamMessage::AgentState {
                                 session_id: current.session_id.as_str().into(), state: current.state.as_str().into(),
                                 agent: current.agent.as_deref().map(Into::into), provider_session: current.provider_session,
+                                detail: current.detail.as_deref().map(Into::into),
                                 is_snapshot: true,
                                 origin: current.origin,
                             };
@@ -432,10 +435,11 @@ impl LegacyPeer {
                     let Some(mut line) = read.map_err(|error| error.to_string())? else { break; };
                     line.push('\n');
                     match serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
-                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, is_snapshot, origin }) => {
+                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin }) => {
                             agent_state_hub.publish_legacy(AgentState {
                                 session_id: session_id.into_owned(), state: state.into_owned(),
                                 agent: agent.map(|value| value.into_owned()), provider_session,
+                                detail: detail.map(|value| value.into_owned()),
                                 origin,
                             }, is_snapshot);
                         }

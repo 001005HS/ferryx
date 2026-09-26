@@ -2004,6 +2004,7 @@ impl DaemonServer {
         String,
         Option<String>,
         Option<crate::daemon::protocol::AgentProviderSession>,
+        Option<String>,
     )> {
         let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
@@ -2019,6 +2020,7 @@ impl DaemonServer {
             report.state,
             report.agent,
             provider_session,
+            report.detail,
         ))
     }
 
@@ -2063,6 +2065,7 @@ impl DaemonServer {
                                         state: report.1.clone(),
                                         agent: report.2.clone(),
                                         provider_session: report.3.clone(),
+                                        detail: report.4.clone(),
                                     };
                                     if let Err(error) = sessions
                                         .validate_machine_agent_report(session.target, hint)
@@ -2089,6 +2092,7 @@ impl DaemonServer {
                                 state: report.1,
                                 agent: report.2,
                                 provider_session: report.3,
+                                detail: report.4,
                                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
                             });
                         }
@@ -2187,6 +2191,7 @@ impl DaemonServer {
                                         state: report.1.clone(),
                                         agent: report.2.clone(),
                                         provider_session: report.3.clone(),
+                                        detail: report.4.clone(),
                                     };
                                     if let Err(error) = sessions
                                         .validate_machine_agent_report(session.target, hint)
@@ -2213,6 +2218,7 @@ impl DaemonServer {
                                 state: report.1,
                                 agent: report.2,
                                 provider_session: report.3,
+                                detail: report.4,
                                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
                             });
                         }
@@ -4278,6 +4284,7 @@ impl DaemonServer {
                 state: Cow::Borrowed(&snapshot.state),
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
                 provider_session: snapshot.provider_session.clone(),
+                detail: snapshot.detail.as_deref().map(Cow::Borrowed),
                 is_snapshot: true,
                 origin: snapshot.origin,
             };
@@ -4337,6 +4344,7 @@ impl DaemonServer {
                                         state: Cow::Borrowed(&report.state.state),
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
                                         provider_session: report.state.provider_session,
+                                        detail: report.state.detail.as_deref().map(Cow::Borrowed),
                                         is_snapshot: report.is_snapshot,
                                         origin: report.state.origin,
                                     };
@@ -4361,6 +4369,7 @@ impl DaemonServer {
                                                 state: Cow::Borrowed(&current.state),
                                                 agent: current.agent.as_deref().map(Cow::Borrowed),
                                                 provider_session: current.provider_session,
+                                                detail: current.detail.as_deref().map(Cow::Borrowed),
                                                 is_snapshot: true,
                                                 origin: current.origin,
                                             };
@@ -6278,6 +6287,7 @@ mod tests {
             state: "working".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         assert_eq!(
@@ -6358,6 +6368,7 @@ mod tests {
             state: "working".to_string(),
             agent: Some("codex".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         server.agent_states.publish_canonical(AgentState {
@@ -6365,6 +6376,7 @@ mod tests {
             state: "blocked".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
 
@@ -6422,6 +6434,7 @@ mod tests {
                 state: "working".to_string(),
                 agent: Some("omo".to_string()),
                 provider_session: None,
+                detail: None,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
             });
 
@@ -6522,6 +6535,7 @@ mod tests {
                 "working".to_string(),
                 Some("omo".to_string()),
                 None,
+                None,
             ))
         );
         let valid = DaemonServer::parse_agent_state_report(
@@ -6549,8 +6563,18 @@ mod tests {
             DaemonServer::parse_agent_state_report(
                 r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#
             ),
-            Some(("s1".to_string(), "idle".to_string(), None, None)),
+            Some(("s1".to_string(), "idle".to_string(), None, None, None)),
             "agent is optional so older extension copies keep working"
+        );
+        let with_detail = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"blocked","agent":"omo","detail":"Auth method — Which library should we use?"}"#,
+        )
+        .expect("a blocked report carries the question text");
+        assert_eq!(with_detail.1, "blocked");
+        assert_eq!(
+            with_detail.4.as_deref(),
+            Some("Auth method — Which library should we use?"),
+            "the question text must survive parsing, or the inbox row cannot show it"
         );
         for rejected in [
             r#"{"type":"agentState","sessionId":"s1","state":"bogus"}"#,

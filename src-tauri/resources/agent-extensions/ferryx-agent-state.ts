@@ -32,7 +32,19 @@ function providerSessionFromContext(ctx): unknown {
   // the session manager; ctx.providerSession exists solely in mocked shapes.
   const sessionManager = ctx?.sessionManager;
   const id = sessionManager?.getSessionId?.();
-  if (typeof id !== "string" || id.length === 0) return undefined;
+  if (typeof id !== "string" || id.length === 0) {
+    // The pi runtime does not always hand the session manager to extensions, so fall back to the
+    // identity the agent's own PTY carries. Without this the daemon receives no provider session
+    // and every session in a workspace resolves to the same transcript.
+    const envId = typeof process !== "undefined" ? process.env?.PI_SESSION_ID : undefined;
+    if (typeof envId !== "string" || envId.length === 0) return undefined;
+    const envFile = typeof process !== "undefined" ? process.env?.PI_SESSION_FILE : undefined;
+    return {
+      key: "session_id",
+      id: envId,
+      ...(typeof envFile === "string" && envFile.length > 0 ? { transcriptPath: envFile } : {}),
+    };
+  }
   const transcriptPath = sessionManager?.getSessionFile?.();
   return {
     key: "session_id",
@@ -41,9 +53,9 @@ function providerSessionFromContext(ctx): unknown {
   };
 }
 
-function send(state: AgentState, providerSession?: unknown): void {
+function send(state: AgentState, providerSession?: unknown, detail?: string): void {
   if (!enabled()) return;
-  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession, token: tcpEnabled ? stateToken : undefined })}\n`;
+  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession, detail, token: tcpEnabled ? stateToken : undefined })}\n`;
   sendChain = sendChain.then(
     () =>
       new Promise<void>((resolve) => {
@@ -69,15 +81,38 @@ export default function (pi): void {
   if (!enabled()) return;
 
   let agentActive = false;
-  let blockedCount = 0;
   let lastState: AgentState | undefined;
   let lastProviderSessionId: string | undefined;
   let rootSession = false;
 
+  // Questions the user must answer, keyed by request id, valued by the text to show.
+  // `herdr:blocked` fires for every question, including ones the agent keeps working through,
+  // so the count comes from `ask-user:asked` (which carries `waitForAnswer`) and only the
+  // release comes from `herdr:blocked`, whose `active: false` is emitted for answered,
+  // timed-out, and cancelled questions alike.
+  const blockingQuestions = new Map<string, string | undefined>();
+  const nonBlockingIds = new Set<string>();
+
   function desiredState(): AgentState {
-    if (blockedCount > 0) return "blocked";
+    if (blockingQuestions.size > 0) return "blocked";
     if (agentActive) return "working";
     return "idle";
+  }
+
+  function blockedDetail(): string | undefined {
+    for (const label of blockingQuestions.values()) {
+      if (typeof label === "string" && label.length > 0) return label;
+    }
+    return undefined;
+  }
+
+  function questionLabel(request: unknown): string | undefined {
+    const questions = (request as { questions?: unknown } | undefined)?.questions;
+    const first = Array.isArray(questions) ? questions[0] : undefined;
+    const header = typeof first?.header === "string" ? first.header.trim() : "";
+    const question = typeof first?.question === "string" ? first.question.trim() : "";
+    if (header.length > 0 && question.length > 0) return `${header} — ${question}`;
+    return question.length > 0 ? question : header.length > 0 ? header : undefined;
   }
 
   function publishState(force = false, ctx?: unknown): void {
@@ -91,7 +126,7 @@ export default function (pi): void {
     if (!force && !rotated && next === lastState) return;
     lastState = next;
     if (typeof providerSessionId === "string") lastProviderSessionId = providerSessionId;
-    send(next, providerSession);
+    send(next, providerSession, blockedDetail());
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -115,13 +150,35 @@ export default function (pi): void {
     publishState(false, ctx);
   });
 
-  pi.events?.on?.("ferryx:blocked", (data) => {
+  pi.events?.on?.("ask-user:asked", (data) => {
     if (!rootSession) return;
-    if (data?.active) {
-      blockedCount += 1;
-    } else {
-      blockedCount = Math.max(0, blockedCount - 1);
+    const request = (data as { request?: { requestId?: unknown; waitForAnswer?: unknown } } | undefined)?.request;
+    const id = typeof request?.requestId === "string" ? request.requestId : undefined;
+    if (id === undefined) return;
+    // `waitForAnswer: false` means the question stays open while the agent keeps working, so it
+    // is not a request for the user to act now.
+    if (request?.waitForAnswer === false) {
+      nonBlockingIds.add(id);
+      return;
     }
+    blockingQuestions.set(id, questionLabel(request));
     publishState();
+  });
+
+  pi.events?.on?.("herdr:blocked", (data) => {
+    if (!rootSession) return;
+    const payload = data as { active?: unknown; id?: unknown; label?: unknown } | undefined;
+    const id = typeof payload?.id === "string" ? payload.id : undefined;
+    if (id === undefined) return;
+    if (payload?.active) {
+      if (nonBlockingIds.has(id) || blockingQuestions.has(id)) return;
+      // Host dialogs raise this without going through the question tool, so it is the only signal.
+      blockingQuestions.set(id, typeof payload.label === "string" ? payload.label : undefined);
+      publishState();
+      return;
+    }
+    const wasBlocking = blockingQuestions.delete(id);
+    nonBlockingIds.delete(id);
+    if (wasBlocking) publishState();
   });
 }

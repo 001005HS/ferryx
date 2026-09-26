@@ -537,6 +537,7 @@ export type NativeTerminalAgentStatePayload = {
   ruleId: string;
   manifestId: string;
   providerSession?: AgentProviderSession | null;
+  detail?: string | null;
   isSnapshot?: boolean;
 };
 

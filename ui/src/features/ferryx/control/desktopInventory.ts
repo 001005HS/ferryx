@@ -78,14 +78,3 @@ export function buildDesktopInventory(
   const finalUnavailableHosts = unavailableHosts.length > 0 ? [...unavailableHosts] : [];
   return { revision: items.length, items: items.map((item, index) => ({ ...item, revision: index + 1 })), completeness, unavailableHosts: finalUnavailableHosts };
 }
-
-/** True when the session needs the user: finished and never seen. */
-export function isUnreadAgent(agent: Agent, workspaces: DesktopWorkspace[]): boolean {
-  const workspace = workspaces.find((w) => w.workspaceId === agent.workspaceId);
-  if (!workspace) return false;
-  const resolvedKey = getLocalSessionKeyForAgent(agent, workspace);
-  if (!resolvedKey) return false;
-  const activity = workspace.state.activityBySessionId?.[resolvedKey];
-  if (!activity) return false;
-  return activity.state === "done" && activity.seen !== true;
-}

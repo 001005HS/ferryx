@@ -16,6 +16,8 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
+  CheckCheck,
+  ChevronDown,
   ChevronRight,
   Folder,
   History,
@@ -44,16 +46,14 @@ import {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
 import { revealPath, type RegisteredProject } from "../lib/tauri";
-import type { Agent } from "../features/ferryx/control/client";
-import type { DesktopWorkspace } from "../features/ferryx/control/desktopInventory";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
-import { NotificationCenterButton } from "./notification/NotificationCenterButton";
-import type { IsSessionNavigable } from "./notification/NotificationCenterPopover";
 import { fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
@@ -104,20 +104,30 @@ type SidebarProps = {
   onResetAgentState?: (worktree: Worktree) => void;
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
-  attentionInventory?: {
-    workspaces: DesktopWorkspace[];
-    unavailableHosts?: readonly string[];
-    onSelectAgent: (agent: Agent) => void;
-  };
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
-  onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
-  isSessionNavigable?: IsSessionNavigable;
-  isNotificationCenterOpen?: boolean;
-  onOpenChangeNotificationCenter?: (open: boolean) => void;
+  /** Present when the sidebar leads with the attention inbox and folds the worktree tree behind a pill. */
+  attention?: SidebarAttention;
 };
+
+export type SidebarAttention = {
+  rows: readonly AttentionRow[];
+  onOpen: (row: AttentionRow) => void;
+  onDismiss: (row: AttentionRow) => void;
+  onDismissAll: () => void;
+  openSessionCount: number;
+  worktreeListOpen: boolean;
+  onWorktreeListOpenChange: (open: boolean) => void;
+};
+
+const WORKTREE_REGION_ID = "sidebar-worktree-region";
+
+function projectPillLabel(project: RegisteredProject): string {
+  if (!project.target || project.target.kind === "local") return project.workspaceId;
+  return project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? project.workspaceId;
+}
 
 export function Sidebar({
   open = true,
@@ -145,13 +155,15 @@ export function Sidebar({
   onOpenSettings,
   onToggle,
   onHide,
-  onNavigateToSession,
-  isSessionNavigable,
-  isNotificationCenterOpen,
-  onOpenChangeNotificationCenter,
-  attentionInventory,
+  attention,
 }: SidebarProps) {
   const worktreeRegionRef = useRef<HTMLDivElement>(null);
+  const closeWorktreeList = attention?.onWorktreeListOpenChange;
+  // Picking a worktree is the end of a trip into the list, so the inbox comes back on its own.
+  const selectWorktree = useCallback((worktree: Worktree) => {
+    onSelectWorktree(worktree);
+    closeWorktreeList?.(false);
+  }, [closeWorktreeList, onSelectWorktree]);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [width, setWidth] = useState(loadSidebarWidth);
   const widthRef = useRef(width);
@@ -265,6 +277,9 @@ export function Sidebar({
       ? activeGroup.primaryProject.workspaceId
       : undefined;
   }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
+  const activeProject = projects.find((project) => project.workspaceId === activeProjectId);
+  const activeWorktreeRow = worktrees.find((worktree) => worktree.path === activePath);
+  const activeWorktreeLabel = activeWorktreeRow ? workspaceName(activeWorktreeRow) : undefined;
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -408,18 +423,63 @@ export function Sidebar({
           >
             <Plus className="size-3.5" />
           </IconButton>
-          <div className="ml-auto flex items-center">
-            <NotificationCenterButton
-              isNotificationCenterOpen={isNotificationCenterOpen}
-              onOpenChangeNotificationCenter={onOpenChangeNotificationCenter}
-              onNavigateToSession={onNavigateToSession}
-              isSessionNavigable={isSessionNavigable}
-              attentionInventory={attentionInventory}
-            />
-          </div>
+          {attention ? (
+            <div className="ml-auto flex items-center">
+              <IconButton
+                label="모두 읽음"
+                className="no-drag"
+                size="sm"
+                disabled={attention.rows.length === 0}
+                onClick={attention.onDismissAll}
+              >
+                <CheckCheck className="size-3.5" />
+              </IconButton>
+            </div>
+          ) : null}
         </div>
 
-        <div ref={worktreeRegionRef} tabIndex={-1} data-testid="worktree-region" className="flex min-h-0 flex-1 flex-col outline-none">
+        {attention ? (
+          <div className="shrink-0 border-b border-worktree-sidebar-border px-2 pb-2">
+            <button
+              type="button"
+              aria-expanded={attention.worktreeListOpen}
+              aria-controls={WORKTREE_REGION_ID}
+              onClick={() => attention.onWorktreeListOpenChange(!attention.worktreeListOpen)}
+              className="no-drag flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md border border-worktree-sidebar-border bg-white/[0.03] px-2 text-left text-[11.5px] transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Folder className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span className="shrink-0 truncate font-semibold">
+                {activeProject ? projectPillLabel(activeProject) : "프로젝트 없음"}
+              </span>
+              {activeWorktreeLabel ? (
+                <span className="min-w-0 truncate text-muted-foreground">/ {activeWorktreeLabel}</span>
+              ) : null}
+              <span className="sr-only">워크트리 전환</span>
+              <ChevronDown
+                aria-hidden="true"
+                className={cn("ml-auto size-3 shrink-0 text-muted-foreground transition-transform", attention.worktreeListOpen && "rotate-180")}
+              />
+            </button>
+          </div>
+        ) : null}
+
+        {attention && !attention.worktreeListOpen ? (
+          <AttentionInbox
+            rows={attention.rows}
+            onOpen={attention.onOpen}
+            onDismiss={attention.onDismiss}
+            openSessionCount={attention.openSessionCount}
+          />
+        ) : null}
+
+        <div
+          ref={worktreeRegionRef}
+          id={WORKTREE_REGION_ID}
+          tabIndex={-1}
+          data-testid="worktree-region"
+          hidden={attention ? !attention.worktreeListOpen : undefined}
+          className={cn("min-h-0 flex-1 flex-col outline-none", attention && !attention.worktreeListOpen ? "hidden" : "flex")}
+        >
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek">
             {projects.length === 0 ? (
               <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
@@ -498,7 +558,7 @@ export function Sidebar({
                               title={`Remote worktree: ${project.repoRoot}${standaloneHostLabel ? ` (${standaloneHostLabel})` : ""}`}
                               data-shortcut-worktree-path={project.repoRoot}
                               data-shortcut-workspace-id={project.workspaceId}
-                              onClick={() => onSelectWorktree(standaloneRootWorktree)}
+                              onClick={() => selectWorktree(standaloneRootWorktree)}
                             >
                               <span className="flex min-w-0 flex-1 items-center gap-1.5">
                                 {activityIndicator ? (
@@ -527,13 +587,14 @@ export function Sidebar({
                             </button>
                           ) : <WorktreeList
                             worktrees={projectWorktrees}
+                            repoRoot={project.repoRoot}
                             agents={agents}
                             activePath={activeWorktreeOwnerId === project.workspaceId ? activePath : ""}
                             activeWorkspaceId={activeProjectId}
                             statuses={statuses}
                             unreadWorktreePaths={unreadWorktreePaths}
                             activityByWorktreePath={activityByWorktreePath}
-                            onSelect={onSelectWorktree}
+                            onSelect={selectWorktree}
                             onCreateWorktree={
                               project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
                             }
@@ -553,6 +614,12 @@ export function Sidebar({
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
+          {attention ? (
+            <span className="mr-auto flex min-w-0 items-center gap-1.5 truncate pl-0.5 text-[10.5px] text-muted-foreground">
+              <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-success" />
+              감시 중 {attention.openSessionCount}개 세션
+            </span>
+          ) : null}
           <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
             <Settings2 className="size-3.5" />
           </IconButton>
@@ -601,6 +668,7 @@ export function Sidebar({
             <SidebarDragRow kind="worktree" overlay>
               <WorktreeRow
                 worktree={activeWorktreeOverlay}
+                repoRoot={projects.find((p) => p.workspaceId === activeDrag.workspaceId)?.repoRoot}
                 active={activeWorktreeOwnerId === activeDrag.workspaceId && activeWorktreeOverlay.path === activePath}
                 agent={agents.find((agent) => agent.worktreePath === activeWorktreeOverlay.path)}
                 status={statuses[activeWorktreeOverlay.path]}
