@@ -1645,6 +1645,23 @@ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonRes
     }
 }
 
+/// Decides whether a v5 handover may commit after the successor has drained the transfer socket.
+///
+/// The predecessor gives up ownership of every session it offers BEFORE the commit. So a delivery
+/// shortfall is not a warning: committing retires the predecessor, and each undelivered session
+/// dies with the PTY master fd it still owned. Aborting instead leaves the predecessor serving all
+/// of them, which is always the survivable outcome.
+pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
+    if accepted >= offered {
+        return Ok(());
+    }
+    Err(format!(
+        "Aborting handover: predecessor offered {offered} session(s) but delivered {accepted}. \
+         Committing would terminate the {} undelivered session(s).",
+        offered.saturating_sub(accepted)
+    ))
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -2316,12 +2333,20 @@ impl DaemonServer {
                     .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
 
                 let accept_handle = tokio::task::spawn_blocking(move || {
-                    let (stream, _creds) = listener.accept()?;
+                    let (stream, _creds) = listener.accept().map_err(|error| (error, 0usize))?;
                     let mut exports = Vec::new();
-                    while let Ok(Some(export)) = crate::daemon::handover_socket::recv_session(&stream) {
-                        exports.push(export);
+                    // Stopping at the first error silently strands every session behind it: the
+                    // predecessor has already given up ownership of them, so an early break here
+                    // is what turns a transport hiccup into dead terminals. Surface the error
+                    // instead, and let the caller decide whether the handover may proceed.
+                    loop {
+                        match crate::daemon::handover_socket::recv_session(&stream) {
+                            Ok(Some(export)) => exports.push(export),
+                            Ok(None) => break,
+                            Err(error) => return Err((error, exports.len())),
+                        }
                     }
-                    Ok::<_, crate::daemon::handover_socket::HandoverSocketError>(exports)
+                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
                 });
 
                 let transfer_resp = legacy_peer
@@ -2339,18 +2364,21 @@ impl DaemonServer {
                 let exports = accept_handle
                     .await
                     .map_err(|e| format!("Handover worker panicked: {e}"))?
-                    .map_err(|e| format!("Handover socket receive error: {e}"))?;
+                    .map_err(|(error, received)| {
+                        format!(
+                            "Handover socket receive error after {received} of {offered} session(s): {error}"
+                        )
+                    })?;
                 let accepted = exports.len();
                 // A predecessor that reports more than it delivered is the shape of a lossy
                 // handover: the sessions missing from `accepted` are the ones that lose their
                 // PTY owner when the predecessor retires.
                 tracing::info!(offered, accepted, "Received session exports over the handover socket");
-                if accepted != offered {
-                    tracing::warn!(
-                        offered,
-                        accepted,
-                        "Handover socket delivered fewer sessions than the predecessor reported"
-                    );
+                if let Err(reason) = handover_delivery_verdict(offered, accepted) {
+                    // Do NOT proceed. Committing here retires the predecessor, and every session it
+                    // offered but did not deliver dies with the PTY master fd it still owned.
+                    // Aborting leaves the predecessor serving all of them instead.
+                    return Err(reason);
                 }
 
                 for export in exports {
@@ -3792,12 +3820,33 @@ impl DaemonServer {
             "Spawning successor daemon for handover"
         );
         tokio::spawn(async move {
+            // Capture the successor's output to a durable log. With `Stdio::null()` a failed
+            // handover left no record at all, which is exactly the state a lost-session
+            // investigation needs and cannot get after the fact.
+            let successor_log = Some(get_runtime_dir().join("handover-successor.log"));
+            let successor_stdout = successor_log
+                .as_ref()
+                .and_then(|path| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .ok()
+                })
+                .map(std::process::Stdio::from);
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon")
                 .arg("--handover-from")
                 .arg(&legacy_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
+                .stdin(std::process::Stdio::null());
+            match successor_stdout {
+                Some(target) => {
+                    cmd.stdout(target);
+                }
+                None => {
+                    cmd.stdout(std::process::Stdio::null());
+                }
+            }
             if let Err(e) = cmd.spawn() {
                 // The canonical listener is already gone by this point. Abandoning the loop
                 // here would strand every live session with no reachable socket, so keep
@@ -4432,6 +4481,27 @@ fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// A live handover on 2026-09-26 lost 35 of 55 sessions: the successor's receive loop stopped
+    /// silently at the first socket error and the mismatch was only warned about, so the commit
+    /// went ahead and the predecessor closed the PTY fds of everything it had not delivered.
+    #[test]
+    fn a_short_delivery_aborts_the_handover_instead_of_committing() {
+        // The shape of the incident: 55 offered, 20 delivered.
+        let verdict = super::handover_delivery_verdict(55, 20);
+        let reason = verdict.expect_err("a short delivery must abort");
+        assert!(reason.contains("55"), "names how many were offered: {reason}");
+        assert!(reason.contains("20"), "names how many arrived: {reason}");
+        assert!(reason.contains("35"), "names how many would be terminated: {reason}");
+
+        // Losing even one session is enough to refuse.
+        assert!(super::handover_delivery_verdict(1, 0).is_err());
+        assert!(super::handover_delivery_verdict(2, 1).is_err());
+
+        // A complete delivery commits, including the empty case.
+        assert!(super::handover_delivery_verdict(0, 0).is_ok());
+        assert!(super::handover_delivery_verdict(55, 55).is_ok());
+    }
+
     use super::*;
     use crate::terminal::output_hub::OutputChunk;
     use tempfile::tempdir;
