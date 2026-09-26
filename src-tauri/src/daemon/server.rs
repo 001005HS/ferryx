@@ -1662,6 +1662,32 @@ pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Resu
     ))
 }
 
+/// Gate the commit on what the predecessor OWNED, not merely on what it managed to send.
+///
+/// `offered` counts only the sessions the predecessor successfully exported. A session that
+/// fails to export is therefore absent from BOTH sides of an `offered`/`accepted` comparison,
+/// so that check passes while the session dies with the predecessor's PTY master fd. This was
+/// observed in production: `requested=20 transferred=18` followed by `offered=18 accepted=18`
+/// and a commit -- two sessions lost with the check reporting success.
+///
+/// `owned == 0` means the peer is an older daemon that does not send the field; fall back to
+/// the delivery-only check rather than aborting every handover with such a predecessor.
+pub(crate) fn handover_delivery_verdict_owned(
+    owned: usize,
+    offered: usize,
+    accepted: usize,
+) -> Result<(), String> {
+    handover_delivery_verdict(offered, accepted)?;
+    if owned == 0 || accepted >= owned {
+        return Ok(());
+    }
+    Err(format!(
+        "Aborting handover: predecessor owned {owned} session(s) but only {accepted} survived the \
+         transfer. Committing would terminate the {} session(s) it could not export.",
+        owned.saturating_sub(accepted)
+    ))
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -2356,8 +2382,11 @@ impl DaemonServer {
                     .await
                     .map_err(|e| format!("TransferSessions request failed: {e}"))?;
 
-                let offered = match transfer_resp {
-                    DaemonResponse::TransferSessionsOk { transferred_count } => transferred_count,
+                let (offered, owned) = match transfer_resp {
+                    DaemonResponse::TransferSessionsOk {
+                        transferred_count,
+                        requested_count,
+                    } => (transferred_count, requested_count),
                     other => return Err(format!("TransferSessions failed: {other:?}")),
                 };
 
@@ -2372,9 +2401,11 @@ impl DaemonServer {
                 let accepted = exports.len();
                 // A predecessor that reports more than it delivered is the shape of a lossy
                 // handover: the sessions missing from `accepted` are the ones that lose their
-                // PTY owner when the predecessor retires.
-                tracing::info!(offered, accepted, "Received session exports over the handover socket");
-                if let Err(reason) = handover_delivery_verdict(offered, accepted) {
+                // PTY owner when the predecessor retires. `owned` is what the predecessor
+                // actually held; `offered` already excludes sessions it failed to export, so
+                // checking `accepted` against `offered` alone cannot see those casualties.
+                tracing::info!(owned, offered, accepted, "Received session exports over the handover socket");
+                if let Err(reason) = handover_delivery_verdict_owned(owned, offered, accepted) {
                     // Do NOT proceed. Committing here retires the predecessor, and every session it
                     // offered but did not deliver dies with the PTY master fd it still owned.
                     // Aborting leaves the predecessor serving all of them instead.
@@ -3545,6 +3576,7 @@ impl DaemonServer {
                                 );
                                 DaemonResponse::TransferSessionsOk {
                                     transferred_count: count,
+                                    requested_count: requested,
                                 }
                             }
                             Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
@@ -4534,6 +4566,34 @@ mod tests {
         // A complete delivery commits, including the empty case.
         assert!(super::handover_delivery_verdict(0, 0).is_ok());
         assert!(super::handover_delivery_verdict(55, 55).is_ok());
+    }
+
+    /// The delivery check above cannot see a session the predecessor never managed to export.
+    ///
+    /// Observed in production on 2026-09-26: `requested=20 transferred=18`, then
+    /// `offered=18 accepted=18`, then commit. The two failed exports were absent from BOTH
+    /// sides of the offered/accepted comparison, so the gate reported a clean handover while
+    /// those sessions died with the predecessor's PTY master fds.
+    #[test]
+    fn sessions_that_failed_to_export_also_abort_the_handover() {
+        // The exact production shape: owned 20, exported 18, all 18 delivered.
+        let verdict = super::handover_delivery_verdict_owned(20, 18, 18);
+        let reason = verdict.expect_err("failed exports must abort the handover");
+        assert!(reason.contains("20"), "names how many were owned: {reason}");
+        assert!(reason.contains("18"), "names how many survived: {reason}");
+        assert!(reason.contains("2"), "names how many would be terminated: {reason}");
+
+        // The delivery shortfall is still caught, and reported as a delivery failure.
+        assert!(super::handover_delivery_verdict_owned(55, 55, 20).is_err());
+
+        // A predecessor that owned, exported and delivered everything commits.
+        assert!(super::handover_delivery_verdict_owned(20, 20, 20).is_ok());
+        assert!(super::handover_delivery_verdict_owned(0, 0, 0).is_ok());
+
+        // An older predecessor does not send `requested_count`, which arrives as 0. That must
+        // fall back to the delivery check rather than aborting every handover with such a peer.
+        assert!(super::handover_delivery_verdict_owned(0, 18, 18).is_ok());
+        assert!(super::handover_delivery_verdict_owned(0, 18, 17).is_err());
     }
 
     use super::*;

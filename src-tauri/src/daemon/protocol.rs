@@ -438,6 +438,16 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     TransferSessionsOk {
         transferred_count: usize,
+        /// How many sessions the predecessor actually owned when the transfer began.
+        ///
+        /// `transferred_count` counts only the exports that were successfully sent, so a
+        /// predecessor that fails to export a session reports a smaller number, the
+        /// successor's delivery check compares that smaller number against itself and
+        /// passes, and the undelivered sessions die with the predecessor's PTY fds.
+        /// Older daemons do not send this field; it defaults to 0, and the successor then
+        /// falls back to comparing against `transferred_count` alone.
+        #[serde(default)]
+        requested_count: usize,
     },
     #[serde(rename_all = "camelCase")]
     UploadClipboardImageOk {
