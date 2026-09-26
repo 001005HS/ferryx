@@ -303,7 +303,20 @@ pub(crate) async fn bounded_output(
     plan: &ShellCommandPlan,
     deadline: Duration,
 ) -> Result<Vec<u8>, IpcError> {
-    collect_output(spawn_child(plan, Stdio::null())?, deadline).await
+    collect_output(spawn_child(plan, Stdio::null())?, deadline, PROBE_OUTPUT_LIMIT).await
+}
+
+/// For callers that legitimately expect a large body - a transcript file, not a probe.
+///
+/// The bound still exists so a misbehaving remote cannot stream without limit, but it is orders of
+/// magnitude above [`PROBE_OUTPUT_LIMIT`], which is sized for directory listings and probe reports.
+/// Callers should also bound the remote side (`tail -c`) so the wire carries only what is needed.
+pub(crate) async fn bounded_output_with_limit(
+    plan: &ShellCommandPlan,
+    deadline: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, IpcError> {
+    collect_output(spawn_child(plan, Stdio::null())?, deadline, max_bytes).await
 }
 
 pub(crate) async fn bounded_output_with_stdin(
@@ -324,12 +337,17 @@ pub(crate) async fn bounded_output_with_stdin(
             let _ = stdin.shutdown().await;
         }
     });
-    collect_output(child, deadline).await
+    collect_output(child, deadline, PROBE_OUTPUT_LIMIT).await
 }
+
+/// Ceiling for probe-style commands (listings, reports, probes). Not a universal limit: see
+/// [`bounded_output_with_limit`].
+pub(crate) const PROBE_OUTPUT_LIMIT: usize = 16 * 1024;
 
 async fn collect_output(
     mut child: tokio::process::Child,
     deadline: Duration,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, IpcError> {
     let stdout = child
         .stdout
@@ -341,9 +359,11 @@ async fn collect_output(
         .ok_or_else(|| IpcError::internal("Missing SSH stderr"))?;
     let read = async |stream: Box<dyn tokio::io::AsyncRead + Unpin + Send>| {
         let mut bytes = Vec::new();
-        stream.take(16385).read_to_end(&mut bytes).await?;
-        if bytes.len() > 16384 {
-            return Err(std::io::Error::other("SSH output exceeds 16 KiB"));
+        stream.take(max_bytes as u64 + 1).read_to_end(&mut bytes).await?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::other(format!(
+                "SSH output exceeds {max_bytes} bytes"
+            )));
         }
         Ok::<_, std::io::Error>(bytes)
     };
