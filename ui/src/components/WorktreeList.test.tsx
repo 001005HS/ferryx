@@ -20,6 +20,10 @@ vi.mock("../lib/nativeMenu", () => ({
   openNativePopupMenu: nativeMenu.openNativePopupMenu,
 }));
 
+const toastMocks = vi.hoisted(() => ({ info: vi.fn(), success: vi.fn(), error: vi.fn() }));
+
+vi.mock("sonner", () => ({ toast: toastMocks }));
+
 function lastMenuCall(): { items: Array<{ kind: string; id?: string; label?: string; enabled?: boolean }>; onAction: (id: string) => void } {
   const calls = nativeMenu.openNativePopupMenu.mock.calls;
   const last = calls[calls.length - 1];
@@ -590,7 +594,7 @@ describe("WorktreeList actions", () => {
     expect(screen.queryByText("SSH")).not.toBeInTheDocument();
   });
 
-  it("renders stale/disabled worktree row with disabled select button and disabled action controls", () => {
+  it("renders a stale row that explains itself instead of opening, with its actions disabled", () => {
     const onSelect = vi.fn();
     const onCreateWorktree = vi.fn();
     const onDelete = vi.fn();
@@ -626,11 +630,15 @@ describe("WorktreeList actions", () => {
     const row = screen.getByText("stale-worktree").closest(".group\\/worktree-row")!;
     expect(row).toHaveAttribute("data-stale", "true");
 
-    // Main select button must be disabled
-    const selectBtn = row.querySelector("button[data-shortcut-worktree-path]");
-    expect(selectBtn).toBeDisabled();
-    fireEvent.click(selectBtn!);
+    // The select control stays clickable so it can explain itself, but it must not open the row.
+    toastMocks.info.mockClear();
+    const selectBtn = row.querySelector("button[data-shortcut-worktree-path]")!;
+    expect(selectBtn).toHaveAttribute("aria-disabled", "true");
+    expect(selectBtn.getAttribute("title")).toContain("Offline (stale)");
+    fireEvent.click(selectBtn);
     expect(onSelect).not.toHaveBeenCalled();
+    expect(toastMocks.info).toHaveBeenCalledTimes(1);
+    expect(toastMocks.info.mock.calls[0][0]).toContain("reconnects");
 
     // Add worktree button must be disabled
     const addBtn = screen.getByRole("button", { name: "Add worktree" });
@@ -643,6 +651,58 @@ describe("WorktreeList actions", () => {
     expect(deleteBtn).toBeDisabled();
     fireEvent.click(deleteBtn);
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps the right-click menu on a stale row with only the read-only actions enabled", () => {
+    const staleWorktree: Worktree & { stale?: boolean; disabled?: boolean } = {
+      workspaceId: "ws-123456",
+      identity: { wsId: "ws-123456", slug: "stale-worktree" },
+      path: "/srv/repo/stale-worktree",
+      head: "def456",
+      branch: "refs/heads/orca/ws-123456/stale-worktree",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Remote Host",
+      hostSummary: "Offline (stale)",
+      stale: true,
+      disabled: true,
+    };
+
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const before = nativeMenu.openNativePopupMenu.mock.calls.length;
+
+    render(
+      <WorktreeList
+        worktrees={[staleWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onResetAgentState={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByText("stale-worktree").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
+
+    expect(nativeMenu.openNativePopupMenu.mock.calls.length).toBe(before + 1);
+    const { items } = lastMenuCall();
+
+    const copyPathItem = items.find((item) => item.id === "copy-path");
+    expect(copyPathItem).toBeDefined();
+    expect(copyPathItem?.enabled).not.toBe(false);
+
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.enabled).toBe(false);
+
+    const resetAgentStateItem = items.find((item) => item.id === "reset-agent-state");
+    expect(resetAgentStateItem?.enabled).toBe(false);
+
+    const revealItem = items.find((item) => item.id === "reveal");
+    expect(revealItem?.enabled).toBe(false);
   });
 
   it("identifies primary worktree by matching repoRoot path and makes external non-root worktrees deletable", () => {
