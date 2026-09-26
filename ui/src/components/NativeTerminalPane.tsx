@@ -1060,6 +1060,9 @@ export function NativeTerminalPane({
             backendSessionId: currentSessionId,
             error: String(error),
           });
+          // A dropped keystroke that says nothing is the worst outcome here: the user believes
+          // they typed it. Surface the drop so they know to retype rather than trusting the buffer.
+          setError("Input dropped: the terminal is not keeping up. Retype the last characters.");
           return;
         }
         if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
