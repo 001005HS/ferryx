@@ -127,6 +127,8 @@ struct RecordEnvelope {
 struct MessageBody {
     role: Option<String>,
     content: Option<serde_json::Value>,
+    #[serde(rename = "toolName")]
+    tool_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +136,7 @@ struct ContentPart {
     #[serde(rename = "type")]
     part_type: Option<String>,
     text: Option<String>,
+    name: Option<String>,
 }
 
 pub fn read_conversation(
@@ -211,10 +214,21 @@ fn parse_conversation<R: BufRead>(
                             if let Some(t) = part.text {
                                 text.push_str(&t);
                             }
+                        } else if part.part_type.as_deref() == Some("toolCall") {
+                            let tool = part.name.as_deref().unwrap_or("tool");
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&format!("→ {tool}"));
                         }
                     }
                 }
             }
+        }
+
+        if role == "toolResult" && text.is_empty() {
+            let tool = body.tool_name.as_deref().unwrap_or("tool");
+            text = format!("← {tool} result");
         }
 
         all_messages.push(ConversationMessage {
@@ -810,5 +824,27 @@ mod tests {
             Some("2026-09-25T02:07:05.100Z")
         );
         assert_eq!(messages[2].timestamp, None);
+    }
+
+    #[test]
+    fn test_tool_call_and_tool_result_formatting() {
+        let transcript = concat!(
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"checking"},{"type":"toolCall","id":"c1","name":"bash","arguments":{}}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-3","message":{"role":"toolResult","toolName":"bash"}}"#,
+            "\n",
+        );
+
+        let (messages, malformed) = read_conversation_from_bytes(transcript.as_bytes(), 10, None);
+        assert_eq!(malformed, 0);
+        assert_eq!(messages.len(), 3);
+
+        assert!(messages[0].text.contains("checking"));
+        assert!(messages[0].text.contains("→ bash"));
+        assert_eq!(messages[0].text, "checking\n→ bash");
+        assert_eq!(messages[1].text, "ok");
+        assert_eq!(messages[2].text, "← bash result");
     }
 }

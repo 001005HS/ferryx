@@ -1141,6 +1141,31 @@ async fn get_agent_history(
         .await
         .ok()
         .and_then(|details| details.worktree_path.map(|p| p.to_string_lossy().into_owned()));
+    // A newest-in-cwd guess is only safe when no other live session shares this cwd;
+    // otherwise the phone could show another agent's conversation.
+    let cwd_is_unique = match cwd.as_deref() {
+        None => false,
+        Some(own_cwd) => {
+            let mut unique = true;
+            for other in state.session_backend.list_sessions().await {
+                if other == target_session_id {
+                    continue;
+                }
+                let shares_cwd = state
+                    .session_backend
+                    .describe_session(&other)
+                    .await
+                    .ok()
+                    .and_then(|details| details.worktree_path)
+                    .is_some_and(|path| path.to_string_lossy() == own_cwd);
+                if shares_cwd {
+                    unique = false;
+                    break;
+                }
+            }
+            unique
+        }
+    };
     let provider_session = state
         .machine_services
         .as_ref()
@@ -1173,13 +1198,19 @@ async fn get_agent_history(
                         )
                     }) {
                         Some(transcript_path) => Some(transcript_path),
-                        None => cwd.and_then(|cwd_value| {
-                            crate::agent_transcript::latest_transcript_for_cwd(
-                                &home,
-                                &cwd_value,
-                                Some(&target_session_id),
-                            )
-                        }),
+                        None => {
+                            if cwd_is_unique {
+                                cwd.and_then(|cwd_value| {
+                                    crate::agent_transcript::latest_transcript_for_cwd(
+                                        &home,
+                                        &cwd_value,
+                                        Some(&target_session_id),
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        }
                     };
                     match transcript {
                         Some(transcript_path) => {
@@ -7296,6 +7327,197 @@ mod tests {
 
         let _ = stop_tx.send(());
         let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    struct SharedCwdStubBackend {
+        session_ids: Vec<String>,
+        cwd: std::path::PathBuf,
+    }
+
+    impl crate::remote::backend::RemoteSessionBackend for SharedCwdStubBackend {
+        fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+            let ids = self.session_ids.clone();
+            Box::pin(async move { ids })
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            let matches = self.session_ids.iter().any(|id| id == session_id);
+            let cwd = self.cwd.clone();
+            let id = session_id.to_string();
+            Box::pin(async move {
+                if !matches {
+                    return Err("unknown session".to_string());
+                }
+                Ok(RemoteSessionDetails {
+                    session_id: id,
+                    workspace_id: Some("ferryx".to_string()),
+                    worktree_label: Some("main".to_string()),
+                    worktree_path: Some(cwd),
+                    running: true,
+                    cols: 80,
+                    rows: 24,
+                })
+            })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _after_sequence: Option<u64>,
+        ) -> futures_util::future::BoxFuture<'a, Result<SessionAttachment, String>> {
+            Box::pin(async { Err("attach unsupported".into()) })
+        }
+        fn write_input<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _data: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn resize<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _cols: u16,
+            _rows: u16,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn signal<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _signal: TerminalSignal,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_never_guesses_when_two_sessions_share_a_cwd() {
+        use std::io::Write;
+
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-shared-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let cwd = "/Volumes/T9-Mac/project/ferryx";
+        let slug = "--Volumes-T9-Mac-project-ferryx--";
+        let dir = home.join(".omo").join("agent").join("sessions").join(slug);
+        std::fs::create_dir_all(&dir).expect("create sessions dir");
+
+        let agent_session_id = "01a0d650-db7a-7817-a21b-7be552a81e89";
+        let path = dir.join(format!("2026-09-25T00-00-00-000Z_{agent_session_id}.jsonl"));
+        let mut file = std::fs::File::create(&path).expect("create transcript");
+        writeln!(file, r#"{{"type":"message","id":"u1","message":{{"role":"user","content":[{{"type":"text","text":"ambiguous prompt"}}]}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"message","id":"a1","message":{{"role":"assistant","content":[{{"type":"text","text":"ambiguous answer"}}]}}}}"#).unwrap();
+        drop(file);
+
+        let ferryx_session_1 = "11111111-1111-1111-1111-111111111111";
+        let ferryx_session_2 = "22222222-2222-2222-2222-222222222222";
+        let shared_backend = Arc::new(SharedCwdStubBackend {
+            session_ids: vec![ferryx_session_1.to_string(), ferryx_session_2.to_string()],
+            cwd: std::path::PathBuf::from(cwd),
+        });
+        let state1 = Arc::new(RemoteGatewayState::new_with_backend(
+            shared_backend,
+            WorkspaceRegistry::new(),
+        ));
+        *state1.agent_history_home.write() = Some(home.clone());
+        let pin1 = state1.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token1, _device1) = state1
+            .auth_manager
+            .exchange_pairing_code(&pin1, "agent-shared-cwd-device-1")
+            .unwrap();
+
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        let router1 = create_remote_router(Arc::clone(&state1));
+        let (stop_tx1, stop_rx1) = tokio::sync::oneshot::channel::<()>();
+        let server_task1 = tokio::spawn(async move {
+            axum::serve(listener1, router1)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx1.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. When two sessions share the cwd, resolving a non-matching session id must NOT return 200 OK
+        // and must not return the transcript text.
+        let response1 = client
+            .get(format!("http://{addr1}/api/v1/agent-history/{ferryx_session_1}"))
+            .header("Authorization", format!("Bearer {token1}"))
+            .send()
+            .await
+            .expect("agent-history request");
+        assert_ne!(
+            response1.status(),
+            StatusCode::OK,
+            "two sessions sharing a cwd must never guess latest transcript"
+        );
+        let body_text1 = response1.text().await.unwrap_or_default();
+        assert!(
+            !body_text1.contains("ambiguous prompt"),
+            "must not leak transcript text when cwd is shared"
+        );
+
+        let _ = stop_tx1.send(());
+        let _ = server_task1.await;
+
+        // 2. A single session in the cwd must still resolve through the cwd fallback.
+        let single_backend = Arc::new(CwdStubBackend {
+            session_id: ferryx_session_1.to_string(),
+            cwd: std::path::PathBuf::from(cwd),
+        });
+        let state2 = Arc::new(RemoteGatewayState::new_with_backend(
+            single_backend,
+            WorkspaceRegistry::new(),
+        ));
+        *state2.agent_history_home.write() = Some(home.clone());
+        let pin2 = state2.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token2, _device2) = state2
+            .auth_manager
+            .exchange_pairing_code(&pin2, "agent-shared-cwd-device-2")
+            .unwrap();
+
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let router2 = create_remote_router(Arc::clone(&state2));
+        let (stop_tx2, stop_rx2) = tokio::sync::oneshot::channel::<()>();
+        let server_task2 = tokio::spawn(async move {
+            axum::serve(listener2, router2)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx2.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let response2 = client
+            .get(format!("http://{addr2}/api/v1/agent-history/{ferryx_session_1}"))
+            .header("Authorization", format!("Bearer {token2}"))
+            .send()
+            .await
+            .expect("agent-history single session request");
+        assert_eq!(
+            response2.status(),
+            StatusCode::OK,
+            "single session in cwd must resolve"
+        );
+        let body2: serde_json::Value = response2.json().await.expect("json body");
+        let items2 = body2["items"].as_array().expect("items array");
+        assert_eq!(items2.len(), 2);
+        assert_eq!(items2[0]["text"], "ambiguous prompt");
+
+        let _ = stop_tx2.send(());
+        let _ = server_task2.await;
         let _ = std::fs::remove_dir_all(&home);
     }
 
