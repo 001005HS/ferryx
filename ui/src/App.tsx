@@ -296,6 +296,24 @@ function triggerSshRegistrationHeal(projects: RegisteredProject[]): void {
 
 const healedLocalWorkspaceIds = new Set<string>();
 
+// Terminals in a project whose registration failed cannot spawn (WORKSPACE_NOT_FOUND), so
+// the failure is shown with its reason and a retry instead of only reaching the console.
+export function reportLocalRegistrationFailure(project: RegisteredProject, error: unknown): void {
+  const name = project.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? project.workspaceId;
+  const reason = error instanceof Error ? error.message : String(error);
+  toast.error(`Couldn't open project "${name}"`, {
+    id: `local-registration:${project.workspaceId}`,
+    description: `New terminals in this project will fail until it registers. ${reason}`,
+    duration: Infinity,
+    action: {
+      label: "Retry",
+      onClick: () => {
+        void ensureLocalProjectsRegistered([project]);
+      },
+    },
+  });
+}
+
 // Restored workspace tabs spawn as soon as the shell mounts, so every stored local project
 // must be registered before the bootstrap is published; otherwise the spawn races the
 // registration and fails with WORKSPACE_NOT_FOUND.
@@ -317,6 +335,7 @@ export async function ensureLocalProjectsRegistered(projects: RegisteredProject[
         healedLocalWorkspaceIds.add(project.workspaceId);
       } catch (error) {
         console.warn("Local workspace registration skipped:", project.workspaceId, error);
+        reportLocalRegistrationFailure(project, error);
       }
     }),
   );
