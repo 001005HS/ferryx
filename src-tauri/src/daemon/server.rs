@@ -2375,71 +2375,102 @@ impl DaemonServer {
                     Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
                 });
 
-                let transfer_resp = legacy_peer
-                    .send_request(&DaemonRequest::TransferSessions {
-                        handover_socket_path: handover_socket_path.to_string_lossy().into_owned(),
-                    })
-                    .await
-                    .map_err(|e| format!("TransferSessions request failed: {e}"))?;
+                let transfer_outcome: Result<usize, String> = async {
+                    let transfer_resp = legacy_peer
+                        .send_request(&DaemonRequest::TransferSessions {
+                            handover_socket_path: handover_socket_path.to_string_lossy().into_owned(),
+                        })
+                        .await
+                        .map_err(|e| format!("TransferSessions request failed: {e}"))?;
 
-                let (offered, owned) = match transfer_resp {
-                    DaemonResponse::TransferSessionsOk {
-                        transferred_count,
-                        requested_count,
-                    } => (transferred_count, requested_count),
-                    other => return Err(format!("TransferSessions failed: {other:?}")),
-                };
+                    let (offered, owned) = match transfer_resp {
+                        DaemonResponse::TransferSessionsOk {
+                            transferred_count,
+                            requested_count,
+                        } => (transferred_count, requested_count),
+                        other => return Err(format!("TransferSessions failed: {other:?}")),
+                    };
 
-                let exports = accept_handle
-                    .await
-                    .map_err(|e| format!("Handover worker panicked: {e}"))?
-                    .map_err(|(error, received)| {
-                        format!(
-                            "Handover socket receive error after {received} of {offered} session(s): {error}"
-                        )
-                    })?;
-                let accepted = exports.len();
-                // A predecessor that reports more than it delivered is the shape of a lossy
-                // handover: the sessions missing from `accepted` are the ones that lose their
-                // PTY owner when the predecessor retires. `owned` is what the predecessor
-                // actually held; `offered` already excludes sessions it failed to export, so
-                // checking `accepted` against `offered` alone cannot see those casualties.
-                tracing::info!(owned, offered, accepted, "Received session exports over the handover socket");
-                if let Err(reason) = handover_delivery_verdict_owned(owned, offered, accepted) {
-                    // Do NOT proceed. Committing here retires the predecessor, and every session it
-                    // offered but did not deliver dies with the PTY master fd it still owned.
-                    // Aborting leaves the predecessor serving all of them instead.
-                    return Err(reason);
+                    let exports = accept_handle
+                        .await
+                        .map_err(|e| format!("Handover worker panicked: {e}"))?
+                        .map_err(|(error, received)| {
+                            format!(
+                                "Handover socket receive error after {received} of {offered} session(s): {error}"
+                            )
+                        })?;
+                    let accepted = exports.len();
+                    // A predecessor that reports more than it delivered is the shape of a lossy
+                    // handover: the sessions missing from `accepted` are the ones that lose their
+                    // PTY owner when the predecessor retires. `owned` is what the predecessor
+                    // actually held; `offered` already excludes sessions it failed to export, so
+                    // checking `accepted` against `offered` alone cannot see those casualties.
+                    tracing::info!(owned, offered, accepted, "Received session exports over the handover socket");
+                    if let Err(reason) = handover_delivery_verdict_owned(owned, offered, accepted) {
+                        // Do NOT proceed. Committing here retires the predecessor, and every session it
+                        // offered but did not deliver dies with the PTY master fd it still owned.
+                        // Aborting leaves the predecessor serving all of them instead.
+                        return Err(reason);
+                    }
+
+                    for export in exports {
+                        tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
+                        let (master, snapshot) = export.into_parts();
+                        let session_id = snapshot.session_id.clone();
+                        let output_rx = self
+                            .terminal_service
+                            .pty_manager()
+                            .adopt_transferred_session(master, snapshot)
+                            .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                        // The receiver must be held and pumped for as long as the adopted child runs.
+                        // Dropping it here marks the session's output channel closed, and the lifecycle
+                        // watcher would then close the session -- terminating the very child this
+                        // handover exists to preserve.
+                        self.terminal_service.pump_adopted_output(session_id, output_rx);
+                    }
+
+                    let commit_resp = legacy_peer
+                        .send_request(&DaemonRequest::CommitHandover {
+                            legacy_socket_path: None,
+                        })
+                        .await
+                        .map_err(|e| format!("CommitHandover request failed: {e}"))?;
+                    if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                        return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                    }
+                    Ok::<usize, String>(accepted)
                 }
+                .await;
 
-                for export in exports {
-                    tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
-                    let (master, snapshot) = export.into_parts();
-                    let session_id = snapshot.session_id.clone();
-                    let output_rx = self
-                        .terminal_service
-                        .pty_manager()
-                        .adopt_transferred_session(master, snapshot)
-                        .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
-                    // The receiver must be held and pumped for as long as the adopted child runs.
-                    // Dropping it here marks the session's output channel closed, and the lifecycle
-                    // watcher would then close the session -- terminating the very child this
-                    // handover exists to preserve.
-                    self.terminal_service.pump_adopted_output(session_id, output_rx);
+                match transfer_outcome {
+                    Ok(accepted) => {
+                        tracing::info!(
+                            accepted,
+                            "Handover committed after adopting the transferred sessions"
+                        );
+                    }
+                    Err(reason) => {
+                        let abort_resp = legacy_peer
+                            .send_request(&DaemonRequest::AbortHandover)
+                            .await;
+                        match abort_resp {
+                            Ok(DaemonResponse::AbortHandoverOk) => {
+                                tracing::warn!(
+                                    %reason,
+                                    "Handover transfer aborted; predecessor confirmed AbortHandover and resumed serving sessions"
+                                );
+                            }
+                            other => {
+                                tracing::error!(
+                                    %reason,
+                                    abort_result = ?other,
+                                    "Handover transfer failed ({reason}) and predecessor AbortHandover returned {other:?}; exported sessions stay paused on the predecessor"
+                                );
+                            }
+                        }
+                        return Err(reason);
+                    }
                 }
-
-                let commit_resp = legacy_peer
-                    .send_request(&DaemonRequest::CommitHandover {
-                        legacy_socket_path: None,
-                    })
-                    .await?;
-                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
-                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
-                }
-                tracing::info!(
-                    accepted,
-                    "Handover committed after adopting the transferred sessions"
-                );
             } else {
                 let sessions = legacy_peer.list_sessions().await?;
                 let route = crate::daemon::manifest::HandoverRoute {
@@ -3601,7 +3632,17 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::AbortHandover) => {
                     match self.handover_manager.abort_handover() {
-                        Ok(()) => DaemonResponse::AbortHandoverOk,
+                        Ok(()) => {
+                            let resumed = self
+                                .terminal_service
+                                .pty_manager()
+                                .resume_paused_readers();
+                            tracing::warn!(
+                                resumed_count = resumed,
+                                "Predecessor resumed serving {resumed} exported session(s) after AbortHandover"
+                            );
+                            DaemonResponse::AbortHandoverOk
+                        }
                         Err(e) => daemon_error(e),
                     }
                 }

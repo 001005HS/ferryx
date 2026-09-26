@@ -363,6 +363,11 @@ impl PtySession {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                     reader_paused_task.store(false, Ordering::Release);
+                    // Released by teardown (`release_paused_reader`), not by a resume: the
+                    // descriptor may already belong to a successor daemon, so never read again.
+                    if reader_finished_task.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
 
                 match reader.read(&mut buf) {
@@ -513,12 +518,21 @@ impl PtySession {
         self.pause_requested.store(true, Ordering::Release);
     }
 
-    pub fn resume_reader(&self) {
-        self.pause_requested.store(false, Ordering::Release);
+    pub fn resume_reader(&self) -> bool {
+        self.pause_requested.swap(false, Ordering::AcqRel)
     }
 
     pub fn is_reader_paused(&self) -> bool {
         self.reader_paused.load(Ordering::Acquire)
+    }
+
+    /// A reader parked by `pause_reader` never reads again on its own, so tearing the session
+    /// down must release it, or its blocking thread outlives the session and stalls runtime
+    /// shutdown. Only a paused reader is touched, and it exits without reading.
+    fn release_paused_reader(&self) {
+        if self.pause_requested.load(Ordering::Acquire) {
+            self.reader_finished.store(true, Ordering::Release);
+        }
     }
 
     pub fn stop_reader(&self) {
@@ -952,6 +966,7 @@ impl PtySession {
     pub(crate) fn close_io(&self) {
         self.writer.lock().take();
         self.master.lock().take();
+        self.release_paused_reader();
     }
 
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
@@ -1113,6 +1128,11 @@ impl PtySession {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                     reader_paused_task.store(false, Ordering::Release);
+                    // Released by teardown (`release_paused_reader`), not by a resume: the
+                    // descriptor may already belong to a successor daemon, so never read again.
+                    if reader_finished_task.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
 
                 match reader.read(&mut buf) {
@@ -1180,6 +1200,7 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         self.writer.lock().take();
         self.master.lock().take();
+        self.release_paused_reader();
         self.output_tx.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
