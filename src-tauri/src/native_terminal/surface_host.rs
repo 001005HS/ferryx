@@ -8100,10 +8100,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_input_blocked_main_thread_returns_degraded_error_within_bound() {
+    async fn send_input_does_not_wait_for_a_blocked_main_thread() {
         let harness = DirectRenderHarness::new(vec![]);
         // Blocked main thread: queue the dispatch (never drained by this test) without
-        // requiring an off-thread origin, so the bounded rendezvous is what must fire.
+        // requiring an off-thread origin, so the receipt rendezvous can never complete.
         harness
             .window
             .state::<RenderDispatch>()
@@ -8124,27 +8124,14 @@ mod tests {
         .await;
         let elapsed = start.elapsed();
 
+        // The keystroke is complete once the write lands. The receipt only positions the IME
+        // candidate window and is delivered out of band, so a busy main thread must not hold
+        // the keystroke: that wait is what queued typing behind the rendezvous.
+        result.expect("a written keystroke must succeed while the main thread is blocked");
         assert!(
-            elapsed < std::time::Duration::from_millis(1500),
-            "command took too long: {elapsed:?}"
+            elapsed < crate::ipc::native_terminal::NATIVE_TERMINAL_RECEIPT_TIMEOUT,
+            "send_input waited for the blocked main thread: {elapsed:?}"
         );
-        assert!(
-            elapsed >= std::time::Duration::from_millis(200),
-            "command should have waited for rendezvous timeout: {elapsed:?}"
-        );
-
-        let error = result.expect_err("blocked main thread must return an error");
-        assert_eq!(
-            error
-                .details
-                .as_ref()
-                .and_then(|d| d.get("inputWritten"))
-                .and_then(|v| v.as_bool()),
-            Some(true),
-            "degraded error must carry inputWritten: true"
-        );
-        let receipt = error.details.as_ref().and_then(|d| d.get("receipt"));
-        assert!(receipt.is_some(), "error details must carry a degraded receipt");
     }
 
     #[tokio::test]
