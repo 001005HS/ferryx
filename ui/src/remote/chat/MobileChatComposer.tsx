@@ -110,15 +110,10 @@ export const MobileChatComposer = React.forwardRef<
 
   const handleSend = useCallback(() => {
     if (disabled) return;
+    if (attachments.length > 0) return;
     const trimmed = text.trim();
-    if (!trimmed && attachments.length === 0) return;
-    const pendingAttachments = attachments;
-    for (const att of pendingAttachments) {
-      if (att.url) {
-        objectUrlsRef.current.delete(att.url);
-      }
-    }
-    onSend(trimmed, pendingAttachments);
+    if (!trimmed) return;
+    onSend(trimmed, []);
     setText("");
     setAttachments([]);
     if (textareaRef.current) {
@@ -196,7 +191,7 @@ export const MobileChatComposer = React.forwardRef<
     [revokeTrackedUrl]
   );
 
-  const canSubmit = (text.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canSubmit = text.trim().length > 0 && attachments.length === 0 && !disabled;
 
   return (
     <div
@@ -206,6 +201,14 @@ export const MobileChatComposer = React.forwardRef<
         className
       )}
     >
+      {attachments.length > 0 && (
+        <div
+          data-testid="chat-composer-attachments-blocked"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-destructive bg-destructive/10 border-b border-destructive/20"
+        >
+          <span>Attachments aren&apos;t supported from the phone yet. Remove them to send.</span>
+        </div>
+      )}
       {attachments.length > 0 && (
         <div
           data-testid="chat-composer-attachments"

@@ -113,7 +113,7 @@ describe("MobileChatComposer", () => {
 
     try {
       const onSend = vi.fn();
-      render(<MobileChatComposer onSend={onSend} />);
+      const { unmount } = render(<MobileChatComposer onSend={onSend} />);
 
       const fileInput = screen.getByTestId("file-upload-input");
       const file1 = new File(["img1"], "file1.png", { type: "image/png" });
@@ -121,7 +121,6 @@ describe("MobileChatComposer", () => {
 
       fireEvent.change(fileInput, { target: { files: [file1, file2] } });
 
-      // Removing an unsent attachment does revoke its URL
       const removeButtons = screen.getAllByRole("button").filter((btn) =>
         btn.getAttribute("data-testid")?.startsWith("remove-attachment-")
       );
@@ -130,22 +129,13 @@ describe("MobileChatComposer", () => {
       expect(mockRevokeObjectURL).toHaveBeenCalledWith("blob:mock-image-2");
       expect(mockRevokeObjectURL).not.toHaveBeenCalledWith("blob:mock-image-1");
 
-      // Send the remaining attachment
       const sendButton = screen.getByTestId("send-button");
-      expect(sendButton).not.toBeDisabled();
+      expect(sendButton).toBeDisabled();
       fireEvent.click(sendButton);
+      expect(onSend).not.toHaveBeenCalled();
 
-      // Assert onSend received the attachment
-      expect(onSend).toHaveBeenCalledTimes(1);
-      expect(onSend).toHaveBeenCalledWith(
-        "",
-        expect.arrayContaining([
-          expect.objectContaining({ name: "file1.png", url: "blob:mock-image-1" }),
-        ])
-      );
-
-      // Assert URL.revokeObjectURL was NOT called with that sent attachment's URL
-      expect(mockRevokeObjectURL).not.toHaveBeenCalledWith("blob:mock-image-1");
+      unmount();
+      expect(mockRevokeObjectURL).toHaveBeenCalledWith("blob:mock-image-1");
     } finally {
       URL.createObjectURL = origCreateObjectURL;
       URL.revokeObjectURL = origRevokeObjectURL;
@@ -159,21 +149,18 @@ describe("MobileChatComposer", () => {
     const textarea = screen.getByTestId("chat-composer-textarea");
     fireEvent.change(textarea, { target: { value: "안녕하세요" } });
 
-    // 1. Enter whose native event reports isComposing: true
     fireEvent.keyDown(textarea, {
       key: "Enter",
       isComposing: true,
     });
     expect(onSend).not.toHaveBeenCalled();
 
-    // 2. Enter with keyCode: 229
     fireEvent.keyDown(textarea, {
       key: "Enter",
       keyCode: 229,
     });
     expect(onSend).not.toHaveBeenCalled();
 
-    // 3. Ordinary deliberate Enter
     fireEvent.keyDown(textarea, {
       key: "Enter",
       keyCode: 13,
@@ -245,7 +232,84 @@ describe("MobileChatComposer", () => {
       URL.revokeObjectURL = origRevokeObjectURL;
     }
   });
-
-
 });
 
+describe("MobileChatComposer attachments block on send (Option b)", () => {
+  let origCreateObjectURL: typeof URL.createObjectURL | undefined;
+  let origRevokeObjectURL: typeof URL.revokeObjectURL | undefined;
+
+  beforeEach(() => {
+    cleanup();
+    if (typeof globalThis.URL !== "undefined") {
+      origCreateObjectURL = globalThis.URL.createObjectURL;
+      origRevokeObjectURL = globalThis.URL.revokeObjectURL;
+      globalThis.URL.createObjectURL = vi.fn(() => "blob:test");
+      globalThis.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    if (typeof globalThis.URL !== "undefined") {
+      if (origCreateObjectURL) {
+        globalThis.URL.createObjectURL = origCreateObjectURL;
+      }
+      if (origRevokeObjectURL) {
+        globalThis.URL.revokeObjectURL = origRevokeObjectURL;
+      }
+    }
+  });
+
+  it("blocks sending when attachments are present and displays warning message", () => {
+    const onSend = vi.fn();
+    render(<MobileChatComposer onSend={onSend} />);
+
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    fireEvent.change(textarea, { target: { value: "Hello with attachment" } });
+
+    const fileInput = screen.getByTestId("file-upload-input");
+    const testFile = new File(["sample content"], "test-doc.pdf", { type: "application/pdf" });
+    fireEvent.change(fileInput, { target: { files: [testFile] } });
+
+    const warning = screen.getByTestId("chat-composer-attachments-blocked");
+    expect(warning.textContent).toContain("Attachments aren't supported from the phone yet. Remove them to send.");
+
+    const sendButton = screen.getByTestId("send-button");
+    expect(sendButton).toBeDisabled();
+
+    fireEvent.click(sendButton);
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("allows send once attachments are removed", () => {
+    const onSend = vi.fn();
+    render(<MobileChatComposer onSend={onSend} />);
+
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    fireEvent.change(textarea, { target: { value: "Now without attachment" } });
+
+    const fileInput = screen.getByTestId("file-upload-input");
+    const testFile = new File(["sample content"], "image.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [testFile] } });
+
+    expect(screen.getByTestId("chat-composer-attachments-blocked")).toBeInTheDocument();
+    const sendButton = screen.getByTestId("send-button");
+    expect(sendButton).toBeDisabled();
+
+    const removeButtons = screen.getAllByRole("button").filter((btn) =>
+      btn.getAttribute("data-testid")?.startsWith("remove-attachment-")
+    );
+    expect(removeButtons).toHaveLength(1);
+    fireEvent.click(removeButtons[0]);
+
+    expect(screen.queryByTestId("chat-composer-attachments-blocked")).not.toBeInTheDocument();
+    expect(sendButton).not.toBeDisabled();
+
+    fireEvent.click(sendButton);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("Now without attachment", []);
+  });
+});
