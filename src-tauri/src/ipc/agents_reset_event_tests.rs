@@ -65,6 +65,7 @@ async fn reset_scenario(succeeds: bool) {
         state: state.into(),
         agent: Some("omo".into()),
         provider_session: None,
+        detail: None,
         is_snapshot,
         origin: crate::daemon::protocol::AgentStateOrigin::Agent,
     };

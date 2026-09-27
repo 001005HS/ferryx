@@ -37,6 +37,24 @@ describe("MobileChatWorkspace", () => {
     expect(screen.queryByTestId(/starter-prompt-/)).not.toBeInTheDocument();
   });
 
+  it("9. surfaces history warnings so a truncated conversation is not silent", () => {
+    const { unmount } = render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        workspaceLabel="ferryx-ui"
+        warnings={["older history is not available for paired-host sessions; showing the most recent messages"]}
+      />
+    );
+
+    const banner = screen.getByTestId("chat-history-warning");
+    expect(banner).toHaveTextContent("older history is not available for paired-host sessions");
+
+    unmount();
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} workspaceLabel="ferryx-ui" />);
+    expect(screen.queryByTestId("chat-history-warning")).toBeNull();
+  });
+
   it("2. header shows monospace workspace · worktree subtitle when provided", () => {
     render(
       <MobileChatWorkspace

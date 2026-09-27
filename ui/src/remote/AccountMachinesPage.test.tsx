@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { cleanup, render, waitFor, fireEvent } from "@testing-library/react";
 import { AccountMachinesPage } from "./AccountMachinesPage";
 import * as accountSessionModule from "./accountSession";
 import * as accountAttachModule from "./accountAttach";
 
-// requestGrant defaults to a mirror grant, which connects but is refused by the daemon's
-// filesystem/DAG routes and by the UI gates that list paired worktrees.
+const CONNECT_CHAIN_TIMEOUT_MS = 5000;
+
 describe("AccountMachinesPage account connect", () => {
   const relayUrl = "https://relay.example.com";
   const sessionToken = "account-session-token";
@@ -22,16 +22,6 @@ describe("AccountMachinesPage account connect", () => {
     enrolledAt: 1,
     lastSeenAt: 1,
   } as unknown as accountSessionModule.AccountMachineView;
-
-  const grantResponse = {
-    grantId: "grant-1",
-    machineId: machine.machineId,
-    relayOrigin: relayUrl,
-    pairingToken: "pairing-token-1",
-    machineAttachPublicKey: "machine-attach-key",
-    grantScope: "machine",
-    expiresAt: Date.now() + 600_000,
-  };
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -55,7 +45,21 @@ describe("AccountMachinesPage account connect", () => {
     } as never);
   });
 
-  async function connectOnce() {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("connects with a machine-scope grant", async () => {
+    const grantSpy = vi.spyOn(accountSessionModule, "requestGrant").mockResolvedValue({
+      grantId: "grant-1",
+      machineId: machine.machineId,
+      relayOrigin: relayUrl,
+      pairingToken: "pairing-token-1",
+      machineAttachPublicKey: "machine-attach-key",
+      grantScope: "machine",
+      expiresAt: Date.now() + 600_000,
+    } as accountSessionModule.AccountGrantResponse);
+
     const onConnect = vi.fn();
     const { getByTestId } = render(
       <AccountMachinesPage
@@ -65,37 +69,24 @@ describe("AccountMachinesPage account connect", () => {
         onLogout={vi.fn()}
       />,
     );
-    const button = await waitFor(() => getByTestId(`connect-machine-${machine.machineId}`), {
-      timeout: 5000,
-    });
+
+    const button = await waitFor(
+      () => getByTestId(`connect-machine-${machine.machineId}`),
+      { timeout: CONNECT_CHAIN_TIMEOUT_MS },
+    );
     fireEvent.click(button);
-    // The connect chain runs five awaited steps (attach key, grant, session, tunnel,
-    // redeem); the default 1s waitFor budget is too tight for it.
-    await waitFor(() => expect(onConnect).toHaveBeenCalledTimes(1), { timeout: 5000 });
-    return onConnect;
-  }
 
-  it("requests a machine-scope grant so projects, worktrees and terminals work", async () => {
-    const grantSpy = vi
-      .spyOn(accountSessionModule, "requestGrant")
-      .mockResolvedValue(grantResponse as never);
+    await waitFor(() => expect(onConnect).toHaveBeenCalledTimes(1), {
+      timeout: CONNECT_CHAIN_TIMEOUT_MS,
+    });
 
-    await connectOnce();
-
-    expect(grantSpy).toHaveBeenCalledTimes(1);
     const options = grantSpy.mock.calls[0][4];
     expect(
       options?.grantScope,
-      "the account Connect path must request a machine-scope grant; the default is 'mirror', " +
-        "which the daemon rejects for projects/worktrees/terminals",
+      "the account Connect path must request a machine-scope grant: requestGrant defaults to " +
+        "'mirror', and mirror devices are refused by the daemon's filesystem/DAG routes and by " +
+        "the UI gates that list paired worktrees, so projects and terminals would never load",
     ).toBe("machine");
-  });
-
-  it("still establishes the connection over the encrypted tunnel", async () => {
-    vi.spyOn(accountSessionModule, "requestGrant").mockResolvedValue(grantResponse as never);
-
-    const onConnect = await connectOnce();
-
     expect(accountSessionModule.allocateSession).toHaveBeenCalledWith(
       relayUrl,
       sessionToken,

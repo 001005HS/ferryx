@@ -748,8 +748,33 @@ impl PtyManager {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
-        session.stop_reader();
-        session.export_for_transfer_with_hub(hub)
+        // Pausing stops the predecessor from consuming output (the reader loop honours
+        // `pause_requested` at the top of each iteration) WITHOUT setting `reader_finished`,
+        // so the lifecycle watcher does not close a session the successor now owns.
+        // Previously, `stop_reader` was called here, which only set `reader_finished = true`
+        // without stopping the spawn_blocking reader task; the lifecycle watcher observed
+        // `is_reader_finished()` and called `close_session`, sending SIGTERM/SIGKILL to the
+        // transferred child process.
+        // Only pause once the export has actually succeeded, so a failure leaves the session
+        // untouched and the predecessor keeps serving it.
+        let export = session.export_for_transfer_with_hub(hub)?;
+        session.pause_reader();
+        Ok(export)
+    }
+
+    /// Resumes readers for all registered sessions that were paused.
+    ///
+    /// Returns the number of sessions that had a pending pause and were resumed.
+    /// This is how a predecessor takes back sessions it exported to a successor that then failed.
+    pub fn resume_paused_readers(&self) -> usize {
+        let sessions: Vec<Arc<PtySession>> = self.sessions.read().values().cloned().collect();
+        let mut resumed = 0;
+        for session in sessions {
+            if session.resume_reader() {
+                resumed += 1;
+            }
+        }
+        resumed
     }
 
     /// Non-unix stub for `export_session`.
@@ -841,6 +866,249 @@ impl PtyManager {
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// A handover on 2026-09-26 moved 18 of 20 sessions; the two casualties left no trace.
+    /// Part of why a failed export is unrecoverable was this ordering: the reader was stopped
+    /// BEFORE the export was attempted, so a session whose export failed stayed registered with a
+    /// dead reader - alive to `list_sessions`, silent to the user, and unrecoverable by the
+    /// predecessor that was still supposed to be serving it.
+    #[tokio::test]
+    async fn a_failed_export_leaves_the_session_readable_by_the_predecessor() {
+        let manager = PtyManager::new();
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+
+        let session = manager.get_session(&session_id).expect("session registered");
+        assert!(
+            !session.is_reader_finished(),
+            "a freshly spawned session must have a live reader"
+        );
+
+        // Force the export to fail the way it fails in the field: the master descriptor is gone,
+        // so there is nothing to hand the successor.
+        session.close_io();
+        let failed = manager.export_session(&session_id);
+        assert!(failed.is_err(), "exporting a session with no master must fail");
+        assert!(
+            !session.is_reader_finished(),
+            "a FAILED export must leave the reader running: this session is staying with the \
+             predecessor, and stopping its reader silently strands it"
+        );
+
+        let _ = manager.close_session(&session_id);
+    }
+
+    /// A SUCCESSFUL export pauses the reader so the successor can own the stream, WITHOUT
+    /// setting reader_finished so the lifecycle watcher does not kill the child process.
+    #[tokio::test]
+    async fn a_successful_export_pauses_the_reader_without_finishing_it() {
+        let manager = PtyManager::new();
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        let export = manager.export_session(&session_id).expect("export succeeds");
+
+        // Crucial invariant: reader must NOT be finished, because that is the exact predicate
+        // the lifecycle watcher uses to close and kill the child process.
+        assert!(
+            !session.is_reader_finished(),
+            "export must pause the reader without setting reader_finished"
+        );
+
+        // Write input to trigger reader activity so it observes pause_requested
+        manager.write_input(&session_id, b"\n").expect("write input to session");
+
+        // Bounded 5s wait polling every 20ms for session.is_reader_paused()
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut paused = false;
+        while tokio::time::Instant::now() < deadline {
+            if session.is_reader_paused() {
+                paused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(paused, "reader should pause within 5s after export and input");
+
+        drop(export);
+        let _ = manager.close_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn the_predecessor_does_not_close_a_session_it_exported() {
+        let manager = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+        let pid = session.pid().expect("session pid must exist");
+
+        let export = manager.export_session(&session_id).expect("export succeeds");
+
+        // The observation window is legitimate here because the behaviour under test is a periodic
+        // watcher running on LIFECYCLE_POLL_INTERVAL. If the watcher erroneously considered the
+        // exported session closed, it would close_session and SIGTERM the child process.
+        let observation_duration = LIFECYCLE_POLL_INTERVAL * 4;
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < observation_duration {
+            assert!(
+                manager.has_session(&session_id),
+                "predecessor manager must retain exported session during handover"
+            );
+            assert_eq!(
+                unsafe { libc::kill(pid as i32, 0) },
+                0,
+                "exported child process must remain alive"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Clean up with SIGKILL to the pid and drop(export)
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        drop(export);
+        let _ = manager.close_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn resume_paused_readers_hands_an_exported_session_back() {
+        let manager = PtyManager::new();
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+
+        let export = manager.export_session(&session_id).expect("export succeeds");
+
+        assert_eq!(
+            manager.resume_paused_readers(),
+            1,
+            "resume_paused_readers must resume the single exported session"
+        );
+
+        // Write a command whose OUTPUT marker is split so the echoed input never contains it
+        manager
+            .write_input(&session_id, b"printf 'RESUMED_%s\\n' 'MARKER'\n")
+            .expect("write command");
+
+        let mut accumulated = Vec::new();
+        let mut marker_found = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(chunk)) => {
+                    accumulated.extend_from_slice(&chunk);
+                    let text = String::from_utf8_lossy(&accumulated);
+                    if text.contains("RESUMED_MARKER") {
+                        marker_found = true;
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            marker_found,
+            "assembled RESUMED_MARKER must appear in output, proving reader resumed: {}",
+            String::from_utf8_lossy(&accumulated)
+        );
+
+        assert_eq!(
+            manager.resume_paused_readers(),
+            0,
+            "second resume_paused_readers must return 0"
+        );
+
+        drop(export);
+        let _ = manager.close_session(&session_id).await;
+    }
+
+    /// Runs `body` on a private runtime and reports how long that runtime took to shut down.
+    /// An ordinary runtime drop waits for every blocking task without a bound, so a reader
+    /// thread that outlives its session would hang the test instead of failing it.
+    fn shutdown_elapsed_after<F: std::future::Future<Output = ()>>(body: F) -> Duration {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        rt.block_on(body);
+        let start = std::time::Instant::now();
+        rt.shutdown_timeout(Duration::from_secs(3));
+        start.elapsed()
+    }
+
+    #[test]
+    fn closing_an_exported_session_releases_its_paused_reader() {
+        let elapsed = shutdown_elapsed_after(async {
+            let manager = PtyManager::new();
+            let (session_id, _rx) = manager
+                .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+                .expect("spawn PTY session");
+            let _export = manager.export_session(&session_id).expect("export succeeds");
+            manager
+                .close_session(&session_id)
+                .await
+                .expect("close exported session");
+        });
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a paused reader outlived its closed session: runtime shutdown took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn dropping_an_exported_session_releases_its_paused_reader() {
+        // Once the session is gone the reader holds the last sender, so the output channel
+        // closes exactly when the reader thread exits. A reader still parked keeps it open, and
+        // the bounded wait turns that into a failure instead of a hang.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let (released, child_pid) = rt.block_on(async {
+            let manager = PtyManager::new();
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.args(["-c", "sleep 30"]);
+            let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+            let session = manager.get_session(&session_id).expect("session registered");
+            let child_pid = session.pid();
+            let export = manager.export_session(&session_id).expect("export succeeds");
+            // The tty echo wakes the reader so it reaches the pause point and parks. A parked
+            // reader raises no event, so its flag is the only thing to wait on.
+            manager.write_input(&session_id, b"\n").expect("write input");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !session.is_reader_paused() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "reader never parked after export"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // Let go of the session the way the lifecycle watcher's exit arms do: out of the
+            // registry with no close_io, so only Drop can release the parked reader.
+            manager.remove_from_registry(&session_id);
+            drop(session);
+            drop(export);
+            let released = tokio::time::timeout(Duration::from_secs(5), async {
+                while rx.recv().await.is_some() {}
+            })
+            .await
+            .is_ok();
+            (released, child_pid)
+        });
+        if let Some(pid) = child_pid {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        // Never wait on a reader that may still be parked: a failing run must report, not hang.
+        rt.shutdown_background();
+        assert!(
+            released,
+            "a paused reader outlived its dropped session: its output channel never closed"
+        );
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -1094,10 +1362,9 @@ mod tests {
         assert!(export.hub_snapshot.is_some(), "exported session must have hub snapshot");
         assert!(export.master_raw_fd >= 0, "duplicated master fd must be valid");
 
-        // Stop predecessor reader so successor is the sole reader of the master PTY
-        if let Some(pred_session) = predecessor_manager.get_session(&session_id) {
-            pred_session.stop_reader();
-        }
+        // Export now pauses the predecessor's reader, so calling stop_reader is no longer needed
+        // (and calling stop_reader would set reader_finished, re-arming the watcher that kills
+        // the transferred child ~1.25s later).
         pred_pump.abort();
 
         // 4. Setup successor manager with its own TerminalOutputHub

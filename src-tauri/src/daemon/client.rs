@@ -645,9 +645,14 @@ pub struct DaemonAttachment {
 }
 
 /// Pure function determining whether a daemon self-upgrade should be requested.
-/// Returns `true` if:
-/// 1. `daemon_version` is provided and differs from `own_version` (CalVer package date version)
+///
+/// Returns `true` only when this binary is strictly NEWER than the running daemon:
+/// 1. `daemon_version` is provided and orders BEFORE `own_version` (CalVer package date version).
 /// 2. Or, for legacy daemons without version metadata, fallback to `own_mtime > daemon_mtime`.
+///
+/// The comparison is deliberately asymmetric. A symmetric `!=` made an OLDER client reconnecting
+/// to a NEWER daemon request a downgrade, which produced a second handover hop moments after the
+/// first and destroyed sessions the first hop had not finished adopting.
 pub fn should_request_upgrade(
     daemon_version: Option<&str>,
     own_version: &str,
@@ -655,12 +660,59 @@ pub fn should_request_upgrade(
     own_mtime: Option<u64>,
 ) -> bool {
     if let Some(daemon_ver) = daemon_version {
-        return daemon_ver != own_version;
+        return match compare_calver(own_version, daemon_ver) {
+            Some(std::cmp::Ordering::Greater) => true,
+            Some(_) => false,
+            // Unparseable on either side: the strings cannot say which build is newer, and
+            // inequality alone would let an older GUI hand a newer daemon's sessions down to its
+            // own binary. Only a strictly newer binary on disk may upgrade.
+            None => matches!((daemon_mtime, own_mtime), (Some(daemon), Some(own)) if own > daemon),
+        };
     }
     match (daemon_mtime, own_mtime) {
         (Some(daemon), Some(own)) => own > daemon,
         _ => false,
     }
+}
+
+/// The first daemon version that keeps the sessions it exports alive during a handover.
+///
+/// Every earlier v5 daemon stopped each exported session's reader in a way its own lifecycle
+/// watcher read as "the session ended", then closed those sessions (SIGTERM, then SIGKILL) while
+/// the successor was still adopting them. Such a daemon cannot be handed over without losing
+/// terminals, so it is replaced only once it has none.
+const FIRST_SESSION_PRESERVING_HANDOVER_VERSION: &str = "2026.927.1";
+
+/// Whether replacing a daemon that serves `live_sessions` sessions would lose some of them.
+///
+/// An idle daemon is always safe to replace. A busy one is safe only when its version provably
+/// includes the session-preserving handover; an unknown or unparseable version cannot prove it.
+pub(crate) fn handover_would_lose_sessions(daemon_version: Option<&str>, live_sessions: usize) -> bool {
+    if live_sessions == 0 {
+        return false;
+    }
+    !matches!(
+        daemon_version.and_then(|version| compare_calver(version, FIRST_SESSION_PRESERVING_HANDOVER_VERSION)),
+        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+    )
+}
+
+/// Orders two CalVer strings (`YYYY.MDD.N`) numerically per dot-separated component.
+/// Returns `None` when either side is not fully numeric, so callers can pick their own fallback.
+fn compare_calver(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let parse = |value: &str| -> Option<Vec<u64>> {
+        value.split('.').map(|part| part.parse::<u64>().ok()).collect()
+    };
+    let (left_parts, right_parts) = (parse(left)?, parse(right)?);
+    let width = left_parts.len().max(right_parts.len());
+    for index in 0..width {
+        let l = left_parts.get(index).copied().unwrap_or(0);
+        let r = right_parts.get(index).copied().unwrap_or(0);
+        if l != r {
+            return Some(l.cmp(&r));
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 pub(crate) fn parse_attach_error_response(
@@ -1206,6 +1258,29 @@ impl DaemonClient {
         let own_binary_path = own_exe.map(|p| p.to_string_lossy().to_string());
 
         tokio::spawn(async move {
+            // Handing a busy daemon of a lossy version over to this binary would kill the
+            // terminals it serves, so that daemon keeps running until it is idle. The flag stays
+            // set, so this GUI checks once per run instead of on every reconnect.
+            match temp_client.list_sessions().await {
+                Ok(sessions)
+                    if handover_would_lose_sessions(daemon_version.as_deref(), sessions.len()) =>
+                {
+                    tracing::warn!(
+                        daemon_version = ?daemon_version,
+                        live_sessions = sessions.len(),
+                        "Deferring the daemon upgrade: this daemon version loses sessions during a handover, so it is replaced only once it has none"
+                    );
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Deferring the daemon upgrade: could not count the daemon's live sessions"
+                    );
+                    return;
+                }
+            }
             tracing::info!(
                 "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Sending UpgradeBinary request."
             );
@@ -4647,7 +4722,6 @@ mod tests {
             None,
             None
         ));
-
         // Version identical -> false
         assert!(!should_request_upgrade(
             Some("2026.902.2"),
@@ -4688,6 +4762,121 @@ mod tests {
             None
         ));
         assert!(!should_request_upgrade(None, "2026.902.2", None, None));
+    }
+
+    #[test]
+    fn an_unparseable_version_never_requests_a_downgrade() {
+        // A newer daemon binary on disk than the GUI's: no upgrade, whatever the strings say.
+        assert!(!should_request_upgrade(
+            Some("2026.927.1-beta"),
+            "2026.926.1-beta",
+            Some(2000),
+            Some(1000)
+        ));
+        // Unparseable and no mtimes to order the builds: stay put.
+        assert!(!should_request_upgrade(
+            Some("2026.927.1-beta"),
+            "2026.926.1-beta",
+            None,
+            None
+        ));
+        // Unparseable, but the GUI's binary is strictly newer on disk: upgrade.
+        assert!(should_request_upgrade(
+            Some("2026.926.1-beta"),
+            "2026.927.1-beta",
+            Some(1000),
+            Some(2000)
+        ));
+        // Parseable versions keep ordering by CalVer, never by mtime.
+        assert!(!should_request_upgrade(
+            Some("2026.927.1"),
+            "2026.926.1",
+            Some(1000),
+            Some(2000)
+        ));
+    }
+
+    #[test]
+    fn a_busy_daemon_that_kills_exported_sessions_is_never_handed_over() {
+        // The running 2026.926.x daemons kill the sessions they export: replace them only idle.
+        assert!(handover_would_lose_sessions(Some("2026.926.2"), 3));
+        assert!(!handover_would_lose_sessions(Some("2026.926.2"), 0));
+        // A version that preserves exported sessions may be handed over while busy.
+        assert!(!handover_would_lose_sessions(Some("2026.927.1"), 3));
+        assert!(!handover_would_lose_sessions(Some("2026.1001.1"), 3));
+        // No version, or one that cannot be ordered, cannot prove it preserves them.
+        assert!(handover_would_lose_sessions(None, 3));
+        assert!(handover_would_lose_sessions(Some("dev-local"), 3));
+    }
+
+    /// A handover that destroyed 26 of 37 live sessions started here: an older GUI reconnecting to
+    /// the freshly upgraded daemon asked for ANOTHER upgrade, because the comparison was `!=`
+    /// rather than "am I newer". The second hop killed sessions the first had not yet adopted.
+    #[test]
+    fn an_older_binary_never_requests_an_upgrade_from_a_newer_daemon() {
+        // Older client, newer daemon: must NOT trigger a downgrade hop.
+        assert!(!should_request_upgrade(
+            Some("2026.925.9"),
+            "2026.925.8",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2026.926.1"),
+            "2026.925.9",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2027.101.1"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // The forward direction still upgrades.
+        assert!(should_request_upgrade(
+            Some("2026.925.8"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // Component width differences order numerically, not lexicographically:
+        // "2026.925.10" is newer than "2026.925.9" even though it sorts earlier as a string.
+        assert!(should_request_upgrade(
+            Some("2026.925.9"),
+            "2026.925.10",
+            None,
+            None
+        ));
+        assert!(!should_request_upgrade(
+            Some("2026.925.10"),
+            "2026.925.9",
+            None,
+            None
+        ));
+
+        // A non-numeric build string cannot be ordered by version, so only a strictly newer
+        // binary on disk may upgrade; without mtimes to compare, nothing does.
+        assert!(!should_request_upgrade(
+            Some("dev-local"),
+            "2026.925.9",
+            None,
+            None
+        ));
+        assert!(should_request_upgrade(
+            Some("dev-local"),
+            "2026.925.9",
+            Some(1000),
+            Some(2000)
+        ));
+        assert!(!should_request_upgrade(
+            Some("dev-local"),
+            "dev-local",
+            None,
+            None
+        ));
     }
 
     #[tokio::test]

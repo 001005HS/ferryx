@@ -97,6 +97,8 @@ pub struct NativeTerminalAgentStatePayload {
     pub manifest_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_snapshot: bool,
 }
@@ -1167,6 +1169,7 @@ fn take_native_terminal_events(
                             rule_id: detection.rule_id,
                             manifest_id: detection.manifest_id,
                             provider_session: None,
+                            detail: None,
                             is_snapshot: false,
                         },
                     ));
@@ -1461,6 +1464,7 @@ impl NativeTerminalSurfaceHostState {
                 rule_id: "manual-reset".to_string(),
                 manifest_id: "".to_string(),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
             };
             emit_native_terminal_event(
@@ -2496,7 +2500,15 @@ impl NativeTerminalSurfaceHostState {
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.set_pty_writes_suppressed(true);
                                 if verdict == ReplayVerdict::Rebuild {
-                                    sess.terminal.reset();
+                                    // Keep the grid and scrollback: a reset wiped every line the
+                                    // user was reading. Return the VT parser to ground (CAN, ST,
+                                    // SGR 0; close any open synchronized update) and mark the
+                                    // seam, the way the Gap arm does, then replay on top.
+                                    let _ = sess.terminal.feed(b"\x18\x1b\\\x1b[0m");
+                                    let _ = sess.terminal.finish_synchronized_output();
+                                    let _ = sess.terminal.feed_str(
+                                        "\r\n\x1b[33m[Ferryx: output stream resynced — output below may repeat lines above]\x1b[0m\r\n",
+                                    );
                                 }
                                 let parsed_segments: Vec<HistorySegment> = segments
                                     .into_iter()
@@ -2550,7 +2562,7 @@ impl NativeTerminalSurfaceHostState {
                                         }
                                     }
                                 }
-                                if was_at_bottom || verdict == ReplayVerdict::Rebuild {
+                                if was_at_bottom {
                                     let _ = sess.terminal.scroll_viewport(
                                         crate::native_terminal::ScrollViewport::Bottom,
                                     );
@@ -2571,23 +2583,56 @@ impl NativeTerminalSurfaceHostState {
                             update_sender.send_replace(());
                         }
                     }
-                    DaemonStreamMessage::Gap { .. } => {
+                    DaemonStreamMessage::Gap {
+                        available_from_sequence,
+                        ..
+                    } => {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard
                                 .get_mut(&session_id_owned)
                                 .filter(|sess| sess.pump_generation == pump_generation)
                             {
+                                let was_at_bottom =
+                                    sess.terminal.scrollbar().ok().map_or(true, |sb| {
+                                        let max_offset = sb.total.saturating_sub(sb.len);
+                                        max_offset == 0
+                                            || sb.offset >= max_offset
+                                                .saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+                                    });
                                 let was_bracketed = sess.bracketed_paste_seen
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
-                                sess.terminal.reset();
-                                if was_bracketed {
+                                sess.terminal.set_pty_writes_suppressed(true);
+                                // Sanitize parser state without obliterating the screen or scrollback:
+                                // 1. \x18 (CAN) resets VT parser state to ground from any escape/CSI/OSC/DCS/APC.
+                                // 2. \x1b\ (ST) terminates any open string sequence cleanly.
+                                // 3. \x1b[0m (SGR 0) resets graphic rendition attributes to normal defaults.
+                                // 4. finish_synchronized_output() exits mode 2026 if an open transaction was interrupted.
+                                let _ = sess.terminal.feed(b"\x18\x1b\\\x1b[0m");
+                                let _ = sess.terminal.finish_synchronized_output();
+                                let _ = sess.terminal.feed_str(
+                                    "\r\n\x1b[33m[Ferryx: output stream gap — some terminal output was missed]\x1b[0m\r\n",
+                                );
+                                sess.terminal.set_pty_writes_suppressed(false);
+                                sess.terminal.discard_buffered_pty_writes();
+                                if was_bracketed
+                                    && !sess.terminal.bracketed_paste_enabled().unwrap_or(false)
+                                {
                                     let _ = sess.terminal.feed_str("\x1b[?2004h");
                                     sess.bracketed_paste_seen = true;
                                 }
-                                let _ = sess.terminal.scroll_viewport(
-                                    crate::native_terminal::ScrollViewport::Bottom,
+                                if was_at_bottom {
+                                    let _ = sess.terminal.scroll_viewport(
+                                        crate::native_terminal::ScrollViewport::Bottom,
+                                    );
+                                }
+                                sess.last_sequence = Some(
+                                    sess.last_sequence
+                                        .map_or(available_from_sequence.saturating_sub(1), |last| {
+                                            last.max(available_from_sequence.saturating_sub(1))
+                                        }),
                                 );
+                                sess.publish_frame();
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, true),
@@ -2608,6 +2653,7 @@ impl NativeTerminalSurfaceHostState {
                         state,
                         agent,
                         provider_session,
+                        detail,
                         is_snapshot,
                         origin,
                         ..
@@ -2676,6 +2722,7 @@ impl NativeTerminalSurfaceHostState {
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),
                                             provider_session: provider_session.clone(),
+                                            detail: detail.as_ref().map(|value| value.to_string()),
                                             is_snapshot,
                                         },
                                     ),
@@ -6914,6 +6961,7 @@ mod tests {
             state: "blocked".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         })
@@ -7004,6 +7052,7 @@ mod tests {
                 state: reported_state.into(),
                 agent: Some("omo".into()),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
             })
@@ -7104,6 +7153,7 @@ mod tests {
                 state: reported_state.into(),
                 agent: Some("omo".into()),
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin,
             })
@@ -7157,6 +7207,7 @@ mod tests {
             state: "idle".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
         })
@@ -7231,6 +7282,7 @@ mod tests {
             session_id: session_id.into(),
             state: "working".into(),
             agent: Some("omo".into()),
+            detail: None,
             provider_session: Some(crate::daemon::protocol::AgentProviderSession {
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: conversation.to_string(),
@@ -8067,10 +8119,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_input_blocked_main_thread_returns_degraded_error_within_bound() {
+    async fn send_input_does_not_wait_for_a_blocked_main_thread() {
         let harness = DirectRenderHarness::new(vec![]);
         // Blocked main thread: queue the dispatch (never drained by this test) without
-        // requiring an off-thread origin, so the bounded rendezvous is what must fire.
+        // requiring an off-thread origin, so the receipt rendezvous can never complete.
         harness
             .window
             .state::<RenderDispatch>()
@@ -8091,26 +8143,258 @@ mod tests {
         .await;
         let elapsed = start.elapsed();
 
+        // The keystroke is complete once the write lands. The receipt only positions the IME
+        // candidate window and is delivered out of band, so a busy main thread must not hold
+        // the keystroke: that wait is what queued typing behind the rendezvous.
+        result.expect("a written keystroke must succeed while the main thread is blocked");
         assert!(
-            elapsed < std::time::Duration::from_millis(1500),
-            "command took too long: {elapsed:?}"
+            elapsed < crate::ipc::native_terminal::NATIVE_TERMINAL_RECEIPT_TIMEOUT,
+            "send_input waited for the blocked main thread: {elapsed:?}"
         );
-        assert!(
-            elapsed >= std::time::Duration::from_millis(200),
-            "command should have waited for rendezvous timeout: {elapsed:?}"
-        );
+    }
 
-        let error = result.expect_err("blocked main thread must return an error");
-        assert_eq!(
-            error
-                .details
-                .as_ref()
-                .and_then(|d| d.get("inputWritten"))
-                .and_then(|v| v.as_bool()),
-            Some(true),
-            "degraded error must carry inputWritten: true"
-        );
-        let receipt = error.details.as_ref().and_then(|d| d.get("receipt"));
-        assert!(receipt.is_some(), "error details must carry a degraded receipt");
+    #[tokio::test]
+    async fn gap_message_preserves_grid_scrollback_and_injects_notice() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-gap-preserves-content";
+        let (tx, messages) = tokio::sync::mpsc::channel(10);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: bytes::Bytes::from(
+                (0..30)
+                    .map(|i| format!("scrollback line {i}\r\n"))
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach session");
+
+        // Verify initial content and scrollback are present
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "terminal should have scrollback rows from initial 30 lines"
+            );
+            let matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid");
+            assert!(
+                !matches.is_empty(),
+                "scrollback line 0 should be present before gap"
+            );
+        }
+
+        // Deliver a gap message through the stream pump
+        tx.send(DaemonStreamMessage::Gap {
+            session_id: session_id.into(),
+            requested_after_sequence: 1,
+            available_from_sequence: 100,
+        })
+        .await
+        .expect("send gap message");
+
+        // Await processing of the gap message by waiting for last_sequence update
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut processed = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let sessions = state.sessions.lock();
+            if let Some(session) = sessions.get(session_id) {
+                if session.last_sequence.is_some_and(|seq| seq >= 99) {
+                    processed = true;
+                    break;
+                }
+            }
+        }
+        assert!(processed, "pump task should have processed the gap message");
+
+        // Assert earlier content and scrollback are STILL present!
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "scrollback rows must survive the gap message"
+            );
+            let matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid for earlier content");
+            assert!(
+                !matches.is_empty(),
+                "earlier content in scrollback must survive the gap message"
+            );
+
+            // Assert the in-band notice line was injected
+            let notice_matches = session
+                .terminal
+                .search_grid("output stream gap", false)
+                .expect("search grid for gap notice");
+            assert!(
+                !notice_matches.is_empty(),
+                "in-band gap notice line must be present in the terminal"
+            );
+        }
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn lagged_rebuild_preserves_scrollback_and_marks_the_resync() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-lagged-rebuild-preserves-content";
+        let (tx, messages) = tokio::sync::mpsc::channel(10);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: bytes::Bytes::from(
+                (0..30)
+                    .map(|i| format!("scrollback line {i}\r\n"))
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach session");
+
+        // Verify initial content and scrollback are present
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "terminal should have scrollback rows from initial 30 lines"
+            );
+            let matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid");
+            assert!(
+                !matches.is_empty(),
+                "scrollback line 0 should be present before lagged recovery"
+            );
+        }
+
+        // Scroll the viewport up so the user is NOT at the bottom
+        let offset_before = {
+            let mut sessions = state.sessions.lock();
+            let session = sessions.get_mut(session_id).expect("session exists");
+            session
+                .terminal
+                .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
+                .expect("scroll to top");
+            let sb = session.terminal.scrollbar().expect("scrollbar");
+            let max_offset = sb.total.saturating_sub(sb.len);
+            assert!(max_offset > 0, "test setup must have scrollable range");
+            assert_ne!(
+                sb.offset, max_offset,
+                "viewport must not be at bottom before lagged recovery"
+            );
+            sb.offset
+        };
+
+        // Deliver a Lagged recovery that classify_replay must rebuild (replay_is_delta: None)
+        tx.send(DaemonStreamMessage::Lagged {
+            session_id: session_id.into(),
+            requested_after_sequence: 1,
+            available_from_sequence: 50,
+            start_sequence: Some(50),
+            end_sequence: Some(60),
+            history: bytes::Bytes::from_static(b"replayed after overflow\r\n"),
+            segments: Vec::new(),
+            replay_is_delta: None,
+        })
+        .await
+        .expect("send lagged recovery");
+
+        // Await processing of the lagged recovery by waiting for last_sequence update
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut processed = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let sessions = state.sessions.lock();
+            if let Some(session) = sessions.get(session_id) {
+                if session.last_sequence.is_some_and(|seq| seq >= 60) {
+                    processed = true;
+                    break;
+                }
+            }
+        }
+        assert!(processed, "pump task should have processed the lagged message");
+
+        // Assert scrollback survived, resync notice landed, replay content landed, and viewport did not jump
+        {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            assert!(
+                session.terminal.scrollback_rows().expect("scrollback rows") > 0,
+                "scrollback rows must survive the lagged rebuild"
+            );
+            let earlier_matches = session
+                .terminal
+                .search_grid("scrollback line 0", false)
+                .expect("search grid for earlier content");
+            assert!(
+                !earlier_matches.is_empty(),
+                "earlier content in scrollback must survive the lagged rebuild"
+            );
+
+            let notice_matches = session
+                .terminal
+                .search_grid("output stream resynced", false)
+                .expect("search grid for resync notice");
+            assert!(
+                !notice_matches.is_empty(),
+                "in-band resync notice line must be present in the terminal"
+            );
+
+            let replay_matches = session
+                .terminal
+                .search_grid("replayed after overflow", false)
+                .expect("search grid for replay content");
+            assert!(
+                !replay_matches.is_empty(),
+                "replayed content must be present in the terminal"
+            );
+
+            let offset_after = session
+                .terminal
+                .scrollbar()
+                .expect("scrollbar")
+                .offset;
+            assert_eq!(
+                offset_after, offset_before,
+                "viewport scroll offset must not jump when user is scrolled up"
+            );
+        }
+
+        state.teardown();
     }
 }

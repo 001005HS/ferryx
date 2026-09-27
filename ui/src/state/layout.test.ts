@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { FileTab, TerminalTab } from "../lib/types";
-import { createLayoutState, defaultContentForTab, layoutReducer } from "./layout";
+import type { BrowserTab, FileTab, TerminalTab } from "../lib/types";
+import { createLayoutState, defaultContentForTab, focusedPaneSessionId, layoutReducer } from "./layout";
 import { resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
@@ -389,3 +389,48 @@ describe("layoutReducer with per-tab split trees", () => {
     expect(root.second.ratio).toBe(0.6);
   });
 });
+
+describe("focusedPaneSessionId", () => {
+  it("(a) returns the second leaf session when activeLeafId is the second leaf in a two-leaf layout", () => {
+    const terminal = tab("tab-term", "session-init");
+    let state = createLayoutState([terminal], terminal.id);
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: terminal.id,
+      targetLeafId: "leaf-init",
+      direction: "horizontal",
+      newLeafId: "leaf-second",
+      sessionId: "session-second",
+    });
+    state = layoutReducer(state, {
+      type: "FOCUS_PANE",
+      tabId: terminal.id,
+      leafId: "leaf-second",
+    });
+
+    expect(state.layoutsByTabId[terminal.id].activeLeafId).toBe("leaf-second");
+    expect(focusedPaneSessionId(state, terminal)).toBe("session-second");
+  });
+
+  it("(b) returns tab.sessionId when a terminal tab has no entry in layoutsByTabId", () => {
+    const terminal = tab("tab-term", "session-fallback");
+    const emptyState = createLayoutState();
+
+    expect(emptyState.layoutsByTabId[terminal.id]).toBeUndefined();
+    expect(focusedPaneSessionId(emptyState, terminal)).toBe("session-fallback");
+  });
+
+  it("(c) returns null for a browser tab", () => {
+    const browser: BrowserTab = {
+      kind: "browser",
+      id: "tab-browser",
+      label: "Docs",
+      url: "https://example.com",
+      browserId: "b-1",
+    };
+    const state = createLayoutState([browser], browser.id);
+
+    expect(focusedPaneSessionId(state, browser)).toBeNull();
+  });
+});
+

@@ -3,6 +3,7 @@ import {
   createDagPaneContent,
   createFilePaneContent,
   createTerminalPaneContent,
+  isTerminalTab,
   type BrowserPaneState,
   type DagPaneState,
   type LayoutState,
@@ -766,6 +767,18 @@ export function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPan
     sessionIdsByLeafId: { [fallbackLeafId]: isNonTerminalTab ? "" : tab.sessionId },
     contentsByLeafId: { [fallbackLeafId]: defaultContent },
   };
+}
+
+/**
+ * The frontend session of the pane that has focus inside a tab. A split tab's own `sessionId`
+ * names one pane only, so tab-level session actions (Suspend/Restart) must target this one.
+ */
+export function focusedPaneSessionId(layout: LayoutState, tab: WorkspaceTab): string | null {
+  if (!isTerminalTab(tab)) return null;
+  const paneLayout = getTabPaneLayout(layout, tab);
+  const leafId = paneLayout.activeLeafId;
+  const sessionId = leafId ? paneLayout.sessionIdsByLeafId[leafId] : undefined;
+  return sessionId || tab.sessionId;
 }
 
 function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutState {

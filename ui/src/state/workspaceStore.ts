@@ -51,6 +51,8 @@ import type {
 import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
 import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
+import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
+import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 /** Lower bound between two fallback session-id probes for the same pane and agent. */
@@ -240,6 +242,7 @@ export type WorkspaceAction =
       ruleId: string;
       manifestId?: string;
       providerSession?: AgentProviderSession | null;
+      detail?: string | null;
       isSnapshot?: boolean;
       observed?: boolean;
     }
@@ -490,6 +493,7 @@ export function useWorkspaceStore({
           ruleId: payload.ruleId,
           manifestId: payload.manifestId,
           providerSession: payload.providerSession,
+          detail: payload.detail,
           isSnapshot: payload.isSnapshot,
         }));
         return;
@@ -502,6 +506,7 @@ export function useWorkspaceStore({
         ruleId: payload.ruleId,
         manifestId: payload.manifestId,
         providerSession: payload.providerSession,
+        detail: payload.detail,
         isSnapshot: payload.isSnapshot,
       });
       if (
@@ -1512,11 +1517,17 @@ export function useWorkspaceStore({
     () => selectActivityNotificationTargets(renderedState),
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.worktrees, renderedState.activityBySessionId, renderedState.sessions],
   );
+  const [notificationVersion, setNotificationVersion] = useState(0);
+  useEffect(() => {
+    return notificationCenterStore.subscribe(() => {
+      setNotificationVersion((v) => v + 1);
+    });
+  }, []);
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
-    // signal for the snapshot cache, which useMemo cannot observe directly.
-    [renderedState, workspaceId, parkedActivityVersion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion and notificationVersion
+    // are external change signals that useMemo cannot observe directly from renderedState.
+    [renderedState, workspaceId, parkedActivityVersion, notificationVersion],
   );
 
   return {
@@ -1727,9 +1738,20 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
  * workspace snapshot, so an agent finishing anywhere still lights the badge.
  */
 export function selectGlobalUnreadBadgeCount(
-  currentState: WorkspaceState,
+  currentState?: WorkspaceState,
   currentWorkspaceId?: string,
+  store: NotificationCenterStore = notificationCenterStore,
 ): number {
+  const storeEntries = store.getSnapshot().entries;
+  if (store !== notificationCenterStore || storeEntries.length > 0) {
+    const mounted = currentState
+      ? { workspaceId: currentState.workspaceId ?? currentWorkspaceId, activityBySessionId: currentState.activityBySessionId }
+      : null;
+    return countAttentionEntries(storeEntries, liveActivityLookup(mounted, listWorkspaceSnapshots()));
+  }
+
+  if (!currentState) return 0;
+
   const countAttention = (state: WorkspaceState): number =>
     Object.values(state.activityBySessionId ?? {}).filter(
       (activity) =>
@@ -2582,6 +2604,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         agentType,
         source: "screen",
         agentSource,
+        ...(action.detail ? { detail: action.detail } : {}),
         ...(action.isSnapshot && mappedState !== "working"
           ? { seen: true, notificationSuppressed: true }
           : {}),

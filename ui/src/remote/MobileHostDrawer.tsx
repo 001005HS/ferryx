@@ -1,5 +1,5 @@
 import { Cable, Check, Laptop, Radio, Server, Wifi, X } from "lucide-react";
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
 import { BUILD_STAMP } from "../lib/buildStamp";
@@ -131,6 +131,9 @@ export function hostAgentTotals(state: RemoteHostState): HostAgentSummary {
 export type MobileHostDrawerProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onDisconnect?: () => void;
+  onSignOut?: () => void;
+  isAccountSession?: boolean;
 };
 
 /**
@@ -138,9 +141,12 @@ export type MobileHostDrawerProps = {
  * sidebar switcher behavior (switching only ever updates `activeHostId`) but uses a
  * bottom-sheet layout sized for touch targets instead of a compact popover.
  */
-export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) {
+export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, isAccountSession }: MobileHostDrawerProps) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const hosts = useMemo(() => selectHostList(state), [state]);
+  // Declared above the `!open` early return so the hook count is stable while the drawer
+  // is closed; a hook below that guard changes the order on open.
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -247,6 +253,59 @@ export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) 
             </div>
           )}
         </div>
+        {/* Disconnect and account sign-out live here rather than in the top bar: the header shows
+            the worktree context, and machine/account actions belong with the machine list. */}
+        {onDisconnect ? (
+          <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+            {confirmDisconnect ? (
+              <>
+                <button
+                  type="button"
+                  data-testid="mobile-host-drawer-confirm-disconnect"
+                  onClick={() => {
+                    setConfirmDisconnect(false);
+                    onOpenChange(false);
+                    onDisconnect();
+                  }}
+                  className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Confirm disconnect
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDisconnect(false)}
+                  className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  data-testid="mobile-host-drawer-disconnect"
+                  onClick={() => setConfirmDisconnect(true)}
+                  className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  {isAccountSession ? "Disconnect machine" : "Remove pairing"}
+                </button>
+                {isAccountSession && onSignOut ? (
+                  <button
+                    type="button"
+                    data-testid="mobile-host-drawer-signout"
+                    onClick={() => {
+                      onOpenChange(false);
+                      onSignOut();
+                    }}
+                    className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    Sign out
+                  </button>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : null}
         {/* Build identity of the client this phone is actually running; a stamp older than the host
             serves means a cached bundle. */}
         <p

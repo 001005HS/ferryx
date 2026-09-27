@@ -30,6 +30,7 @@ export function wireActivityRecording({ events, isObserved, store = notification
   return events((event, decision) => {
     if (!decision.accepted || !event.workspaceId) return;
     store.recordActivity({ ...occurrence(event, isObserved(event)),
+      subject: "agent",
       previousState: event.previousState, state: event.state,
       notificationSuppressed: event.notificationSuppressed,
     });
@@ -43,9 +44,35 @@ export function wireBellRecording({ events, isObserved, store = notificationCent
   });
 }
 
+/**
+ * How recently the user must have actually touched the app for a surfaced event to count as
+ * observed. Window focus alone is not observation: the window can hold OS focus while the user
+ * reads on a second monitor or is away from the desk, and marking a completion seen in that state
+ * silently swallows the notification, the sound, and the unread badge.
+ */
+const OBSERVATION_INTERACTION_WINDOW_MS = 30_000;
+
+let lastInteractionAt = 0;
+
+/** Test seam: record an interaction at an explicit time, or reset the clock with 0. */
+export function noteObservationInteraction(at: number = Date.now()): void {
+  lastInteractionAt = at;
+}
+
+if (typeof window !== "undefined") {
+  const note = () => {
+    lastInteractionAt = Date.now();
+  };
+  for (const type of ["keydown", "pointerdown", "wheel"]) {
+    window.addEventListener(type, note, { capture: true, passive: true });
+  }
+}
+
 /** Mirrors workspaceStore's private isSessionActivelyObserved selector (store is read-only here). */
 export function isNotificationTargetObserved(state: WorkspaceState, target: RecordingTarget, focused: boolean): boolean {
   if (!focused || target.workspaceId !== state.workspaceId) return false;
+  // Focus says the window is frontmost; interaction recency says a human is actually there.
+  if (Date.now() - lastInteractionAt > OBSERVATION_INTERACTION_WINDOW_MS) return false;
   const visible = state.layout.activeTabId === target.tabId ||
     Object.values(state.layout.tabGroups ?? {}).some((group) => group.activeTabId === target.tabId);
   if (!visible) return false;

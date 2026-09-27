@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 
@@ -77,6 +77,16 @@ class EventWebSocket {
     this.url = url;
     EventWebSocket.latest = this;
   }
+}
+
+async function openWorktreeSheet(): Promise<HTMLElement> {
+  const existing = screen.queryByRole("tablist", { name: /terminal tabs/i });
+  if (existing) return existing;
+  // act() flushes the sheet open without touching timers, which some suites fake.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+  });
+  return screen.getByRole("tablist", { name: /terminal tabs/i });
 }
 
 function eventSocket(): EventWebSocket {
@@ -240,8 +250,9 @@ describe("RemoteAttention Affordance", () => {
         await signal(confirmationRead.promise);
       });
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", targetTab.sessionId);
-      expect(screen.getByRole("tab", { name: /Target terminal/i })).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByRole("tab", { name: /Current terminal/i })).toBeEnabled();
+      const paneList = await openWorktreeSheet();
+      expect(within(paneList).getByRole("tab", { name: /Target terminal/i })).toHaveAttribute("aria-selected", "true");
+      expect(within(paneList).getByRole("tab", { name: /Current terminal/i })).toBeEnabled();
       expect(posts).toEqual([expectedRequest]);
     } finally {
       clearTimeout(timer);

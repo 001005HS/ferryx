@@ -16,6 +16,7 @@ import {
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
 import {
   DEFAULT_MACHINE_LABEL,
+  nativePairedHostCommands,
   pairedHostInventory,
 } from "../../lib/pairedHostInventory";
 import {
@@ -44,13 +45,18 @@ import {
 } from "../../state/remoteHostStore";
 import {
   AccountSessionError,
+  allocateSession,
   clearStoredAccountSessionToken,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   issueEnrollmentCode,
   listMachines,
+  openTunnel,
+  redeemInTunnel,
+  requestGrant,
   type AccountMachineView,
 } from "../../remote/accountSession";
+import { getOrCreateAttachKey } from "../../remote/accountAttach";
 import { AccountSignIn } from "./AccountSignIn";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
@@ -63,11 +69,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 
 const explanations: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
-  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry.",
-  MACHINE_GRANT_REQUIRED: "Needs machine access. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN; revoked credentials cannot reconnect.",
+  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.",
+  MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
-  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity and PIN scope, then retry. Saved projects have not been removed.",
+  PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity and machine grant, then retry. Saved projects have not been removed.",
   OFFLINE: "Machine is offline. Saved projects remain available in the workspace; reconnect to the owning daemon.",
   UNCHECKED: "Check the remote machine capabilities before adding a project.",
   READY: "Machine project capabilities verified.",
@@ -328,6 +334,69 @@ export function RemoteSection({
   };
 
   // Paired actions
+  // Redeems an account-issued machine grant on THIS desktop. The web client has had this flow
+  // since account enrollment shipped; the desktop never did, so an enrolled machine sat at
+  // "Needs Grant" forever and its projects could not be added. Every piece already existed --
+  // the grant API, the encrypted tunnel, and `paired_host_migrate_legacy` which persists the
+  // redeemed device token -- so this wires them together rather than inventing a new path.
+  const handleConnectAccountMachine = async (host: HostEndpoint) => {
+    if (busy) return;
+    const machine = accountMachines.find((m) => m.machineId === host.machineId);
+    if (!machine || !accountToken) return;
+
+    setBusy(true);
+    setActionError(null);
+    try {
+      const attachKey = await getOrCreateAttachKey();
+      if (!attachKey) throw new Error("ATTACH_KEY_UNSUPPORTED");
+
+      // A mirror grant connects but is refused by every route that lists or opens projects,
+      // which is exactly the state this button exists to leave.
+      const grant = await requestGrant(
+        accountOrigin,
+        accountToken,
+        machine,
+        attachKey.publicKey,
+        { grantScope: "machine" },
+      );
+      const session = await allocateSession(accountOrigin, accountToken, machine.machineId);
+      const tunnel = await openTunnel({
+        relayOrigin: grant.relayOrigin || accountOrigin,
+        machineId: machine.machineId,
+        enrollmentEpoch: machine.enrollmentEpoch,
+        machineAttachPublicKey: grant.machineAttachPublicKey,
+        localKeyPair: attachKey,
+        sessionId: session.sessionId,
+      });
+      try {
+        const pair = await redeemInTunnel(tunnel.transport, grant.pairingToken, machine.displayName);
+        // Persist through the daemon so the grant survives a restart and the local inventory
+        // reports `paired` with machine scope.
+        await nativePairedHostCommands.migrate({
+          relayOrigin: grant.relayOrigin || accountOrigin,
+          machineId: machine.machineId,
+          displayLabel: machine.displayName,
+          deviceToken: pair.token,
+        });
+      } finally {
+        tunnel.close();
+      }
+      await listMachines(accountOrigin, accountToken)
+        .then(setAccountMachines)
+        .catch((error: unknown) => {
+          // The grant itself succeeded; only the refresh failed, so say that rather than
+          // leaving a stale "Needs Grant" row with no explanation.
+          setActionError(
+            `Connected, but the machine list could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : "ACCOUNT_GRANT_FAILED");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCheckPaired = async (host: HostEndpoint) => {
     if (!host.generation || state.nativeStatus !== "ready" || busy) return;
     setBusy(true);
@@ -835,6 +904,19 @@ export function RemoteSection({
                         </div>
 
                         <div className="flex items-center gap-2 shrink-0">
+                          {/* An enrolled machine whose grant was never redeemed on THIS desktop sat
+                              at "Needs Grant" with every action disabled and no way forward. */}
+                          {code === "MACHINE_GRANT_REQUIRED" && isEnrolledAccountMachine ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-label={`Connect ${host.name}`}
+                              disabled={busy || !accountToken}
+                              onClick={() => handleConnectAccountMachine(host)}
+                            >
+                              Connect
+                            </Button>
+                          ) : null}
                           {/* Disable paired Add Project without onOpenProject even if only onOpenSshProject set */}
                           <Button
                             type="button"
@@ -920,7 +1002,16 @@ export function RemoteSection({
                               size="sm"
                               aria-label={`Re-pair ${host.name}`}
                               disabled={busy}
-                              onClick={() => setRepairHostId(host.hostId)}
+                              onClick={() => {
+                                // An enrolled account machine re-pairs by redeeming a fresh machine grant,
+                                // the same identity-checked path as Connect. Anything else enrolls first.
+                                if (isEnrolledAccountMachine && accountToken) {
+                                  setRepairHostId(null);
+                                  void handleConnectAccountMachine(host);
+                                  return;
+                                }
+                                setRepairHostId(host.hostId);
+                              }}
                             >
                               Re-pair
                             </Button>
@@ -942,8 +1033,10 @@ export function RemoteSection({
                           </div>
 
                           {repairHostId === host.hostId ? (
-                            <p role="status" data-code="REPAIR_REQUIRES_IDENTITY_SUPPORT" className="text-xs text-muted-foreground">
-                              Obtain a fresh machine-access PIN from the owner. Identity-checked re-pair is not supported by this desktop API yet. No credentials have been replaced. You can explicitly forget credentials and pair a new connection; verify the returned machine identity.
+                            <p role="status" data-code="REPAIR_REQUIRES_ENROLLMENT" className="text-xs text-muted-foreground">
+                              Re-pairing goes through your Ferryx account. Sign in above, issue an enrollment code, and run{" "}
+                              <code className="font-mono">ferryx-cli account enroll --code &lt;code&gt;</code> on that machine. It then
+                              appears in this list and can be connected. No credentials have been replaced.
                             </p>
                           ) : null}
 

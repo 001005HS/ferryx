@@ -1,6 +1,6 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { LockKeyhole, Plus, Trash2 } from "lucide-react";
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
@@ -15,6 +15,7 @@ import { StatusDot, type StatusDotState } from "./ui/StatusDot";
 
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
+  readonly repoRoot?: string | null;
   readonly activePath: string;
   readonly activeWorkspaceId?: string;
   readonly agents: readonly ActiveAgent[];
@@ -27,10 +28,13 @@ type WorktreeListProps = {
   readonly onResetAgentState?: (worktree: Worktree) => void;
   readonly sortableWorkspaceId?: string;
   readonly label?: string;
+  /** Rendered when the list is empty. The sidebar passes a hint; other callers keep an empty list silent. */
+  readonly emptyState?: ReactNode;
 };
 
 export type WorktreeRowProps = {
   readonly worktree: Worktree;
+  readonly repoRoot?: string | null;
   readonly active: boolean;
   readonly agent: ActiveAgent | undefined;
   readonly status: DirtyState | undefined;
@@ -49,13 +53,47 @@ export function fileManagerActionLabel() {
   return "Open in File Manager";
 }
 
-/** The repository root worktree is the one that is not an `orca/<ws>/<slug>` worktree branch. */
-function isPrimaryWorktree(worktree: Worktree) {
+function isCaseInsensitivePlatform(): boolean {
+  if (typeof process !== "undefined" && process.platform) {
+    return process.platform === "darwin" || process.platform === "win32";
+  }
+  if (typeof navigator !== "undefined") {
+    const p = navigator.platform || navigator.userAgent || "";
+    return /Mac|Win/i.test(p);
+  }
+  return false;
+}
+
+export function normalizeWorktreePath(p: string, caseInsensitive = isCaseInsensitivePlatform()): string {
+  let normalized = p.trim().replace(/\\/g, "/");
+  normalized = normalized.replace(/\/+/g, "/");
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (caseInsensitive) {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+export function isSameWorktreePath(pathA: string, pathB: string, caseInsensitive?: boolean): boolean {
+  return normalizeWorktreePath(pathA, caseInsensitive) === normalizeWorktreePath(pathB, caseInsensitive);
+}
+
+/**
+ * The repository root worktree is identified by comparing its path against the project repo root.
+ * If no repo root is available, falls back to checking if the branch is not an `orca/<ws>/<slug>` worktree branch.
+ */
+export function isPrimaryWorktree(worktree: Worktree, repoRoot?: string | null): boolean {
+  if (repoRoot && repoRoot.trim().length > 0) {
+    return isSameWorktreePath(worktree.path, repoRoot);
+  }
   return worktreeIdentity(worktree) === null;
 }
 
 export const WorktreeRow = memo(function WorktreeRow({
   worktree,
+  repoRoot,
   active,
   agent,
   status,
@@ -77,7 +115,7 @@ export const WorktreeRow = memo(function WorktreeRow({
 
   const isPaired = Boolean(worktree.workspaceId?.startsWith("daemon:"));
   const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:")) || isPaired;
-  const isPrimary = isPrimaryWorktree(worktree);
+  const isPrimary = isPrimaryWorktree(worktree, repoRoot);
   const primary = !isRemote && isPrimary;
   const isRemotePrimary = isRemote && isPrimary;
   const canDelete = !primary && !isPaired;
@@ -97,19 +135,18 @@ export const WorktreeRow = memo(function WorktreeRow({
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (isDisabled) return;
     const items: NativeMenuEntry[] = [
-      { kind: "item", id: "reveal", label: isRemote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !isRemote, icon: "reveal" },
+      { kind: "item", id: "reveal", label: isRemote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !isRemote && !isDisabled, icon: "reveal" },
       { kind: "item", id: "copy-path", label: isRemote ? "Copy Remote Path" : "Copy Worktree Path" },
     ];
     if (worktree.branch) {
       items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
     }
     if (onResetAgentState) {
-      items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
+      items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", enabled: !isDisabled, icon: "refresh" });
     }
     items.push({ kind: "separator" });
-    items.push({ kind: "item", id: "delete", label: deleteActionLabel, enabled: canDelete, icon: "trash" });
+    items.push({ kind: "item", id: "delete", label: deleteActionLabel, enabled: canDelete && !isDisabled, icon: "trash" });
     menuUnlistenRef.current?.();
     const controller = new AbortController();
     menuUnlistenRef.current = () => controller.abort();
@@ -156,13 +193,20 @@ export const WorktreeRow = memo(function WorktreeRow({
 
   const isStale = Boolean((worktree as any).stale || (worktree as any).freshness?.stale);
   const isDisabled = Boolean((worktree as any).disabled || isStale);
+  // A stale row shows the last list a paired machine sent before it dropped off. It must not open
+  // (that machine cannot serve it now), but it must say why instead of swallowing the click.
+  const unavailableReason = isDisabled
+    ? isStale
+      ? `${worktree.hostSummary ?? "Stale"}: this is the last list the machine sent. The row turns back on when the machine reconnects.`
+      : "This worktree is unavailable right now."
+    : null;
 
   return (
     <>
       <div
         data-stale={isStale ? "true" : undefined}
         data-disabled={isDisabled ? "true" : undefined}
-        onContextMenu={isDisabled ? undefined : handleContextMenu}
+        onContextMenu={handleContextMenu}
         className={cn(
           "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
           isDisabled && "opacity-60",
@@ -173,14 +217,19 @@ export const WorktreeRow = memo(function WorktreeRow({
       >
         <button
           type="button"
-          disabled={isDisabled}
-          onClick={isDisabled ? undefined : () => onSelect(worktree)}
+          onClick={() => {
+            if (unavailableReason) {
+              toast.info(unavailableReason);
+              return;
+            }
+            onSelect(worktree);
+          }}
           data-shortcut-worktree-path={worktree.path}
           data-shortcut-workspace-id={worktree.workspaceId ?? ""}
           aria-current={active ? "true" : undefined}
           aria-disabled={isDisabled ? "true" : undefined}
-          title={isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined}
-          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed"
+          title={unavailableReason ?? (isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined)}
+          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-not-allowed"
         >
           <span className="flex min-w-0 flex-col">
             <span className="flex min-w-0 items-center gap-1.5">
@@ -294,6 +343,7 @@ const SortableWorktreeRow = memo(function SortableWorktreeRow({
 
 export function WorktreeList({
   worktrees,
+  repoRoot,
   activePath,
   activeWorkspaceId,
   agents,
@@ -306,6 +356,7 @@ export function WorktreeList({
   onResetAgentState,
   sortableWorkspaceId,
   label = "Worktrees",
+  emptyState,
 }: WorktreeListProps) {
   const agentsByPath = useMemo(() => {
     const map = new Map<string, ActiveAgent>();
@@ -315,7 +366,13 @@ export function WorktreeList({
     return map;
   }, [agents]);
 
-  if (worktrees.length === 0) return null;
+  if (worktrees.length === 0) {
+    return emptyState ? (
+      <div role="status" className="px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        {emptyState}
+      </div>
+    ) : null;
+  }
 
   return (
     <div role="list" aria-label={label} className="m-0 p-0">
@@ -334,6 +391,7 @@ export function WorktreeList({
 
         const rowProps: WorktreeRowProps = {
           worktree,
+          repoRoot,
           active,
           agent,
           status,
@@ -356,6 +414,24 @@ export function WorktreeList({
         );
       })}
     </div>
+  );
+}
+
+/** Default empty-state hint for a project section: says what is going on and offers the one action. */
+export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWorktree?: () => void }) {
+  return (
+    <span className="flex items-center justify-between gap-2">
+      <span>No worktrees listed yet.</span>
+      {onCreateWorktree ? (
+        <button
+          type="button"
+          onClick={onCreateWorktree}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-foreground hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          Add worktree
+        </button>
+      ) : null}
+    </span>
   );
 }
 

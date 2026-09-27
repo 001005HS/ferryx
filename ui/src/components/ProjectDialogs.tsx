@@ -976,7 +976,7 @@ export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProje
             Are you sure you want to remove <span className="font-semibold">{displayName}</span> from Ferryx?
           </p>
           <p className="text-[11px] text-muted-foreground">
-            This only removes the project from your sidebar. Your repository files at{" "}
+            This removes the project from your sidebar and terminates all running terminal sessions and processes in this project. Your repository files at{" "}
             <span className="break-all font-mono text-muted-foreground">{project.repoRoot}</span> will not be deleted.
           </p>
         </div>

@@ -1,10 +1,17 @@
+import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
-import { WorktreeList } from "./WorktreeList";
+import {
+  EmptyWorktreesHint,
+  WorktreeList,
+  isPrimaryWorktree,
+  isSameWorktreePath,
+  normalizeWorktreePath,
+} from "./WorktreeList";
 
 const nativeMenu = vi.hoisted(() => ({
   openNativePopupMenu: vi.fn(),
@@ -13,6 +20,10 @@ const nativeMenu = vi.hoisted(() => ({
 vi.mock("../lib/nativeMenu", () => ({
   openNativePopupMenu: nativeMenu.openNativePopupMenu,
 }));
+
+const toastMocks = vi.hoisted(() => ({ info: vi.fn(), success: vi.fn(), error: vi.fn() }));
+
+vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function lastMenuCall(): { items: Array<{ kind: string; id?: string; label?: string; enabled?: boolean }>; onAction: (id: string) => void } {
   const calls = nativeMenu.openNativePopupMenu.mock.calls;
@@ -200,6 +211,25 @@ describe("WorktreeList actions", () => {
 
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByText(/No Git worktrees/i)).toBeNull();
+  });
+
+  it("says so and offers to add one when an empty list is given an empty state", () => {
+    const onCreateWorktree = vi.fn();
+    render(
+      <WorktreeList
+        worktrees={[]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        emptyState={<EmptyWorktreesHint onCreateWorktree={onCreateWorktree} />}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("No worktrees listed yet.");
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree" }));
+    expect(onCreateWorktree).toHaveBeenCalledTimes(1);
   });
 
   it("normalizes ferryx and rorca branch names to main (F11)", () => {
@@ -584,7 +614,7 @@ describe("WorktreeList actions", () => {
     expect(screen.queryByText("SSH")).not.toBeInTheDocument();
   });
 
-  it("renders stale/disabled worktree row with disabled select button and disabled action controls", () => {
+  it("renders a stale row that explains itself instead of opening, with its actions disabled", () => {
     const onSelect = vi.fn();
     const onCreateWorktree = vi.fn();
     const onDelete = vi.fn();
@@ -620,11 +650,15 @@ describe("WorktreeList actions", () => {
     const row = screen.getByText("stale-worktree").closest(".group\\/worktree-row")!;
     expect(row).toHaveAttribute("data-stale", "true");
 
-    // Main select button must be disabled
-    const selectBtn = row.querySelector("button[data-shortcut-worktree-path]");
-    expect(selectBtn).toBeDisabled();
-    fireEvent.click(selectBtn!);
+    // The select control stays clickable so it can explain itself, but it must not open the row.
+    toastMocks.info.mockClear();
+    const selectBtn = row.querySelector("button[data-shortcut-worktree-path]")!;
+    expect(selectBtn).toHaveAttribute("aria-disabled", "true");
+    expect(selectBtn.getAttribute("title")).toContain("Offline (stale)");
+    fireEvent.click(selectBtn);
     expect(onSelect).not.toHaveBeenCalled();
+    expect(toastMocks.info).toHaveBeenCalledTimes(1);
+    expect(toastMocks.info.mock.calls[0][0]).toContain("reconnects");
 
     // Add worktree button must be disabled
     const addBtn = screen.getByRole("button", { name: "Add worktree" });
@@ -637,5 +671,147 @@ describe("WorktreeList actions", () => {
     expect(deleteBtn).toBeDisabled();
     fireEvent.click(deleteBtn);
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps the right-click menu on a stale row with only the read-only actions enabled", () => {
+    const staleWorktree: Worktree & { stale?: boolean; disabled?: boolean } = {
+      workspaceId: "ws-123456",
+      identity: { wsId: "ws-123456", slug: "stale-worktree" },
+      path: "/srv/repo/stale-worktree",
+      head: "def456",
+      branch: "refs/heads/orca/ws-123456/stale-worktree",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Remote Host",
+      hostSummary: "Offline (stale)",
+      stale: true,
+      disabled: true,
+    };
+
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const before = nativeMenu.openNativePopupMenu.mock.calls.length;
+
+    render(
+      <WorktreeList
+        worktrees={[staleWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onResetAgentState={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByText("stale-worktree").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
+
+    expect(nativeMenu.openNativePopupMenu.mock.calls.length).toBe(before + 1);
+    const { items } = lastMenuCall();
+
+    const copyPathItem = items.find((item) => item.id === "copy-path");
+    expect(copyPathItem).toBeDefined();
+    expect(copyPathItem?.enabled).not.toBe(false);
+
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.enabled).toBe(false);
+
+    const resetAgentStateItem = items.find((item) => item.id === "reset-agent-state");
+    expect(resetAgentStateItem?.enabled).toBe(false);
+
+    const revealItem = items.find((item) => item.id === "reveal");
+    expect(revealItem?.enabled).toBe(false);
+  });
+
+  it("identifies primary worktree by matching repoRoot path and makes external non-root worktrees deletable", () => {
+    const onDelete = vi.fn();
+    const externalWorktree: Worktree = {
+      path: "/repo-external/custom-feature",
+      head: "ext123",
+      branch: "refs/heads/feature/custom-feature", // not an orca/... branch!
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree, externalWorktree]}
+        repoRoot="/repo"
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    // rootWorktree matches repoRoot: marked primary, no delete button
+    const rootRow = screen.getByText("main").closest(".group\\/worktree-row")!;
+    expect(rootRow.textContent).toContain("primary");
+    expect(rootRow.querySelector('button[aria-label="Delete worktree"]')).toBeNull();
+
+    // externalWorktree path does NOT match repoRoot: NOT primary, delete button enabled
+    const extRow = screen.getByText("feature/custom-feature").closest(".group\\/worktree-row")!;
+    expect(extRow.textContent).not.toContain("primary");
+    const deleteBtn = extRow.querySelector('button[aria-label="Delete worktree"]');
+    expect(deleteBtn).not.toBeNull();
+    fireEvent.click(deleteBtn!);
+    expect(onDelete).toHaveBeenCalledWith(externalWorktree);
+
+    // Context menu on externalWorktree has Delete Worktree enabled
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    fireEvent.contextMenu(extRow, { clientX: 100, clientY: 100 });
+    const { items, onAction } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Delete Worktree");
+    expect(deleteItem?.enabled).toBe(true);
+
+    onAction("delete");
+    expect(onDelete).toHaveBeenCalledWith(externalWorktree);
+  });
+
+  it("falls back to branch-shape check when no repoRoot is provided", () => {
+    const externalWorktree: Worktree = {
+      path: "/repo-external/custom-feature",
+      head: "ext123",
+      branch: "refs/heads/feature/custom-feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    // When repoRoot is not provided, branch-shape fallback applies
+    expect(isPrimaryWorktree(rootWorktree)).toBe(true);
+    expect(isPrimaryWorktree(externalWorktree)).toBe(true);
+    expect(isPrimaryWorktree(worktree)).toBe(false);
+
+    // When repoRoot IS provided, path determines primary
+    expect(isPrimaryWorktree(rootWorktree, "/repo")).toBe(true);
+    expect(isPrimaryWorktree(externalWorktree, "/repo")).toBe(false);
+    expect(isPrimaryWorktree(worktree, "/repo")).toBe(false);
+  });
+
+  it("normalizes paths for comparison across trailing separators, slashes, and case", () => {
+    // Trailing slashes
+    expect(isSameWorktreePath("/repo/main/", "/repo/main")).toBe(true);
+    expect(isSameWorktreePath("/repo/main///", "/repo/main")).toBe(true);
+
+    // Windows backslashes
+    expect(isSameWorktreePath("C:\\projects\\ferryx", "C:/projects/ferryx")).toBe(true);
+    expect(isSameWorktreePath("C:\\projects\\ferryx\\", "C:/projects/ferryx")).toBe(true);
+
+    // Case-insensitivity when enabled (Windows and macOS)
+    expect(normalizeWorktreePath("C:\\Projects\\Ferryx", true)).toBe("c:/projects/ferryx");
+    expect(isSameWorktreePath("C:\\Projects\\Ferryx", "c:/projects/ferryx", true)).toBe(true);
+    expect(isSameWorktreePath("/Volumes/T9-Mac/Repo", "/volumes/t9-mac/repo", true)).toBe(true);
+
+    // Case-preservation when disabled (Linux)
+    expect(normalizeWorktreePath("/home/user/Repo", false)).toBe("/home/user/Repo");
+    expect(isSameWorktreePath("/home/user/Repo", "/home/user/repo", false)).toBe(false);
   });
 });

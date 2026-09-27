@@ -10,6 +10,9 @@ pub(crate) struct AgentState {
     pub state: String,
     pub agent: Option<String>,
     pub provider_session: Option<AgentProviderSession>,
+    /// What the agent is blocked on, when it can name it. Carried to the inbox so a waiting
+    /// session can show the question instead of only a state word.
+    pub detail: Option<String>,
     /// Who produced this state. `idle` from a running agent and `idle` from a daemon release are
     /// the same word with opposite meanings for screen inference, so the producer travels along.
     pub origin: AgentStateOrigin,
@@ -63,6 +66,7 @@ impl AgentStateHub {
             state: "idle".to_string(),
             agent: previous.as_ref().and_then(|s| s.agent.clone()),
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+            detail: None,
             origin: AgentStateOrigin::ManualReset,
         };
         tracing::info!(session_id, reason = "manual_reset",
@@ -83,6 +87,7 @@ impl AgentStateHub {
             state: "idle".to_string(),
             agent: previous.as_ref().and_then(|s| s.agent.clone()),
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+            detail: None,
             origin: AgentStateOrigin::ProcessReleased,
         };
         tracing::info!(session_id, reason = "foreground_agent_to_shell",
@@ -181,6 +186,7 @@ mod tests {
             state: value.to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            detail: None,
             origin: AgentStateOrigin::Agent,
         }
     }

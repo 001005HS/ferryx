@@ -162,6 +162,7 @@ export function useWorkspaceRuntime({
         refreshGenerationRef.current.get(workspaceId) === generation;
 
       const refreshPromise = (async () => {
+        let stage = "list";
         try {
           switchDebug("worktree.refresh.start", {
             workspaceId,
@@ -178,6 +179,7 @@ export function useWorkspaceRuntime({
             current: isCurrent(),
           });
           if (!isCurrent()) return;
+          stage = "sync";
           let worktrees = listed;
           if (worktrees.length === 0) {
             const plainRoot = plainRootRef.current;
@@ -199,6 +201,7 @@ export function useWorkspaceRuntime({
             current: isCurrent(),
           });
           if (!isCurrent()) return;
+          stage = "ensure";
           const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
           if (preferred) {
             switchDebug("worktree.refresh.ensure.start", {
@@ -220,6 +223,15 @@ export function useWorkspaceRuntime({
           });
           setRuntimeError(null);
         } catch (error) {
+          const ipcError = toIpcError(error);
+          switchDebug("worktree.refresh.error", {
+            workspaceId,
+            generation,
+            stage,
+            code: ipcError.code,
+            message: ipcError.message,
+            current: isCurrent(),
+          });
           reportRuntimeErrorRef.current(error);
         }
       })().finally(() => {

@@ -384,12 +384,14 @@ export function deserializeWorkspaceState(
   liveBackendSessionIds?:
     | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
+        authoritative?: boolean;
         complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
         sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
+    | Map<string, { daemonEpoch?: string | null; running?: boolean } | boolean>
     | null,
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
@@ -406,16 +408,38 @@ export function deserializeWorkspaceState(
 
   let globalLiveEpoch: string | null = null;
   const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
-  const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined &&
-    !(typeof liveBackendSessionIds === "object" && "complete" in liveBackendSessionIds && liveBackendSessionIds.complete === false);
+  const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
+  let isAuthoritative = hasLiveSessionQuery;
+  if (typeof liveBackendSessionIds === "object" && liveBackendSessionIds !== null) {
+    if ("authoritative" in liveBackendSessionIds && (liveBackendSessionIds as any).authoritative === false) {
+      isAuthoritative = false;
+    } else if ("complete" in liveBackendSessionIds && (liveBackendSessionIds as any).complete === false) {
+      isAuthoritative = false;
+    }
+  }
 
   if (hasLiveSessionQuery && liveBackendSessionIds) {
     if (
+      liveBackendSessionIds instanceof Map ||
+      (typeof liveBackendSessionIds === "object" &&
+        "has" in liveBackendSessionIds &&
+        "get" in liveBackendSessionIds &&
+        typeof (liveBackendSessionIds as any).get === "function" &&
+        typeof (liveBackendSessionIds as any).entries === "function")
+    ) {
+      for (const [key, value] of (liveBackendSessionIds as Map<any, any>).entries()) {
+        const itemEpoch = typeof value === "object" && value !== null && value.daemonEpoch != null ? String(value.daemonEpoch) : globalLiveEpoch;
+        const isRunning = typeof value === "object" && value !== null && "running" in value ? (value as any).running !== false : value !== false;
+        liveSessionMap.set(String(key), { daemonEpoch: itemEpoch, running: isRunning });
+      }
+    } else if (
       typeof liveBackendSessionIds === "object" &&
       !("length" in liveBackendSessionIds) &&
       !liveBackendSessionIds[Symbol.iterator as keyof typeof liveBackendSessionIds]
     ) {
       const container = liveBackendSessionIds as {
+        authoritative?: boolean;
+        complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
@@ -480,6 +504,7 @@ export function deserializeWorkspaceState(
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";
+    let isReconnecting = false;
     if (isPairedSession) {
       // Local inventory is not authority for remote liveness or remote epochs.
       // Retain the proxy binding for exact-target reattach, never create a shell.
@@ -496,13 +521,19 @@ export function deserializeWorkspaceState(
       lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
       lifecycle = "working";
       processState = "running";
-    } else if (!hasLiveSessionQuery) {
+    } else if (!hasLiveSessionQuery || !isAuthoritative) {
+      // When we have not heard an authoritative daemon answer (e.g. during launch / handover
+      // reconciliation), a persisted session is assumed alive and treated as reconnecting.
+      // Keep its persisted backendSessionId so the user can reattach or recover.
       const isLive = Boolean(persistedBackendSessionId);
       backendSessionId = isLive ? persistedBackendSessionId : null;
-      daemonEpoch = isLive ? persistedEpoch : null;
-      lastOutputSequence = isLive ? persistedSequence : null;
+      daemonEpoch = isLive ? (liveSessionMap.get(persistedBackendSessionId!)?.daemonEpoch ?? persistedEpoch) : null;
+      lastOutputSequence = isLive ? (daemonEpoch === persistedEpoch ? persistedSequence : null) : null;
       lifecycle = isLive ? "working" : "exited";
       processState = isLive ? "running" : processState;
+      if (isLive && (!hasLiveSessionQuery || !liveSessionMap.has(persistedBackendSessionId!))) {
+        isReconnecting = true;
+      }
     } else {
       if (!persistedBackendSessionId || !liveSessionMap.has(persistedBackendSessionId)) {
         backendSessionId = null;
@@ -576,7 +607,11 @@ export function deserializeWorkspaceState(
       reconnectLifecycle: "idle",
       reconnectError: null,
       reconnectRequestId: null,
-      ...(isSshSession || isPairedSession ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" as const : "legacyLost" as const } : {}),
+      ...(isSshSession || isPairedSession
+        ? { remoteConnectionState: persistedBackendSessionId ? ("reconnecting" as const) : ("legacyLost" as const) }
+        : isReconnecting
+          ? { remoteConnectionState: "reconnecting" as const }
+          : {}),
     };
   }
 

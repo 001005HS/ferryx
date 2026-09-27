@@ -20,6 +20,8 @@ fn blank_cell() -> CellSnapshot {
         wide: CellWide::Narrow,
         fg: None,
         bg: None,
+        fg_ident: None,
+        underline_ident: None,
         bold: false,
         italic: false,
         underline: false,

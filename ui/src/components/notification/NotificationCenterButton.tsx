@@ -6,7 +6,6 @@ import {
   notificationCenterStore,
   type NotificationCenterStore,
 } from "../../lib/notificationCenter/notificationCenterStore";
-import { actionableEntryCount } from "../../features/ferryx/control/attentionRows";
 import type { Agent } from "../../features/ferryx/control/client";
 import { IconButton } from "../ui/IconButton";
 import { NotificationCenterPopover, type IsSessionNavigable } from "./NotificationCenterPopover";
@@ -76,10 +75,10 @@ export function NotificationCenterButton({
 
   const internalAnchorRef = useRef<HTMLDivElement>(null);
   const anchorRef = externalAnchorRef ?? internalAnchorRef;
-  const { state } = useNotificationCenter(store);
+  const { unreadCount } = useNotificationCenter(store);
   // The badge answers "does anything need me?", so it counts blocked-on-you work and finished
   // work nobody has looked at — never plain mentions, or it would stay lit permanently.
-  const actionable = actionableEntryCount(state.entries);
+  const actionable = unreadCount;
 
   return (
     <div ref={internalAnchorRef} className="no-drag relative inline-flex">

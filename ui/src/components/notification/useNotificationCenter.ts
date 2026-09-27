@@ -3,11 +3,12 @@ import {
   notificationCenterStore,
   type NotificationCenterStore,
 } from "../../lib/notificationCenter/notificationCenterStore";
+import { actionableEntryCount } from "../../features/ferryx/control/attentionRows";
 
 export function useNotificationCenter(store: NotificationCenterStore = notificationCenterStore) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const unreadEntries = state.entries.filter((entry) => "unread" in entry.read);
-  const unreadCount = unreadEntries.length;
+  const unreadCount = actionableEntryCount(state.entries);
 
   return {
     state,

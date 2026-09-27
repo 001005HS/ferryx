@@ -107,8 +107,14 @@ const native = {
   }),
 };
 
+const { noteObservationInteraction } = await import("./lib/notificationCenter/activityRecording");
+
 vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  // The notification coordinator re-consults the authoritative OS permission status before it
+  // trusts an earlier denial, so the mock has to answer it or every dispatch rejects.
+  getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" })),
+  requestNotificationPermission: vi.fn(async () => ({ granted: true })),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
   watchDagPairedProject: vi.fn((workspaceId: string, remotePath: string) =>
     Promise.resolve({ projectPath: `paired:${workspaceId}:${remotePath}`, runs: [] }),
@@ -249,17 +255,22 @@ vi.mock("./state/workspaceRuntime", () => ({
   useWorkspaceRuntime: () => runtime,
 }));
 
-let renderNotificationCenter = false;
 let sidebarProps: {
   onResetAgentState?: (worktree: import("./lib/types").Worktree) => Promise<void>;
-  onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
-  isSessionNavigable?: (workspaceId: string, sessionId: string) => boolean;
+  attention?: import("./components/Sidebar").SidebarAttention;
 } = {};
 vi.mock("./components/Sidebar", () => ({
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "ferryx.sidebar.collapsedProjects",
   Sidebar: (props: typeof sidebarProps) => {
     sidebarProps = props;
-    return <div data-testid="mock-sidebar">{renderNotificationCenter ? <NotificationCenterButton {...props} /> : null}</div>;
+    const attention = props.attention;
+    return (
+      <div data-testid="mock-sidebar" data-worktree-list-open={String(attention?.worktreeListOpen ?? false)}>
+        {attention && !attention.worktreeListOpen ? (
+          <AttentionInbox rows={attention.rows} onOpen={attention.onOpen} onDismiss={attention.onDismiss} />
+        ) : null}
+      </div>
+    );
   },
 }));
 
@@ -283,14 +294,20 @@ vi.mock("./components/TerminalSplitView", () => ({
   },
 }));
 
+// The factory must not close over ordinary module-scope bindings: `vi.mock` is hoisted above
+// them, and `workspaceStore` now imports this store at module scope, so the factory runs before
+// a plain `const` would be initialised. `vi.hoisted` lifts the box alongside the mock.
+const inboxBox = vi.hoisted(() => ({ current: null as ReturnType<typeof import("./lib/notificationCenter/notificationCenterStore").createNotificationCenterStore> | null }));
+vi.mock("./lib/notificationCenter/notificationCenterStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/notificationCenter/notificationCenterStore")>();
+  if (!inboxBox.current) inboxBox.current = actual.createNotificationCenterStore();
+  return { ...actual, get notificationCenterStore() { return inboxBox.current!; } };
+});
 const inboxModule = await vi.importActual<typeof import("./lib/notificationCenter/notificationCenterStore")>("./lib/notificationCenter/notificationCenterStore");
-let inbox = inboxModule.createNotificationCenterStore();
-vi.mock("./lib/notificationCenter/notificationCenterStore", () => ({
-  ...inboxModule,
-  get notificationCenterStore() { return inbox; },
-}));
+if (!inboxBox.current) inboxBox.current = inboxModule.createNotificationCenterStore();
+let inbox = inboxBox.current;
 const { notificationEntryId } = await import("./lib/notificationCenter/types");
-const { NotificationCenterButton } = await import("./components/notification/NotificationCenterButton");
+const { AttentionInbox } = await import("./features/ferryx/attention/AttentionInbox");
 const { App } = await import("./App");
 const { getWorkspaceRestoreStatus, resetWorkspaceRestore } = await import("./state/workspaceRestore");
 const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
@@ -355,8 +372,8 @@ describe("App notification coordinator wiring", () => {
     inbox.dispose();
     localStorage.clear();
     inbox = inboxModule.createNotificationCenterStore();
+    inboxBox.current = inbox;
     sidebarProps = {};
-    renderNotificationCenter = false;
     saveNotificationSettings({ enabled: true, terminalBell: true, agentTaskComplete: true });
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
@@ -822,13 +839,23 @@ describe("App notification coordinator wiring", () => {
         previousState: "working", state: "done", occurredAt: 100, observed: false });
       return { workspaceId, sessionId, revision: inbox.getSnapshot().entries[0].revision };
     };
+    const rowFor = (clicked: ReturnType<typeof seedUnread>) => {
+      const row = sidebarProps.attention?.rows.find(
+        (candidate) => candidate.workspaceId === clicked.workspaceId && candidate.sessionId === clicked.sessionId,
+      );
+      expect(row).toBeDefined();
+      return { ...row!, revision: clicked.revision };
+    };
     const clickRow = async (clicked: ReturnType<typeof seedUnread>) => {
-      expect(sidebarProps.onNavigateToSession).toEqual(expect.any(Function));
-      await act(async () => { sidebarProps.onNavigateToSession!(clicked); });
+      const row = rowFor(clicked);
+      await act(async () => { sidebarProps.attention!.onOpen(row); });
     };
 
     it("records focused observed done as seen despite the focus gate", async () => {
       currentActivityTargets = [target];
+      // Focus alone no longer counts as observation - a window can be frontmost while the user
+      // reads on another monitor - so an actually-present user is seeded here.
+      noteObservationInteraction(Date.now());
       await act(async () => { render(<App />); });
       await nativeFocusTrackingReady;
       nativeFocusChanged?.({ payload: true });
@@ -881,7 +908,6 @@ describe("App notification coordinator wiring", () => {
       const clicked = seedUnread();
       const acknowledge = vi.spyOn(inbox, "markEntriesRead");
       await act(async () => { render(<App />); });
-      expect(sidebarProps.isSessionNavigable?.("default", "sess-1")).toBe(true);
       await clickRow(clicked);
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
       expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("default", "sess-1"), expectedRevision: clicked.revision }]);
@@ -900,18 +926,18 @@ describe("App notification coordinator wiring", () => {
     });
 
     it.each([ ["ghost", "sess-1"], ["default", "closed"], ["other", "closed"] ])(
-      "does not acknowledge missing or closed target %s/%s", async (workspaceId, sessionId) => {
+      "drops a row whose target %s/%s is gone instead of navigating", async (workspaceId, sessionId) => {
         seedTwoProjects();
         setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
         const clicked = seedUnread(workspaceId, sessionId);
         const acknowledge = vi.spyOn(inbox, "markEntriesRead");
         await act(async () => { render(<App />); });
-        expect(sidebarProps.isSessionNavigable?.(workspaceId, sessionId)).toBe(false);
         dispatchWorkspaceAction.mockClear();
         await clickRow(clicked);
         expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
         expect(acknowledge).not.toHaveBeenCalled();
-        expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+        expect(inbox.getSnapshot().entries).toEqual([]);
+        expect(sidebarProps.attention?.rows).toEqual([]);
       },
     );
 
@@ -960,124 +986,79 @@ describe("App notification coordinator wiring", () => {
       }
     });
 
-    it("opens the real center and acknowledges a row clicked through its visible surface", async () => {
-      renderNotificationCenter = true;
+    it("lists the unread completion in the sidebar inbox and removes it once the row is opened", async () => {
       currentActivityTargets = [target];
       const view = render(<App />);
       await act(async () => { await nativeFocusTrackingReady; });
       nativeFocusChanged?.({ payload: false });
       act(() => { emitActivityTargets(); });
-      expect(view.getByTestId("notification-center-badge")).toHaveTextContent("1");
-      fireEvent.click(view.getByTestId("notification-center-button"));
+      const rows = view.getAllByTestId("attention-row");
+      expect(rows).toHaveLength(1);
+      expect(rows[0].dataset.attentionState).toBe("done");
       expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-      fireEvent.click(view.getByTestId(`notification-row-${notificationEntryId("default", "sess-1")}`));
+
+      dispatchWorkspaceAction.mockClear();
+      fireEvent.click(rows[0]);
+
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-      expect(view.queryByTestId("notification-center-badge")).toBeNull();
+      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
+      expect(view.getByTestId("attention-inbox-empty")).toBeInTheDocument();
     });
 
-    it("toggles the notification center with the keyboard shortcut Cmd+Shift+N", async () => {
-      renderNotificationCenter = true;
+    it("dismisses a row from the inbox without navigating", async () => {
       currentActivityTargets = [target];
       const view = render(<App />);
       await act(async () => { await nativeFocusTrackingReady; });
       nativeFocusChanged?.({ payload: false });
       act(() => { emitActivityTargets(); });
+      dispatchWorkspaceAction.mockClear();
 
-      // Initially closed
-      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+      fireEvent.click(view.getByRole("button", { name: /알림 지우기$/ }));
 
-      // Press Cmd+Shift+N
-      act(() => {
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "n",
-            code: "KeyN",
-            metaKey: true,
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      });
-
-      // Now open
-      expect(view.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
-
-      // Press Cmd+Shift+N again to toggle closed
-      act(() => {
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "n",
-            code: "KeyN",
-            metaKey: true,
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      });
-
-      // Now closed
-      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+      expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
     });
 
-    it("opens the notification center via shortcut even when sidebar is closed", async () => {
-      renderNotificationCenter = true;
-      currentActivityTargets = [target];
+    it("brings the inbox back over the worktree list with the notifications shortcut", async () => {
       const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-
-      // Close the sidebar via Cmd+B
-      act(() => {
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "b",
-            code: "KeyB",
-            metaKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
+      const shortcut = () => act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "n", code: "KeyN", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        }));
       });
+      act(() => { sidebarProps.attention!.onWorktreeListOpenChange(true); });
+      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("true");
 
-      // Confirm mock sidebar is gone
+      shortcut();
+      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+
+      shortcut();
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
 
-      // Press Cmd+Shift+N to open notifications
+      shortcut();
+      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+    });
+
+    it("shows the attention count on the collapsed sidebar and reopens the inbox from it", async () => {
+      currentActivityTargets = [target];
+      const view = render(<App />);
+      await act(async () => { await nativeFocusTrackingReady; });
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
       act(() => {
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "n",
-            code: "KeyN",
-            metaKey: true,
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "b", code: "KeyB", metaKey: true, bubbles: true, cancelable: true,
+        }));
       });
+      expect(view.queryByTestId("mock-sidebar")).toBeNull();
+      expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent("1");
 
-      // Notification center popover should be open even without sidebar
-      expect(view.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
+      fireEvent.click(view.getByRole("button", { name: "인박스 열기 (1)" }));
 
-      // Press Cmd+Shift+N again to toggle closed
-      act(() => {
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "n",
-            code: "KeyN",
-            metaKey: true,
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      });
-
-      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+      expect(view.getAllByTestId("attention-row")).toHaveLength(1);
     });
 
     it("preserves unread history across unmount and restart from persisted storage", async () => {
@@ -1090,6 +1071,7 @@ describe("App notification coordinator wiring", () => {
       cleanup();
       inbox.dispose();
       inbox = inboxModule.createNotificationCenterStore();
+    inboxBox.current = inbox;
       await act(async () => { render(<App />); });
       expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
     });

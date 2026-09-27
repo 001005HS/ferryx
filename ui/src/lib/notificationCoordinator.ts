@@ -1,6 +1,15 @@
-import { dispatchNotification, playNotificationSound, requestNotificationPermission } from './tauri';
-import { type NotificationSettings, loadNotificationSettings } from './notificationSettings';
-import type { DispatchNotificationArgs } from './types';
+import {
+  dispatchNotification,
+  getNotificationPermissionStatus,
+  playNotificationSound,
+  requestNotificationPermission,
+} from './tauri';
+import {
+  type NotificationSettings,
+  NOTIFICATION_SETTINGS_EVENT,
+  loadNotificationSettings,
+} from './notificationSettings';
+import type { DispatchNotificationArgs, NotificationPermissionStatus } from './types';
 
 export function isWindowForegroundFocused(): boolean {
   return (
@@ -22,6 +31,8 @@ export interface NotificationCoordinatorOptions {
   onMarkTabUnread?: (tabId: string, workspaceId?: string) => void;
   onMarkWorktreeUnread?: (path: string, workspaceId?: string) => void;
   onError?: (error: unknown, source: 'sound' | 'dispatch') => void;
+  getPermissionStatus?: () => Promise<NotificationPermissionStatus>;
+  requestPermission?: () => Promise<{ granted: boolean; error?: string | null }>;
 }
 
 export interface TerminalBellEventParams {
@@ -58,24 +69,86 @@ export class NotificationCoordinator {
   private lastAgentState = new Map<string, string>();
   private lastAgentCompletionTimestamp = new Map<string, number>();
   private permissionRequest: Promise<boolean> | null = null;
+  private permissionStatusQuery: Promise<boolean> | null = null;
   private permissionDenied = false;
+  private cleanupListeners: (() => void) | null = null;
 
   private readonly bellThrottleMs = 1000;
   private readonly bellAgentSuppressionMs = 1500;
 
-  constructor(private options: NotificationCoordinatorOptions = {}) {}
+  constructor(private options: NotificationCoordinatorOptions = {}) {
+    this.installPermissionRecheckListeners();
+  }
+
+  private installPermissionRecheckListeners(): void {
+    if (typeof window === 'undefined') return;
+
+    const handleRecheck = () => {
+      void this.recheckPermissionStatus();
+    };
+
+    window.addEventListener('focus', handleRecheck);
+    window.addEventListener(NOTIFICATION_SETTINGS_EVENT, handleRecheck);
+
+    this.cleanupListeners = () => {
+      window.removeEventListener('focus', handleRecheck);
+      window.removeEventListener(NOTIFICATION_SETTINGS_EVENT, handleRecheck);
+    };
+  }
+
+  /**
+   * Authoritatively consults the OS permission status without re-requesting/prompting.
+   * If the OS reports granted/authorized, clears any previous `permissionDenied` latch.
+   */
+  async recheckPermissionStatus(): Promise<boolean> {
+    if (!this.permissionStatusQuery) {
+      const queryFn = this.options.getPermissionStatus ?? getNotificationPermissionStatus;
+      this.permissionStatusQuery = Promise.resolve(queryFn())
+        .then((status) => {
+          const isGranted =
+            status?.authorization === 'authorized' ||
+            status?.authorization === 'provisional' ||
+            status?.status === 'granted';
+          if (isGranted) {
+            this.permissionDenied = false;
+          }
+          return isGranted;
+        })
+        .catch(() => false)
+        .finally(() => {
+          this.permissionStatusQuery = null;
+        });
+    }
+    return this.permissionStatusQuery;
+  }
 
   private isExpectedPermissionRejection(reason: string | undefined): boolean {
     return reason === 'permission-required' || reason === 'blocked-by-system';
   }
 
   private ensureNotificationPermission(): Promise<boolean> {
-    if (this.permissionDenied) return Promise.resolve(false);
+    // A previous denial is a latch, not a verdict: the user may have granted permission in OS
+    // settings since. Re-consult the authoritative status before giving up, but keep the
+    // already-granted path synchronous so a retry still lands in the same dispatch turn.
+    if (this.permissionDenied) {
+      return this.recheckPermissionStatus().then((granted) =>
+        granted ? this.requestNotificationPermissionOnce() : false,
+      );
+    }
+    return this.requestNotificationPermissionOnce();
+  }
+
+  private requestNotificationPermissionOnce(): Promise<boolean> {
     if (!this.permissionRequest) {
-      this.permissionRequest = Promise.resolve(requestNotificationPermission())
+      const requestFn = this.options.requestPermission ?? requestNotificationPermission;
+      this.permissionRequest = Promise.resolve(requestFn())
         .then((result) => {
           const granted = result?.granted === true;
-          if (!granted && !result?.error) this.permissionDenied = true;
+          if (!granted && !result?.error) {
+            this.permissionDenied = true;
+          } else if (granted) {
+            this.permissionDenied = false;
+          }
           return granted;
         })
         .finally(() => {
@@ -223,7 +296,7 @@ export class NotificationCoordinator {
         : { accepted: false };
     }
 
-    const decision = { accepted: true };
+    const decision: NotificationDecision = { accepted: true };
     const now = Date.now();
     // Suppression must be SYMMETRIC. The bell handler already ignores a bell that
     // lands just after a completion, but most TUI agents ring the bell AS they
@@ -231,12 +304,17 @@ export class NotificationCoordinator {
     // waiting/done. That ordering was unguarded: the user got two OS banners and two
     // sounds for one completion, and the tab was marked unread twice. Keep the
     // completion timestamp either way so later bells stay suppressed.
+    //
+    // However, do NOT drop the attention state itself: the transition to waiting or done
+    // must still be accepted so the notification center records the richer agent entry,
+    // while the desktop notification (banner and sound) and unread marks are suppressed
+    // to avoid duplicating what the bell already announced.
     const lastBell = this.lastBellTimestamp.get(key) ?? 0;
-    if (now - lastBell < this.bellAgentSuppressionMs) {
-      this.lastAgentCompletionTimestamp.set(key, now);
-      return { accepted: false, suppressed: true };
-    }
+    const bellSuppressed = now - lastBell < this.bellAgentSuppressionMs;
     this.lastAgentCompletionTimestamp.set(key, now);
+    if (bellSuppressed) {
+      decision.suppressed = true;
+    }
 
     const isFocused = this.isFocused();
 
@@ -244,14 +322,16 @@ export class NotificationCoordinator {
       const tabId = params.tabId;
       const wtPath = params.worktreePath || params.worktreeId;
 
-      if (tabId && this.options.onMarkTabUnread) {
-        this.options.onMarkTabUnread(tabId, params.workspaceId);
-      }
-      if (wtPath && this.options.onMarkWorktreeUnread) {
-        this.options.onMarkWorktreeUnread(wtPath, params.workspaceId);
+      if (!bellSuppressed) {
+        if (tabId && this.options.onMarkTabUnread) {
+          this.options.onMarkTabUnread(tabId, params.workspaceId);
+        }
+        if (wtPath && this.options.onMarkWorktreeUnread) {
+          this.options.onMarkWorktreeUnread(wtPath, params.workspaceId);
+        }
       }
 
-      if (settings.enabled && settings.agentTaskComplete) {
+      if (!bellSuppressed && settings.enabled && settings.agentTaskComplete) {
         Promise.resolve(
           playNotificationSound({
             soundId: settings.customSoundId ?? 'system',
@@ -287,11 +367,19 @@ export class NotificationCoordinator {
     return decision;
   }
 
+  dispose(): void {
+    if (this.cleanupListeners) {
+      this.cleanupListeners();
+      this.cleanupListeners = null;
+    }
+  }
+
   reset(): void {
     this.lastBellTimestamp.clear();
     this.lastAgentState.clear();
     this.lastAgentCompletionTimestamp.clear();
     this.permissionRequest = null;
+    this.permissionStatusQuery = null;
     this.permissionDenied = false;
   }
 }

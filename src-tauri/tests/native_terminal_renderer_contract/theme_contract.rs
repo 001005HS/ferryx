@@ -28,6 +28,8 @@ fn make_test_snapshot(cols: u16, rows: u16, text: &str) -> RenderSnapshot {
                 text: ch,
                 fg: None,
                 bg: None,
+                fg_ident: None,
+                underline_ident: None,
                 bold: false,
                 italic: false,
                 underline: false,

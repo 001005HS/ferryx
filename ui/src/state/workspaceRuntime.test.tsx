@@ -298,6 +298,14 @@ describe("useWorkspaceRuntime", () => {
       expect(result.current.runtimeError).toEqual(structuredError);
     });
 
+    expect(switchDebugMock).toHaveBeenCalledWith("worktree.refresh.error", {
+      workspaceId: "ws-err",
+      generation: 1,
+      stage: "list",
+      code: "WORKSPACE_NOT_FOUND",
+      message: "Workspace ws-err not found on backend",
+      current: true,
+    });
     expect(switchDebugMock).toHaveBeenCalledWith("workspace.runtime.error", {
       workspaceId: "ws-err",
       error: "Workspace ws-err not found on backend",

@@ -438,6 +438,16 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     TransferSessionsOk {
         transferred_count: usize,
+        /// How many sessions the predecessor actually owned when the transfer began.
+        ///
+        /// `transferred_count` counts only the exports that were successfully sent, so a
+        /// predecessor that fails to export a session reports a smaller number, the
+        /// successor's delivery check compares that smaller number against itself and
+        /// passes, and the undelivered sessions die with the predecessor's PTY fds.
+        /// Older daemons do not send this field; it defaults to 0, and the successor then
+        /// falls back to comparing against `transferred_count` alone.
+        #[serde(default)]
+        requested_count: usize,
     },
     #[serde(rename_all = "camelCase")]
     UploadClipboardImageOk {
@@ -663,6 +673,9 @@ pub enum DaemonStreamMessage<'a> {
         agent: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_session: Option<AgentProviderSession>,
+        /// The question or blocker text behind a `blocked` state, when the producer knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_snapshot: bool,
         #[serde(default, skip_serializing_if = "AgentStateOrigin::is_self_reported")]
@@ -742,6 +755,9 @@ pub struct AgentStateReport {
     pub agent: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_session")]
     pub provider_session: Option<AgentProviderSession>,
+    /// Present when the agent can name what it is blocked on, so the inbox can show the question.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Serialize one daemon streaming message using the production newline-delimited JSON frame.
@@ -889,6 +905,7 @@ mod tests {
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("working"),
             agent: Some(Cow::Borrowed("omo")),
+            detail: None,
             provider_session: Some(AgentProviderSession {
                 key: AgentProviderSessionKey::SessionId,
                 id: "provider-1".to_string(),
@@ -925,6 +942,7 @@ mod tests {
             state: Cow::Borrowed("blocked"),
             agent: None,
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::Agent,
         };
@@ -963,6 +981,7 @@ mod tests {
                 state: Cow::Borrowed("idle"),
                 agent: None,
                 provider_session: None,
+                detail: None,
                 is_snapshot: false,
                 origin: AgentStateOrigin::Agent,
             })
@@ -977,6 +996,7 @@ mod tests {
             state: Cow::Borrowed("idle"),
             agent: None,
             provider_session: None,
+            detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::ProcessReleased,
         })

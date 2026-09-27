@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDesktopInventory,
-  isUnreadAgent,
   resolveLocalSessionKey,
   type DesktopWorkspace,
 } from "./desktopInventory";
@@ -89,42 +88,6 @@ describe("resolveLocalSessionKey", () => {
     const agentB2 = snapshot.items.find((item) => item.target.backendSessionId === "b-2")!;
     expect(resolveLocalSessionKey(agentB2, spaces)).toBe("s-2");
     expect(resolveLocalSessionKey(agentB2, [])).toBeNull();
-  });
-});
-
-describe("isUnreadAgent", () => {
-  it("is true only for agents whose activity has not been seen", () => {
-    const spaces = [workspace()];
-    const snapshot = buildDesktopInventory(spaces);
-    const unread = snapshot.items.filter((item) => isUnreadAgent(item, spaces));
-    expect(unread).toEqual([]);
-  });
-
-  it("returns true for a done and unseen agent", () => {
-    const base = workspace();
-    const withUnreadDone = {
-      ...base,
-      state: {
-        ...base.state,
-        sessions: {
-          ...base.state.sessions,
-          "s-4": session("s-4", "b-4", "working"),
-        },
-        activityBySessionId: {
-          ...base.state.activityBySessionId,
-          "s-4": { state: "done", seen: false },
-        },
-      } as unknown as WorkspaceState,
-    };
-    const spaces = [withUnreadDone];
-    const snapshot = buildDesktopInventory(spaces);
-    const unread = snapshot.items.filter((item) => isUnreadAgent(item, spaces));
-    expect(unread.map((item) => item.target.backendSessionId)).toEqual(["b-4"]);
-  });
-
-  it("is false for an agent whose workspace is unknown", () => {
-    const snapshot = buildDesktopInventory([workspace()]);
-    expect(isUnreadAgent(snapshot.items[0], [])).toBe(false);
   });
 });
 

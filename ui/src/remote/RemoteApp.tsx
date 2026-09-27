@@ -1,5 +1,5 @@
-import { ChevronDown, Globe, Laptop, Terminal } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ChevronDown } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
@@ -14,7 +14,7 @@ import {
 } from "../lib/remoteClient";
 import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
-import { hostAgentTotals, MobileHostDrawer } from "./MobileHostDrawer";
+import { MobileHostDrawer } from "./MobileHostDrawer";
 import { suggestDeviceName } from "./deviceIdentity";
 import {
   contextName,
@@ -28,8 +28,6 @@ import { RemoteTerminal } from "./RemoteTerminal";
 import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration } from "./agentConversation";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
-import { MobileChatThreadList } from "./chat/MobileChatThreadList";
-import type { ThreadListRow } from "./chat/MobileChatThreadList";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
 import type { ChatAttachment as ComponentAttachment } from "./chat/MobileChatComponents";
@@ -342,8 +340,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     return () => viewport.removeEventListener("resize", resize);
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [viewMode, setViewMode] = useState<"threads" | "chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "chat" : "terminal"));
+  const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "chat" : "terminal"));
   const [chatMessages, setChatMessages] = useState<MobileChatMessageProps[]>([]);
   const chatAttachmentUrlsRef = useRef<Set<string>>(new Set());
 
@@ -361,13 +358,13 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, [revokeChatAttachmentUrls]);
   const lastConversationSessionRef = useRef<string | null>(null);
   const [chatIsRunning, setChatIsRunning] = useState(false);
+  const [chatWarnings, setChatWarnings] = useState<readonly string[]>([]);
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = remoteHostState.hosts[hostId] ?? null;
-  const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
   const transportBaseUrl = hostTransportUrl(activeHost, transport.url);
   const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
@@ -1133,6 +1130,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       lastConversationSessionRef.current = effectiveSessionId;
       revokeChatAttachmentUrls();
       setChatMessages([]);
+      setChatWarnings([]);
       setChatIsRunning(false);
       assistantTurnStartedAtRef.current = null;
       turnDurationsRef.current.clear();
@@ -1150,6 +1148,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           signal: controller.signal,
         });
         if (cancelled) return;
+        setChatWarnings(page.warnings);
         setChatMessages((prev) => {
           const mapped = mapAgentConversation(page.items, {
             activeTurnStartedAt: assistantTurnStartedAtRef.current,
@@ -1273,23 +1272,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     ? formatAttentionAriaLabel(firstWaiting, model.context, waitingCount)
     : "";
 
-  const threadRows: ThreadListRow[] = model.context.terminalTabs && model.context.terminalTabs.length > 0
-    ? model.context.terminalTabs.map((tab) => ({
-        id: tab.id,
-        title: tab.label,
-        worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel ?? null,
-        agentLabel: tab.agentType ?? null,
-        agentType: tab.agentType ?? null,
-        status: tab.activityState,
-      }))
-    : model.options.map((option) => ({
-        id: option.tabId ?? option.sessionId ?? `${option.workspaceId}:${option.worktreeSlug ?? "root"}`,
-        title: option.sessionLabel ?? option.worktreeLabel ?? option.worktreeSlug ?? "Primary worktree",
-        worktreeLabel: option.worktreeLabel,
-        agentType: null,
-        status: option.attention,
-      }));
-
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
@@ -1331,54 +1313,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               {transport.type === "relay" ? "Relay" : transport.type === "lan" ? "LAN" : "Tailscale"}
             </span>
           </span>
-          <button
-            type="button"
-            aria-label="Switch host"
-            aria-haspopup="dialog"
-            aria-expanded={hostDrawerOpen}
-            data-testid="mobile-host-drawer-trigger"
-            onClick={() => setHostDrawerOpen(true)}
-            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {activeTunnelConnection ? (
-              <span
-                data-testid="active-host-online-indicator"
-                className="size-1.5 shrink-0 rounded-full bg-status-success"
-                aria-hidden="true"
-              />
-            ) : activeHost ? (
-              <span
-                data-testid="active-host-online-indicator"
-                className={`size-1.5 shrink-0 rounded-full ${activeHost.online ? "bg-status-success" : "bg-status-idle"}`}
-                aria-hidden="true"
-              />
-            ) : (
-              <Laptop className="size-3 shrink-0" aria-hidden="true" />
-            )}
-            <span data-testid="active-host-name" className="max-w-20 truncate sm:max-w-32">
-              {activeTunnelConnection
-                ? (activeTunnelConnection.machine.displayName || activeTunnelConnection.machine.machineId)
-                : activeHost ? activeHost.name : "Local"}
-            </span>
-            {hostAgentSummary.waiting > 0 ? (
-              <span
-                data-testid="host-agent-status-pill"
-                aria-label={`${hostAgentSummary.waiting} agent${hostAgentSummary.waiting === 1 ? "" : "s"} waiting`}
-                className="flex items-center gap-1 rounded bg-status-warning/15 px-1 text-[10px] font-mono leading-tight text-status-warning"
-              >
-                <span className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20" aria-hidden="true" />
-                {hostAgentSummary.waiting}
-              </span>
-            ) : hostAgentSummary.running > 0 ? (
-              <span
-                data-testid="host-agent-status-pill"
-                aria-label={`${hostAgentSummary.running} agent${hostAgentSummary.running === 1 ? "" : "s"} running`}
-                className="flex items-center gap-1 rounded bg-status-working/15 px-1 text-[10px] font-mono leading-tight text-status-working"
-              >
-                {hostAgentSummary.running}
-              </span>
-            ) : null}
-          </button>
           {firstWaiting ? (
             <button
               type="button"
@@ -1406,57 +1340,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               ) : null}
             </button>
           ) : null}
-          {confirmDisconnect ? (
-            <>
-              <button
-                type="button"
-                aria-label="Confirm disconnect"
-                onClick={disconnect}
-                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                {activeTunnelConnection ? "Disconnect machine?" : "Remove pairing?"}
-              </button>
-              {activeTunnelConnection && (
-                <button
-                  type="button"
-                  aria-label="Sign out of account"
-                  onClick={handleLogout}
-                  className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  Sign out?
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setConfirmDisconnect(false)}
-                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConfirmDisconnect(true)}
-              className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              Disconnect
-            </button>
-          )}
 
           <div className="hidden items-center gap-1 border-l border-[#191919]/40 pl-2 sm:flex">
-            <button
-              type="button"
-              data-testid="remote-view-mode-threads"
-              onClick={() => setViewMode("threads")}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
-                viewMode === "threads"
-                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
-                  : "text-[#838383] hover:text-[#f5f5f5]"
-              }`}
-            >
-              Threads
-            </button>
             <button
               type="button"
               data-testid="remote-view-mode-chat"
@@ -1481,21 +1366,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             >
               Terminal
             </button>
-            <button
-              type="button"
-              data-testid="remote-view-mode-browser"
-              onClick={() => {
-                setViewMode("browser");
-                void fetchBrowserSessions();
-              }}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
-                viewMode === "browser"
-                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
-                  : "text-[#838383] hover:text-[#f5f5f5]"
-              }`}
-            >
-              Browser
-            </button>
           </div>
         </div>
       </header>
@@ -1505,6 +1375,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         pending={pending}
         selectorOpen={selectorOpen}
         onSelectorOpenChange={setSelectorOpen}
+        onOpenHosts={() => setHostDrawerOpen(true)}
         onSelect={(option) => void selectContext(option)}
         onCreateTerminal={() => {
           if (!model.context.workspaceId) return;
@@ -1513,33 +1384,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         onCreateWorktree={createWorktree}
         creationError={creationError}
       >
-        {viewMode === "threads" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
-            <MobileChatThreadList
-              rows={threadRows}
-              activeRowId={model.context.activeTabId ?? null}
-              workspaceLabel={model.context.workspaceId ?? null}
-              onSelectRow={(row) => {
-                const tab = (model.context.terminalTabs ?? []).find((t) => t.id === row.id);
-                if (tab) {
-                  void selectContext({
-                    workspaceId: model.context.workspaceId ?? "",
-                    worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
-                    worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
-                    tabId: tab.id,
-                    sessionId: tab.sessionId,
-                  });
-                } else {
-                  const option = model.options.find(
-                    (o) => (o.tabId ?? o.sessionId ?? `${o.workspaceId}:${o.worktreeSlug ?? "root"}`) === row.id,
-                  );
-                  if (option) void selectContext(option);
-                }
-                setViewMode("chat");
-              }}
-            />
-          </div>
-        ) : viewMode === "chat" ? (
+        {viewMode === "chat" ? (
           <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
             <MobileChatWorkspace
               headerTitle={
@@ -1548,38 +1393,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                 model.context.workspaceId ??
                 undefined
               }
-              headerSubtitle={`${model.context.worktreeLabel ?? model.context.workspaceId ?? ""} · ${
-                activeTunnelConnection
-                  ? (activeTunnelConnection.machine.displayName || activeTunnelConnection.machine.machineId)
-                  : activeHost?.name ?? "Local"
-              }`}
-              onBack={() => setViewMode("threads")}
-              headerActions={
-                <>
-                  <button
-                    type="button"
-                    data-testid="thread-header-action-terminal"
-                    aria-label="Open terminal"
-                    onClick={() => setViewMode("terminal")}
-                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] hover:text-[#f5f5f5]"
-                  >
-                    <Terminal className="size-4" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="thread-header-action-browser"
-                    aria-label="Browser"
-                    onClick={() => {
-                      setViewMode("browser");
-                      void fetchBrowserSessions();
-                    }}
-                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] hover:text-[#f5f5f5]"
-                  >
-                    <Globe className="size-4" aria-hidden="true" />
-                  </button>
-                </>
-              }
+              headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
+              onBack={() => setSelectorOpen(true)}
               messages={chatMessages}
+              warnings={chatWarnings}
               isRunning={chatIsRunning}
               onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
                 for (const att of attachments) {
@@ -1721,11 +1538,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             key={`${effectiveSessionId}:${terminalRetryGeneration}`}
             sessionId={effectiveSessionId}
             token={token}
-            title={`${model.context.worktreeLabel ?? model.context.workspaceId ?? ""} · ${
-              activeTunnelConnection
-                ? (activeTunnelConnection.machine.displayName || activeTunnelConnection.machine.machineId)
-                : activeHost?.name ?? "Local"
-            }`}
+            title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
             transportUrl={transportBaseUrl}
             onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
             activeTabId={model.context.activeTabId}
@@ -1758,7 +1571,13 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         ) : null}
       </RemoteWorkspaceMirror>
 
-      <MobileHostDrawer open={hostDrawerOpen} onOpenChange={setHostDrawerOpen} />
+      <MobileHostDrawer
+        open={hostDrawerOpen}
+        onOpenChange={setHostDrawerOpen}
+        onDisconnect={disconnect}
+        onSignOut={handleLogout}
+        isAccountSession={Boolean(activeTunnelConnection)}
+      />
     </div>
   );
 };

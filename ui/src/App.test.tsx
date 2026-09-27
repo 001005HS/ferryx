@@ -411,6 +411,12 @@ vi.mock("./components/WorktreeDeleteDialog", () => ({
   ),
 }));
 
+const toastMocks = vi.hoisted(() => ({ error: vi.fn() }));
+vi.mock("./components/ui/sonner", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./components/ui/sonner")>()),
+  toast: Object.assign(vi.fn(), { error: toastMocks.error, success: vi.fn(), info: vi.fn(), warning: vi.fn(), message: vi.fn(), dismiss: vi.fn() }),
+}));
+
 const defaultStoreState = JSON.parse(JSON.stringify(workspace.storeState));
 
 function seedSidebarBrowserTab(workspaceId: string) {
@@ -597,6 +603,29 @@ describe("App project workspace flow", () => {
     expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "heal-unit-a", repoPath: "/repo/heal-unit-a" });
     expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "heal-unit-b", repoPath: "/repo/heal-unit-b" });
     expect(native.registerProject).not.toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "default" }));
+  });
+
+  it("shows a retryable error when a stored project fails to register at startup", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockReset();
+    native.registerProject.mockRejectedValueOnce(new Error("repo path is gone"));
+    toastMocks.error.mockClear();
+
+    await ensureLocalProjectsRegistered([
+      { workspaceId: "heal-fail-a", repoRoot: "/repo/heal-fail-a", gitRoot: null },
+    ]);
+
+    expect(toastMocks.error).toHaveBeenCalledTimes(1);
+    const [title, options] = toastMocks.error.mock.calls[0] as [string, { description: string; action: { label: string; onClick: () => void } }];
+    expect(title).toBe('Couldn\'t open project "heal-fail-a"');
+    expect(options.description).toContain("repo path is gone");
+    expect(options.action.label).toBe("Retry");
+
+    // Retry registers again, and a success clears the need to report.
+    native.registerProject.mockResolvedValueOnce({ workspaceId: "heal-fail-a", repoRoot: "/repo/heal-fail-a" });
+    options.action.onClick();
+    await vi.waitFor(() => expect(native.registerProject).toHaveBeenCalledTimes(2));
+    expect(toastMocks.error).toHaveBeenCalledTimes(1);
   });
 
   describe("P05 focused browser shortcut targeting on Windows", () => {

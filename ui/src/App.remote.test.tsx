@@ -113,6 +113,7 @@ describe("App SSH project lifecycle", () => {
     native.spawnTerminal.mockReturnValueOnce(spawn.promise);
 
     // When the user selects the SSH root, each unresolved stage stays busy.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /워크트리 전환/ })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: /repo build|\/srv\/repo SSH root/ })); });
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
@@ -172,6 +173,7 @@ describe("App SSH project lifecycle", () => {
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
     await mount();
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /워크트리 전환/ })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     await act(async () => {
       registration.reject({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
@@ -297,6 +299,7 @@ describe("App SSH project lifecycle", () => {
     const restore = deferred<null>();
     native.loadSession.mockReturnValueOnce(restore.promise);
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /워크트리 전환/ })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "repo build" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
@@ -305,6 +308,7 @@ describe("App SSH project lifecycle", () => {
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     await act(async () => { restore.resolve(null); await restore.promise; });
     expect(native.spawnTerminal).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /워크트리 전환/ })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(local.workspaceId);
     expect(native.registerProject.mock.calls.every(([request]) => request.workspaceId === "local")).toBe(true);
@@ -335,6 +339,7 @@ describe("App SSH project lifecycle", () => {
     const registration = deferred<RegisteredRemoteProject>();
     native.registerRemoteProject.mockReturnValue(registration.promise);
     await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /워크트리 전환/ })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     await act(async () => { registration.resolve({ ...registered, workspaceId: "ssh:changed", repoRoot: "/remote/changed" }); await registration.promise; });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("local");

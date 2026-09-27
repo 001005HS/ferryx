@@ -45,6 +45,7 @@ export interface MobileChatWorkspaceProps {
   readonly createWebSocket?: (pathAndQuery: string) => any;
 
   readonly className?: string;
+  readonly warnings?: readonly string[];
   readonly composerPlaceholder?: string;
   readonly disabled?: boolean;
 
@@ -72,6 +73,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   isAccountSession,
   createWebSocket,
   className,
+  warnings,
   composerPlaceholder,
   disabled = false,
   headerTitle,
@@ -141,9 +143,6 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               <ChevronLeft className="size-4" aria-hidden="true" />
             </button>
           )}
-          <div className="flex size-7 items-center justify-center rounded-md bg-[#111111] border border-[#191919] text-[#838383] shrink-0 shadow-xs">
-            <TerminalIcon className="size-3.5 text-[#838383]" />
-          </div>
           <div className="flex flex-col min-w-0">
             <span className="text-base font-medium text-[#f5f5f5] tracking-tight font-mono">
               {headerTitle ?? "Agent Workspace"}
@@ -187,16 +186,17 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             <button
               type="button"
               data-testid="terminal-toggle-button"
+              aria-label={isTerminalOpen ? "Hide terminal" : "Show terminal"}
+              aria-pressed={isTerminalOpen}
               onClick={() => setIsTerminalOpen((prev) => !prev)}
               className={cn(
-                "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono font-medium border transition-colors",
+                "flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors",
                 isTerminalOpen
                   ? "bg-[#1a1b1b] text-[#f5f5f5] border-[#191919] shadow-xs"
                   : "bg-[#111111]/90 text-[#838383] border-[#191919] hover:bg-[#141414] hover:text-[#f5f5f5]"
               )}
             >
-              <TerminalIcon className="size-3" />
-              <span>&gt;_ PTY</span>
+              <TerminalIcon className="size-3.5" aria-hidden="true" />
             </button>
           )}
 
@@ -210,6 +210,15 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         data-testid="chat-message-stream"
         className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5 scroll-smooth overscroll-contain select-text"
       >
+        {warnings && warnings.length > 0 ? (
+          <div
+            data-testid="chat-history-warning"
+            role="status"
+            className="mb-3 rounded-md border border-[#191919] bg-[#111111] px-3 py-2 font-mono text-xs text-[#838383]"
+          >
+            {warnings.join(" ")}
+          </div>
+        ) : null}
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"

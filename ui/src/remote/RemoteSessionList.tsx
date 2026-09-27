@@ -5,6 +5,7 @@ import {
   GitBranch,
   LoaderCircle,
   Plus,
+  Server,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
@@ -322,6 +323,10 @@ export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktr
   return worktree ? `${workspace} / ${worktree}` : workspace;
 }
 
+function optionRowKey(option: RemoteContextOption) {
+  return `${option.workspaceId}:${option.sessionId ?? option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`;
+}
+
 function optionName(option: RemoteContextOption) {
   const name = `${contextName(option)}${option.sessionLabel ? ` / ${option.sessionLabel}` : ""}`;
   return option.attention ? `${name} (${option.attention})` : name;
@@ -356,6 +361,7 @@ type RemoteWorkspaceMirrorProps = {
   pending: RemoteContextOption | null;
   selectorOpen: boolean;
   onSelectorOpenChange: (open: boolean) => void;
+  onOpenHosts?: () => void;
   onSelect: (option: RemoteContextOption) => void;
   onCreateTerminal?: () => void;
   onCreateWorktree?: () => void;
@@ -368,6 +374,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   pending,
   selectorOpen,
   onSelectorOpenChange,
+  onOpenHosts,
   onSelect,
   onCreateTerminal,
   onCreateWorktree,
@@ -384,27 +391,153 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     return [...groups.entries()];
   }, [model.options]);
 
+  const paneTabs = model.context.terminalTabs ?? [];
+  const activePaneIdx = paneTabs.findIndex((tab) => tab.id === model.context.activeTabId);
+  const currentPaneIndex = activePaneIdx >= 0 ? activePaneIdx : 0;
+  const currentPaneOrdinal = paneTabs.length ? currentPaneIndex + 1 : 0;
+  const selectPane = (tab: (typeof paneTabs)[number]) => {
+    if (!model.context.workspaceId) return;
+    onSelect({
+      workspaceId: model.context.workspaceId,
+      worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
+      worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
+      tabId: tab.id,
+      sessionId: tab.sessionId,
+    });
+    focusTerminalInput();
+  };
+
+  // Panes are grouped under the worktree they belong to; a pane whose worktree is not in the
+  // option list (a foreign worktree the desktop has focused) still needs a home.
+  const claimedPaneIds = new Set<string>();
+  const panesByOption = new Map<string, typeof paneTabs>();
+  for (const option of model.options) {
+    if (option.sessionId) continue;
+    const matches = paneTabs.filter((tab) => {
+      if (claimedPaneIds.has(tab.id)) return false;
+      const tabSlug = tab.worktreeSlug ?? model.context.worktreeSlug;
+      const tabLabel = tab.worktreeLabel ?? model.context.worktreeLabel;
+      if (option.worktreeSlug && tabSlug) return tabSlug === option.worktreeSlug;
+      return (tabLabel ?? null) === (option.worktreeLabel ?? option.worktreeSlug ?? null);
+    });
+    panesByOption.set(optionRowKey(option), matches);
+    for (const tab of matches) claimedPaneIds.add(tab.id);
+  }
+  const orphanPanes = paneTabs.filter((tab) => !claimedPaneIds.has(tab.id));
+
+  const renderPaneRow = (tab: (typeof paneTabs)[number], siblingWorktreeLabel: string | null | undefined) => {
+    const logo = resolveAgentLogo(tab.agentType);
+    const monochrome = isMonochromeAgentLogo(tab.agentType);
+    const paneActive = tab.id === model.context.activeTabId;
+    // The worktree disambiguates same-named panes, exactly as the old tab strip did.
+    const foreignWorktree =
+      tab.worktreeLabel && tab.worktreeLabel !== siblingWorktreeLabel ? tab.worktreeLabel : null;
+    const tabDescription = foreignWorktree ? `${tab.label} - ${foreignWorktree}` : tab.label;
+    const tabAriaLabel = tab.activityState
+      ? `${tabDescription} (${tab.activityState})`
+      : tabDescription;
+    return (
+      <button
+        key={tab.id}
+        type="button"
+        role="tab"
+        aria-selected={paneActive}
+        aria-label={tabAriaLabel}
+        disabled={pending !== null}
+        onClick={() => selectPane(tab)}
+        className={`flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
+          paneActive ? "bg-white/[0.06] text-[#fafafa]" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]"
+        }`}
+      >
+        {logo ? (
+          <img
+            src={logo}
+            alt=""
+            data-testid="tab-agent-icon"
+            data-agent-type={tab.agentType}
+            className={`size-3 shrink-0 ${monochrome ? "agent-tab-logo--monochrome opacity-80" : ""}`}
+          />
+        ) : (
+          <TerminalIcon data-testid="tab-terminal-icon" className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-[11px] leading-tight">{tab.label}</span>
+        {tab.activityState === "working" ? (
+          <LoaderCircle
+            aria-hidden="true"
+            data-testid="tab-working-indicator"
+            className="size-2.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
+          />
+        ) : tab.activityState === "waiting" ? (
+          <span
+            aria-hidden="true"
+            data-testid="tab-waiting-indicator"
+            className="size-1.5 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
+          />
+        ) : tab.activityState === "done" ? (
+          <span
+            aria-hidden="true"
+            data-testid="tab-done-indicator"
+            className="size-1.5 shrink-0 rounded-full bg-status-success"
+          />
+        ) : null}
+      </button>
+    );
+  };
+
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       {selectorOpen ? (
-        <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-input text-foreground shadow-xl" role="dialog" aria-label="Workspace context">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
-            <div>
-              <h2 className="text-sm font-semibold">Choose worktree</h2>
-            </div>
+        <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-worktree-sidebar text-worktree-sidebar-foreground shadow-xl" role="dialog" aria-label="Workspace context">
+          <div className="flex h-8 items-center justify-end border-b border-worktree-sidebar-border px-1.5">
             <button
               type="button"
-              aria-label="Close workspace context"
+              aria-label="Close worktree list"
               onClick={() => onSelectorOpenChange(false)}
-              className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <X className="size-4" aria-hidden="true" />
+              <X className="size-3.5" aria-hidden="true" />
             </button>
           </div>
-          <div className="min-h-0 max-h-96 overflow-y-auto overflow-x-hidden p-2 scrollbar-sleek">
+          <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-worktree-sidebar-border px-1">
+            <button
+              type="button"
+              aria-label="Previous terminal tab"
+              disabled={pending !== null || currentPaneIndex <= 0}
+              onClick={() => {
+                const prevTab = paneTabs[currentPaneIndex - 1];
+                if (prevTab) selectPane(prevTab);
+              }}
+              className="relative flex size-6 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+            >
+              <ChevronLeft className="size-3.5" aria-hidden="true" />
+            </button>
+            <span
+              className="px-1 text-[11px] font-mono font-medium text-muted-foreground select-none"
+              aria-label={`Terminal position: Tab ${currentPaneOrdinal} of ${paneTabs.length}`}
+            >
+              {currentPaneOrdinal} / {paneTabs.length}
+            </span>
+            <button
+              type="button"
+              aria-label="Next terminal tab"
+              disabled={pending !== null || currentPaneIndex >= paneTabs.length - 1}
+              onClick={() => {
+                const nextTab = paneTabs[currentPaneIndex + 1];
+                if (nextTab) selectPane(nextTab);
+              }}
+              className="relative flex size-6 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+            >
+              <ChevronRight className="size-3.5" aria-hidden="true" />
+            </button>
+          </div>
+          <div
+            role="tablist"
+            aria-label="Terminal tabs"
+            className="min-h-0 max-h-96 overflow-y-auto overflow-x-hidden p-1.5 scrollbar-sleek"
+          >
             {groupedOptions.length === 0 ? (
-              <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-                No selectable desktop contexts are available.
+              <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">
+                No selectable desktop worktrees are available.
               </p>
             ) : (
               groupedOptions.map(([workspaceId, options]) => {
@@ -415,9 +548,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 }, undefined);
 
                 return (
-                  <section key={workspaceId} className="mb-2 last:mb-0" aria-label={workspaceId}>
-                    <div className="flex items-center justify-between px-2 py-1">
-                      <h3 className="min-w-0 flex-1 truncate text-xs font-semibold text-muted-foreground" title={workspaceId}>{workspaceId}</h3>
+                  <section key={workspaceId} className="mb-0.5 last:mb-0" aria-label={workspaceId}>
+                    <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65">
+                      <h3 className="min-w-0 flex-1 truncate" title={workspaceId}>{workspaceId}</h3>
                       {projectAttention === "working" ? (
                         <LoaderCircle
                           aria-hidden="true"
@@ -435,7 +568,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                         />
                       ) : null}
                     </div>
-                    <div className="space-y-1">
+                    <div>
                       {options.map((option) => {
                         const active = isCurrentOption(option, model.context);
                         const loading = pending
@@ -445,55 +578,57 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                             pending.sessionId === option.sessionId
                           : false;
                         const worktree = option.worktreeLabel ?? option.worktreeSlug;
+                        const panes = panesByOption.get(optionRowKey(option)) ?? [];
                         return (
-                          <button
-                            key={`${option.workspaceId}:${option.sessionId ?? option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`}
-                            type="button"
-                            aria-current={active ? "true" : undefined}
-                            aria-label={optionName(option)}
-                            disabled={pending !== null}
-                            onClick={() => {
-                              onSelectorOpenChange(false);
-                              onSelect(option);
-                              focusTerminalInput();
-                            }}
-                            className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-                          >
-                            <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                          <div key={optionRowKey(option)}>
+                            <button
+                              type="button"
+                              aria-current={active ? "true" : undefined}
+                              aria-label={optionName(option)}
+                              disabled={pending !== null}
+                              onClick={() => {
+                                onSelectorOpenChange(false);
+                                onSelect(option);
+                                focusTerminalInput();
+                              }}
+                              className={`flex min-h-[28px] w-full items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
+                                active ? "bg-[#3f3f3f] text-[#fafafa]" : "text-worktree-sidebar-foreground hover:bg-white/[0.04]"
+                              }`}
+                            >
                               {loading ? (
-                                <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                                <LoaderCircle className="size-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                              ) : option.attention === "working" ? (
+                                <LoaderCircle
+                                  aria-hidden="true"
+                                  data-testid="worktree-working-indicator"
+                                  className="size-3 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
+                                />
+                              ) : option.attention === "waiting" ? (
+                                <span
+                                  aria-hidden="true"
+                                  data-testid="worktree-waiting-indicator"
+                                  className="size-2 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
+                                />
+                              ) : option.attention === "done" ? (
+                                <span
+                                  aria-hidden="true"
+                                  data-testid="worktree-done-indicator"
+                                  className="size-2 shrink-0 rounded-full bg-status-success"
+                                />
                               ) : option.sessionId ? (
-                                <TerminalIcon className="size-4" aria-hidden="true" />
+                                <TerminalIcon className="size-3 shrink-0 opacity-70" aria-hidden="true" />
                               ) : (
-                                <GitBranch className="size-4" aria-hidden="true" />
+                                <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-status-idle" />
                               )}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-mono text-sm font-medium">
+                              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold leading-tight">
                                 {option.sessionLabel ?? worktree ?? "Primary worktree"}
                               </span>
-                            </span>
-                            {option.attention === "working" ? (
-                              <LoaderCircle
-                                aria-hidden="true"
-                                data-testid="worktree-working-indicator"
-                                className="size-3.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
-                              />
-                            ) : option.attention === "waiting" ? (
-                              <span
-                                aria-hidden="true"
-                                data-testid="worktree-waiting-indicator"
-                                className="size-2 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
-                              />
-                            ) : option.attention === "done" ? (
-                              <span
-                                aria-hidden="true"
-                                data-testid="worktree-done-indicator"
-                                className="size-2 shrink-0 rounded-full bg-status-success"
-                              />
+                              {active ? <Check className="size-3 shrink-0" aria-label="Active" /> : null}
+                            </button>
+                            {panes.length > 0 ? (
+                              <div className="mt-px">{panes.map((tab) => renderPaneRow(tab, model.context.worktreeLabel))}</div>
                             ) : null}
-                            {active ? <Check className="size-4 shrink-0 text-status-success" aria-label="Active" /> : null}
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -501,168 +636,47 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 );
               })
             )}
+          {orphanPanes.length > 0 ? (
+            <section className="mb-0.5 last:mb-0" aria-label="Other panes">
+              <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65">
+                <h3 className="min-w-0 flex-1 truncate">Other panes</h3>
+              </div>
+              <div>{orphanPanes.map((tab) => renderPaneRow(tab, model.context.worktreeLabel))}</div>
+            </section>
+          ) : null}
+          </div>
+          <div className="flex h-8 shrink-0 items-center justify-between gap-1 border-t border-worktree-sidebar-border px-1.5">
+            {onOpenHosts ? (
+              <IconButton label="Machines" onClick={onOpenHosts}>
+                <Server className="size-3.5" aria-hidden="true" />
+              </IconButton>
+            ) : (
+              <span />
+            )}
+            <div className="flex items-center gap-1">
+              {onCreateWorktree ? (
+                <IconButton
+                  label="New worktree"
+                  disabled={pending !== null || !model.context.workspaceId}
+                  onClick={onCreateWorktree}
+                >
+                  <GitBranch className="size-3.5" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {onCreateTerminal ? (
+                <IconButton
+                  label="New terminal tab"
+                  disabled={pending !== null || !model.context.workspaceId}
+                  onClick={onCreateTerminal}
+                >
+                  <Plus className="size-3.5" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}
 
-      {model.context.workspaceId || model.context.terminalTabs?.length ? (() => {
-        const tabs = model.context.terminalTabs ?? [];
-        const activeIdx = tabs.findIndex((tab) => tab.id === model.context.activeTabId);
-        const currentIndex = activeIdx >= 0 ? activeIdx : 0;
-        const currentOrdinal = tabs.length ? currentIndex + 1 : 0;
-
-        return (
-          <div className="flex min-w-0 shrink-0 items-center border-b border-border bg-input px-1.5 py-0.5">
-            <div className="flex items-center gap-0.5 shrink-0 pr-1 border-r border-border">
-              <button
-                type="button"
-                aria-label="Previous terminal tab"
-                disabled={pending !== null || currentIndex <= 0}
-                onClick={() => {
-                  const prevTab = tabs[currentIndex - 1];
-                  if (prevTab && model.context.workspaceId) {
-                    onSelect({
-                      workspaceId: model.context.workspaceId,
-                      worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
-                      worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
-                      tabId: prevTab.id,
-                      sessionId: prevTab.sessionId,
-                    });
-                    focusTerminalInput();
-                  }
-                }}
-                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
-              >
-                <ChevronLeft className="size-3.5" aria-hidden="true" />
-              </button>
-              <span
-                className="px-1 text-[11px] font-mono font-medium text-muted-foreground select-none"
-                aria-label={`Terminal position: Tab ${currentOrdinal} of ${tabs.length}`}
-              >
-                {currentOrdinal} / {tabs.length}
-              </span>
-              <button
-                type="button"
-                aria-label="Next terminal tab"
-                disabled={pending !== null || currentIndex >= tabs.length - 1}
-                onClick={() => {
-                  const nextTab = tabs[currentIndex + 1];
-                  if (nextTab && model.context.workspaceId) {
-                    onSelect({
-                      workspaceId: model.context.workspaceId,
-                      worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
-                      worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
-                      tabId: nextTab.id,
-                      sessionId: nextTab.sessionId,
-                    });
-                    focusTerminalInput();
-                  }
-                }}
-                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
-              >
-                <ChevronRight className="size-3.5" aria-hidden="true" />
-              </button>
-            </div>
-            <div
-              role="tablist"
-              aria-label="Terminal tabs"
-              className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1.5 scrollbar-sleek"
-            >
-              {tabs.map((tab) => {
-                const isActive = tab.id === model.context.activeTabId;
-                // Panes from every worktree are listed, so the worktree disambiguates same-named tabs.
-                const foreignWorktree =
-                  tab.worktreeLabel && tab.worktreeLabel !== model.context.worktreeLabel
-                    ? tab.worktreeLabel
-                    : null;
-                const tabDescription = foreignWorktree ? `${tab.label} - ${foreignWorktree}` : tab.label;
-                const tabAriaLabel = tab.activityState
-                  ? `${tabDescription} (${tab.activityState})`
-                  : tabDescription;
-                const logo = resolveAgentLogo(tab.agentType);
-                const isMonochrome = isMonochromeAgentLogo(tab.agentType);
-
-                return (
-                  <button
-                    key={tab.id}
-                    role="tab"
-                    aria-selected={isActive}
-                    aria-label={tabAriaLabel}
-                    disabled={pending !== null}
-                    onClick={() => {
-                      if (isActive || !model.context.workspaceId) {
-                        if (isActive) {
-                          focusTerminalInput();
-                        }
-                        return;
-                      }
-                      onSelect({
-                        workspaceId: model.context.workspaceId,
-                        worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
-                        worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
-                        tabId: tab.id,
-                        sessionId: tab.sessionId,
-                      });
-                      focusTerminalInput();
-                    }}
-                    className={`flex h-7 min-w-0 max-w-40 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
-                      isActive
-                        ? "bg-secondary text-foreground font-semibold"
-                        : "text-muted-foreground hover:bg-card hover:text-foreground"
-                    }`}
-                  >
-                    {logo ? (
-                      <img
-                        src={logo}
-                        alt=""
-                        aria-hidden="true"
-                        data-testid="tab-agent-icon"
-                        data-agent-type={tab.agentType}
-                        className={`size-3 shrink-0 ${isMonochrome ? "agent-tab-logo--monochrome opacity-80" : ""}`}
-                      />
-                    ) : (
-                      <TerminalIcon data-testid="tab-terminal-icon" className="size-3 shrink-0 opacity-70" aria-hidden="true" />
-                    )}
-                    <span className="truncate">{tab.label}</span>
-                    {foreignWorktree ? (
-                      <span className="shrink-0 truncate text-[10px] font-normal opacity-60">{foreignWorktree}</span>
-                    ) : null}
-                    {tab.activityState === "working" ? (
-                      <LoaderCircle
-                        aria-hidden="true"
-                        data-testid="tab-working-indicator"
-                        className="size-2.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
-                      />
-                    ) : tab.activityState === "waiting" ? (
-                      <span
-                        aria-hidden="true"
-                        data-testid="tab-waiting-indicator"
-                        className="size-1.5 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
-                      />
-                    ) : tab.activityState === "done" ? (
-                      <span
-                        aria-hidden="true"
-                        data-testid="tab-done-indicator"
-                        className="size-1.5 shrink-0 rounded-full bg-status-success"
-                      />
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-            {onCreateWorktree ? (
-              <IconButton label="New worktree" disabled={pending !== null || !model.context.workspaceId} onClick={onCreateWorktree}>
-                <GitBranch className="size-3.5" aria-hidden="true" />
-              </IconButton>
-            ) : null}
-            {onCreateTerminal ? (
-              <IconButton label="New terminal tab" disabled={pending !== null || !model.context.workspaceId} onClick={onCreateTerminal}>
-                <Plus className="size-3.5" aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </div>
-        );
-      })() : null}
       {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{creationError}</p> : null}
 
       <div className="flex min-h-0 flex-1 flex-col">

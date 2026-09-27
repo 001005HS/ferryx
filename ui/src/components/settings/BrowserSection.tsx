@@ -43,6 +43,7 @@ export function BrowserSection() {
   const { settings, updateSettings, resetSettings } = useBrowserSettings();
   const [homeDraft, setHomeDraft] = useState(settings.homePage);
   const [homeError, setHomeError] = useState<string | null>(null);
+  const [tabActionError, setTabActionError] = useState<string | null>(null);
   const [profileDraft, setProfileDraft] = useState("");
   const [importStatus, setImportStatus] = useState<Record<string, string>>({});
   const [activeBrowsers, setActiveBrowsers] = useState<BrowserSessionSummary[]>([]);
@@ -190,9 +191,12 @@ export function BrowserSection() {
               const next = resetSettings();
               setHomeDraft(next.homePage);
               setHomeError(null);
-              void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100)))
-                .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(`Reset browser zoom failed: ${extractBrowserErrorCode(error)}`));
+              setTabActionError(null);
+              void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100))).catch((error: unknown) => {
+                setTabActionError(
+                  `Settings were reset, but the default zoom could not be applied to every open tab: ${extractBrowserErrorCode(error)}`,
+                );
+              });
             }}
             className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
           >
@@ -530,6 +534,11 @@ export function BrowserSection() {
             ))
           )}
         </div>
+        {tabActionError ? (
+          <div role="alert" className="mt-2 text-[11px] text-destructive">
+            {tabActionError}
+          </div>
+        ) : null}
       </SettingsGroup>
     </section>
   );

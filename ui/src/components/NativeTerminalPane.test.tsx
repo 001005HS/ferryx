@@ -14,6 +14,7 @@ import {
   snapBoundsToDevicePixels,
 } from "./NativeTerminalPane";
 import {
+  NativeTerminalQueueOverflowError,
   getTerminalInputDropCount,
   getTerminalInputDropTotals,
   resetTerminalInputDropCountsForTest,
@@ -67,6 +68,16 @@ const tauriWindowMocks = vi.hoisted(() => {
 
 const nativeTerminalEventMocks = vi.hoisted(() => ({
   scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
+  inputReceiptListeners: [] as Array<
+    (payload: {
+      sessionId: string;
+      presented: boolean;
+      cursorCol: number;
+      cursorRow: number;
+      cellWidthPx: number;
+      cellHeightPx: number;
+    }) => void
+  >,
   focusListeners: [] as Array<(sessionId: string) => void>,
   pasteListeners: [] as Array<() => void>,
   copyOrInterruptListeners: [] as Array<() => void>,
@@ -87,6 +98,26 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
     nativeTerminalEventMocks.scrollbarListener = handler;
     return () => undefined;
   }),
+  onNativeTerminalInputReceipt: vi.fn(
+    async (
+      handler: (payload: {
+        sessionId: string;
+        presented: boolean;
+        cursorCol: number;
+        cursorRow: number;
+        cellWidthPx: number;
+        cellHeightPx: number;
+      }) => void,
+    ) => {
+      nativeTerminalEventMocks.inputReceiptListeners.push(handler);
+      return () => {
+        nativeTerminalEventMocks.inputReceiptListeners =
+          nativeTerminalEventMocks.inputReceiptListeners.filter(
+            (candidate) => candidate !== handler,
+          );
+      };
+    },
+  ),
   onNativeTerminalFocus: vi.fn(async (handler: (sessionId: string) => void) => {
     nativeTerminalEventMocks.focusListeners.push(handler);
     return () => {
@@ -130,6 +161,9 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   onNativeTerminalPaste: nativeTerminalEventMocks.onNativeTerminalPaste,
   onNativeTerminalCopyOrInterrupt: nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
+  // Input receipts arrive out of band now; without a mock this reaches the real Tauri event
+  // bridge, which is absent under jsdom and throws on every render.
+  onNativeTerminalInputReceipt: nativeTerminalEventMocks.onNativeTerminalInputReceipt,
   setNativeTerminalScrollbarOverlay: nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame: nativeTerminalEventMocks.setNativeTerminalAttentionFrame,
   attachTerminal: vi.fn(async (request) => tauriCoreMocks.invoke("cmd_terminal_attach", request)),
@@ -213,6 +247,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     tauriWindowMocks.reset();
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.inputReceiptListeners = [];
     nativeTerminalEventMocks.pasteListeners = [];
     nativeTerminalEventMocks.copyOrInterruptListeners = [];
     nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
@@ -1459,6 +1494,62 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("moves the IME anchor from an out-of-band input receipt, and ignores receipts for other sessions", async () => {
+    // T2: the send command no longer returns a receipt, so the candidate window follows the
+    // `native_terminal_input_receipt` event. A receipt addressed to a different session must not
+    // drag this pane's anchor.
+    tauriCoreMocks.invoke.mockResolvedValue({
+      cols: 80,
+      rows: 24,
+      rebuiltRows: 1,
+      reusedRows: 23,
+      cursorCol: 3,
+      cursorRow: 2,
+      cellWidthPx: 10,
+      cellHeightPx: 20,
+    });
+    const session = createSession("term-session-1");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+
+    await waitFor(() => {
+      expect(textarea.style.left).toBe("30px");
+      expect(textarea.style.top).toBe("40px");
+    });
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.inputReceiptListeners.length).toBeGreaterThan(0);
+    });
+
+    const emitReceipt = (payload: {
+      sessionId: string;
+      cursorCol: number;
+      cursorRow: number;
+    }) => {
+      act(() => {
+        for (const listener of nativeTerminalEventMocks.inputReceiptListeners) {
+          listener({
+            presented: true,
+            cellWidthPx: 10,
+            cellHeightPx: 20,
+            ...payload,
+          });
+        }
+      });
+    };
+
+    emitReceipt({ sessionId: "some-other-session", cursorCol: 9, cursorRow: 9 });
+    expect(textarea.style.left).toBe("30px");
+    expect(textarea.style.top).toBe("40px");
+
+    emitReceipt({ sessionId: "term-session-1", cursorCol: 5, cursorRow: 6 });
+    await waitFor(() => {
+      expect(textarea.style.left).toBe("50px");
+      expect(textarea.style.top).toBe("120px");
+    });
+  });
+
   it("forwards a primary pointer press for native selection without cancelling the gesture", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,
@@ -1745,6 +1836,30 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     } finally {
       consoleErrorSpy.mockRestore();
     }
+  });
+
+  it("tells the user when input was dropped by queue overflow instead of failing silently", async () => {
+    // A dropped keystroke that says nothing is the worst outcome: the user believes they typed it.
+    const session = createSession("term-session-overflow");
+    const { getByTestId, getByRole } = render(
+      <NativeTerminalPane sessionId="term-session-overflow" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    await act(async () => {});
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        throw new NativeTerminalQueueOverflowError();
+      }
+      return undefined;
+    });
+
+    await act(async () => {
+      fireEvent.input(textarea, { target: { value: "q" } });
+    });
+
+    expect(getByRole("alert")).toHaveTextContent("Input dropped");
   });
 
   it("encodes and forwards non-printable control keys on keydown without duplicating printable input", async () => {

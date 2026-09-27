@@ -1,4 +1,4 @@
-import { PanelLeft } from "lucide-react";
+import { Inbox, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
@@ -8,9 +8,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
-import { Sidebar } from "./components/Sidebar";
-import { NotificationCenterButton } from "./components/notification/NotificationCenterButton";
-import { NotificationCenterPopover } from "./components/notification/NotificationCenterPopover";
+import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
@@ -20,7 +18,7 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { resolveLocalSessionKey, type DesktopWorkspace } from "./features/ferryx/control/desktopInventory";
+import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
 import type { AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -296,6 +294,24 @@ function triggerSshRegistrationHeal(projects: RegisteredProject[]): void {
 
 const healedLocalWorkspaceIds = new Set<string>();
 
+// Terminals in a project whose registration failed cannot spawn (WORKSPACE_NOT_FOUND), so
+// the failure is shown with its reason and a retry instead of only reaching the console.
+export function reportLocalRegistrationFailure(project: RegisteredProject, error: unknown): void {
+  const name = project.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? project.workspaceId;
+  const reason = error instanceof Error ? error.message : String(error);
+  toast.error(`Couldn't open project "${name}"`, {
+    id: `local-registration:${project.workspaceId}`,
+    description: `New terminals in this project will fail until it registers. ${reason}`,
+    duration: Infinity,
+    action: {
+      label: "Retry",
+      onClick: () => {
+        void ensureLocalProjectsRegistered([project]);
+      },
+    },
+  });
+}
+
 // Restored workspace tabs spawn as soon as the shell mounts, so every stored local project
 // must be registered before the bootstrap is published; otherwise the spawn races the
 // registration and fails with WORKSPACE_NOT_FOUND.
@@ -317,6 +333,7 @@ export async function ensureLocalProjectsRegistered(projects: RegisteredProject[
         healedLocalWorkspaceIds.add(project.workspaceId);
       } catch (error) {
         console.warn("Local workspace registration skipped:", project.workspaceId, error);
+        reportLocalRegistrationFailure(project, error);
       }
     }),
   );
@@ -1542,7 +1559,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
+  const [isWorktreeListOpen, setIsWorktreeListOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
@@ -1552,23 +1569,14 @@ function WorkspaceApp({
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
-  const desktopWorkspaces = useMemo<DesktopWorkspace[]>(() => {
-    const spaces: DesktopWorkspace[] = [];
-    for (const project of projects) {
-      const projectState =
-        project.workspaceId === activeProject.workspaceId
-          ? state
-          : getHmrWorkspaceState(project.workspaceId) ?? getWorkspaceSnapshot(project.workspaceId);
-      if (!projectState) continue;
-      const target = project.target;
-      const hostId = target && (target.kind === "ssh" || target.kind === "pairedDaemon") ? target.hostId : "local";
-      spaces.push({ workspaceId: project.workspaceId, hostId, state: projectState });
-    }
-    return spaces;
-  }, [activeProject.workspaceId, projects, state]);
-  // Projects whose workspace state could not be resolved are reported instead of hidden, so the
-  // inbox can say the list is partial rather than claiming it is complete.
-  const unavailableHosts = useMemo( () => Array.from( new Set( projects .filter((project) => project.workspaceId !== activeProject.workspaceId) .filter((project) => !(getHmrWorkspaceState(project.workspaceId) ?? getWorkspaceSnapshot(project.workspaceId))) .map((project) => (project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") && project.target?.hostId ? project.target.hostId : "local") ) ), [activeProject.workspaceId, projects], );
+  const notificationInbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
+  const attentionRows = useMemo(
+    () => buildAttentionRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
+    [notificationInbox, state, parkedActivityVersion],
+  );
+  const openSessionCount = Object.keys(state.sessions).length + listWorkspaceSnapshots()
+    .filter(([workspaceId]) => workspaceId !== activeProject.workspaceId)
+    .reduce((count, [, snapshot]) => count + Object.keys(snapshot.sessions).length, 0);
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -1967,6 +1975,32 @@ function WorkspaceApp({
     },
     [dispatchWorkspaceAction, handleSelectProject],
   );
+
+  const handleOpenAttentionRow = useCallback((row: AttentionRow) => {
+    const project = projectsRef.current.find((candidate) => candidate.workspaceId === row.workspaceId);
+    const liveState = row.workspaceId === activeProjectRef.current.workspaceId
+      ? stateRef.current
+      : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
+    if (!project || !liveState || !hasNavigableSession(liveState, row.sessionId)) {
+      // A row that can no longer take you anywhere is noise; drop it instead of leaving a dead click.
+      notificationCenterStore.dismissSession(row.workspaceId, row.sessionId);
+      toast.info("세션이 닫혀 알림을 지웠습니다");
+      return;
+    }
+    handleNotificationTarget({ workspaceId: row.workspaceId, sessionId: row.sessionId, revision: row.revision });
+  }, [handleNotificationTarget]);
+
+  const sidebarAttention = useMemo<SidebarAttention>(() => ({
+    rows: attentionRows,
+    onOpen: handleOpenAttentionRow,
+    onDismiss: (row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }]),
+    onDismissAll: () => notificationCenterStore.markEntriesRead(
+      attentionRows.map((row) => ({ id: row.id, expectedRevision: row.revision })),
+    ),
+    openSessionCount,
+    worktreeListOpen: isWorktreeListOpen,
+    onWorktreeListOpenChange: setIsWorktreeListOpen,
+  }), [attentionRows, handleOpenAttentionRow, isWorktreeListOpen, openSessionCount]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -2426,11 +2460,13 @@ function WorkspaceApp({
     setIsSettingsOpen((current) => !current);
   }, []);
   const handleToggleNotificationCenter = useCallback(() => {
-    setIsNotificationCenterOpen((current) => !current);
-  }, []);
-  const handleCloseNotificationCenter = useCallback(() => {
-    setIsNotificationCenterOpen(false);
-  }, []);
+    if (isSidebarOpen && !isWorktreeListOpen) {
+      toggleSidebar();
+      return;
+    }
+    setIsWorktreeListOpen(false);
+    if (!isSidebarOpen) toggleSidebar();
+  }, [isSidebarOpen, isWorktreeListOpen, toggleSidebar]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleDeleteWorktree = useCallback((worktree: Worktree) => {
@@ -3071,28 +3107,8 @@ function WorkspaceApp({
           onResetAgentState={handleResetWorktreeAgentState}
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
-          attentionInventory={{
-            workspaces: desktopWorkspaces,
-            unavailableHosts,
-            onSelectAgent: (agent) => {
-              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
-              handleNotificationTarget({
-                workspaceId: agent.workspaceId,
-                sessionId: localKey ?? agent.target.backendSessionId,
-              });
-            },
-          }}
           onOpenSettings={handleOpenSettings}
-          onNavigateToSession={handleNotificationTarget}
-          isSessionNavigable={(workspaceId, sessionId) => {
-            if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
-            const snapshot = workspaceId === activeProjectRef.current.workspaceId
-              ? stateRef.current
-              : getHmrWorkspaceState(workspaceId) ?? getWorkspaceSnapshot(workspaceId);
-            return Boolean(snapshot && hasNavigableSession(snapshot, sessionId));
-          }}
-          isNotificationCenterOpen={isNotificationCenterOpen}
-          onOpenChangeNotificationCenter={setIsNotificationCenterOpen}
+          attention={sidebarAttention}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -3104,12 +3120,23 @@ function WorkspaceApp({
             <IconButton data-shortcut="sidebar.left.toggle" label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
               <PanelLeft className="size-3.5" />
             </IconButton>
-            <NotificationCenterButton
-              isNotificationCenterOpen={isNotificationCenterOpen}
-              onOpenChangeNotificationCenter={setIsNotificationCenterOpen}
-              onNavigateToSession={handleNotificationTarget}
-              renderPopover={false}
-            />
+            <IconButton
+              data-shortcut="notifications.toggle"
+              label={attentionRows.length > 0 ? `인박스 열기 (${attentionRows.length})` : "인박스 열기"}
+              className="no-drag relative"
+              size="sm"
+              onClick={handleToggleNotificationCenter}
+            >
+              <Inbox className="size-3.5" />
+              {attentionRows.length > 0 ? (
+                <span
+                  data-testid="collapsed-attention-badge"
+                  className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
+                >
+                  {attentionRows.length > 9 ? "9+" : attentionRows.length}
+                </span>
+              ) : null}
+            </IconButton>
           </div>
         </div>
       )}
@@ -3262,31 +3289,6 @@ function WorkspaceApp({
         )}
       </main>
 
-      {!isSidebarOpen && isNotificationCenterOpen ? (
-        <NotificationCenterPopover
-          open={true}
-          onClose={handleCloseNotificationCenter}
-          onNavigateToSession={handleNotificationTarget}
-          attentionInventory={{
-            workspaces: desktopWorkspaces,
-            unavailableHosts,
-            onSelectAgent: (agent) => {
-              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
-              handleNotificationTarget({
-                workspaceId: agent.workspaceId,
-                sessionId: localKey ?? agent.target.backendSessionId,
-              });
-            },
-          }}
-          isSessionNavigable={(workspaceId, sessionId) => {
-            if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
-            const snapshot = workspaceId === activeProjectRef.current.workspaceId
-              ? stateRef.current
-              : getHmrWorkspaceState(workspaceId) ?? getWorkspaceSnapshot(workspaceId);
-            return Boolean(snapshot && hasNavigableSession(snapshot, sessionId));
-          }}
-        />
-      ) : null}
       {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette
           open={true}

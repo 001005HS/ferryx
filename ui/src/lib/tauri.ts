@@ -656,6 +656,29 @@ export async function onNativeTerminalAgentState(
   return listen<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
 }
 
+export interface NativeTerminalInputReceiptPayload {
+  readonly sessionId: string;
+  readonly presented: boolean;
+  readonly cursorCol: number;
+  readonly cursorRow: number;
+  readonly cellWidthPx: number;
+  readonly cellHeightPx: number;
+  readonly effectiveScaleFactor?: number | null;
+}
+
+/**
+ * Input receipts arrive out of band so a keystroke never waits for the main-thread rendezvous.
+ * They carry only the IME candidate-window anchor.
+ */
+export async function onNativeTerminalInputReceipt(
+  handler: (payload: NativeTerminalInputReceiptPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
+    handler(event.payload),
+  );
+}
+
 export async function onNativeTerminalScrollbar(
   handler: (payload: NativeTerminalScrollbarPayload) => void,
 ): Promise<UnlistenFn> {
@@ -683,6 +706,36 @@ export async function setNativeTerminalAttentionFrame(
     sessionId,
     attention,
   });
+}
+
+export type NativeTerminalScrollBehavior =
+  | { type: "top" }
+  | { type: "bottom" }
+  | { type: "delta"; rows: number }
+  | { type: "row"; offset: number };
+
+export async function scrollNativeTerminal(
+  sessionId: string,
+  behavior: NativeTerminalScrollBehavior,
+  options?: {
+    wheel?: unknown;
+    generation?: number | null;
+  },
+): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_native_terminal_scroll", {
+    sessionId,
+    behavior,
+    ...(options?.wheel !== undefined ? { wheel: options.wheel } : {}),
+    ...(options?.generation != null ? { generation: options.generation } : {}),
+  });
+}
+
+export async function scrollNativeTerminalViewport(
+  sessionId: string,
+  row: number,
+): Promise<void> {
+  return scrollNativeTerminal(sessionId, { type: "row", offset: row });
 }
 
 export async function onNativeTerminalFocus(

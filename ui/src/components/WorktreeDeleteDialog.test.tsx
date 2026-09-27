@@ -380,4 +380,31 @@ describe("WorktreeDeleteDialog", () => {
     });
     expect(onDeleted).toHaveBeenCalledOnce();
   });
+
+  it("tells the user how to remove a worktree Ferryx did not create", async () => {
+    const unmanaged: Worktree = {
+      path: "/repo/feature-x",
+      head: "abc123",
+      branch: "refs/heads/feature/x",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          worktree={unmanaged}
+          onClose={vi.fn()}
+          onDeleted={vi.fn()}
+        />,
+      );
+    });
+
+    expect(
+      await screen.findByText(/git worktree remove "\/repo\/feature-x"/),
+    ).toBeInTheDocument();
+    expect(native.previewWorktreeDelete).not.toHaveBeenCalled();
+  });
 });

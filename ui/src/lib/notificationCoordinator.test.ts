@@ -12,12 +12,19 @@ vi.mock("./tauri", () => ({
   dispatchNotification: vi.fn(() => Promise.resolve()),
   playNotificationSound: vi.fn(() => Promise.resolve()),
   requestNotificationPermission: vi.fn(() => Promise.resolve({ granted: false })),
+  getNotificationPermissionStatus: vi.fn(() => Promise.resolve({ authorization: "denied" })),
 }));
 
-const { dispatchNotification, playNotificationSound, requestNotificationPermission } = await import("./tauri");
+const {
+  dispatchNotification,
+  playNotificationSound,
+  requestNotificationPermission,
+  getNotificationPermissionStatus,
+} = await import("./tauri");
 const dispatchMock = vi.mocked(dispatchNotification);
 const soundMock = vi.mocked(playNotificationSound);
 const requestMock = vi.mocked(requestNotificationPermission);
+const statusMock = vi.mocked(getNotificationPermissionStatus);
 
 function settings(overrides: Partial<NotificationSettings> = {}): NotificationSettings {
   return { ...DEFAULT_NOTIFICATION_SETTINGS, ...overrides };
@@ -41,6 +48,7 @@ beforeEach(() => {
   dispatchMock.mockClear();
   soundMock.mockClear();
   requestMock.mockClear();
+  statusMock.mockClear();
 });
 
 afterEach(() => {
@@ -177,6 +185,28 @@ describe("terminal bell", () => {
     instance.handleTerminalBell({ sessionId: "s1", tabId: "t1" });
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts an agent completion edge trailing a bell and suppresses duplicate notification", () => {
+    const { instance, marks } = coordinator({
+      getSettings: () => settings({ terminalBell: true, agentTaskComplete: true }),
+    });
+
+    instance.handleTerminalBell({ sessionId: "s1", tabId: "t1" });
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(marks.tabs).toEqual(["t1"]);
+
+    vi.advanceTimersByTime(200);
+    const decision = instance.handleAgentStateChange({
+      sessionId: "s1",
+      tabId: "t1",
+      previousState: "working",
+      nextState: "waiting",
+    });
+
+    expect(decision).toEqual({ accepted: true, suppressed: true });
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(marks.tabs).toEqual(["t1"]);
   });
 
   it("still marks unread when bell notifications are turned off", () => {
@@ -583,5 +613,107 @@ describe("reset", () => {
     await Promise.resolve();
 
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("recovers when the user grants permission after an earlier denial", async () => {
+    // 1. Initial attempt: permission-required, request returns granted: false.
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    requestMock.mockResolvedValueOnce({ granted: false });
+    statusMock.mockResolvedValue({ authorization: "denied" });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+
+    // 2. Second attempt while still denied: ensures notification is not retried / requested
+    dispatchMock.mockClear();
+    requestMock.mockClear();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "working",
+      nextState: "waiting",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    // Dispatch attempted, but ensureNotificationPermission returned false immediately (via recheck or denied latch)
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+
+    // 3. User grants permission in OS Settings, window regains focus.
+    statusMock.mockResolvedValue({ authorization: "authorized" });
+    window.dispatchEvent(new Event("focus"));
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    // 4. Subsequent notification request should now succeed and deliver!
+    dispatchMock.mockClear();
+    requestMock.mockClear();
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" })
+      .mockResolvedValueOnce({ submitted: true });
+    requestMock.mockResolvedValueOnce({ granted: true });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "waiting",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    // Should have checked permission / requested and retried dispatch
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+    expect(dispatchMock.mock.calls[1][0]).toMatchObject({
+      attentionReason: "done",
+    });
+
+    instance.dispose();
+  });
+
+  it("recovers at dispatch time when the OS grants permission and no focus event fires", async () => {
+    // The focus listener is one recovery path; this covers the other one, where the user grants
+    // permission in OS settings while the window never regains focus. The denial latch must be
+    // re-checked against the authoritative status at dispatch time, not trusted forever.
+    statusMock.mockResolvedValue({ authorization: "denied" });
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    requestMock.mockResolvedValueOnce({ granted: false });
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+    });
+
+    instance.handleAgentStateChange({ sessionId: "s1", previousState: "running", nextState: "done" });
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+
+    // The OS now reports granted. No focus event is dispatched.
+    statusMock.mockResolvedValue({ authorization: "authorized" });
+    dispatchMock.mockClear();
+    requestMock.mockClear();
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" })
+      .mockResolvedValueOnce({ submitted: true });
+    requestMock.mockResolvedValueOnce({ granted: true });
+
+    instance.handleAgentStateChange({ sessionId: "s2", previousState: "running", nextState: "done" });
+    for (let i = 0; i < 40; i += 1) await Promise.resolve();
+
+    expect(statusMock).toHaveBeenCalled();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+
+    instance.dispose();
   });
 });

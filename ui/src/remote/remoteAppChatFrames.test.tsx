@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -79,6 +79,21 @@ function routedFetch(historyResponse: Response) {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes("/api/v1/agent-history/")) return historyResponse;
     return jsonResponse(remoteState);
+  });
+}
+
+async function selectPaneFromWorktreeSheet(name: RegExp) {
+  const existing = screen.queryByRole("tablist", { name: /terminal tabs/i });
+  let sheet = existing;
+  if (!sheet) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
+  }
+  fireEvent.click(within(sheet).getByRole("tab", { name }));
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
   });
 }
 
@@ -365,10 +380,7 @@ describe("remoteAppChatFrames", () => {
       expect(screen.getAllByTestId("user-message-bubble")).toHaveLength(2);
       expect(screen.getAllByTestId("assistant-message-body")).toHaveLength(2);
 
-      fireEvent.click(screen.getByTestId("remote-view-mode-threads"));
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("thread-row-tab-second"));
-      await act(async () => {});
+      await selectPaneFromWorktreeSheet(/second/i);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
@@ -445,10 +457,7 @@ describe("remoteAppChatFrames", () => {
       expect(document.body.textContent).toContain("LEAK_PROBE_PROMPT");
       expect(screen.queryByTestId("stop-button")).not.toBeNull();
 
-      fireEvent.click(screen.getByTestId("remote-view-mode-threads"));
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("thread-row-tab-second"));
-      await act(async () => {});
+      await selectPaneFromWorktreeSheet(/second/i);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
@@ -503,10 +512,7 @@ describe("remoteAppChatFrames", () => {
       fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
       await act(async () => {});
 
-      fireEvent.click(screen.getByTestId("remote-view-mode-threads"));
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("thread-row-tab-second"));
-      await act(async () => {});
+      await selectPaneFromWorktreeSheet(/second/i);
       expect(screen.queryAllByTestId("user-message-bubble")).toHaveLength(0);
 
       fireEvent.change(screen.getByTestId("chat-composer-textarea"), {
@@ -579,10 +585,7 @@ describe("remoteAppChatFrames", () => {
       await act(async () => {});
       expect(screen.queryByTestId("stop-button")).not.toBeNull();
 
-      fireEvent.click(screen.getByTestId("remote-view-mode-threads"));
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("thread-row-tab-second"));
-      await act(async () => {});
+      await selectPaneFromWorktreeSheet(/second/i);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });

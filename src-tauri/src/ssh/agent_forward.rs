@@ -45,6 +45,8 @@ struct IngressReport {
     agent: Option<String>,
     #[serde(default)]
     provider_session: Option<AgentProviderSession>,
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 #[derive(Clone)]
@@ -209,6 +211,7 @@ pub(crate) async fn resolve_report(
             state: report.state,
             agent: report.agent,
             provider_session,
+            detail: report.detail,
             origin: AgentStateOrigin::Agent,
         },
     ))

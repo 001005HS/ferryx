@@ -9,7 +9,7 @@ import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): string | null {
   if (!nativeReady) return "Native machine access is unavailable. Upgrade the desktop and local daemon.";
   if (!host) return "Pair a daemon in Settings > Remote Access, then select a machine.";
-  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "Pair this daemon with a machine-access PIN in Settings > Remote Access.";
+  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "This machine needs machine access. Connect it from your Ferryx account in Settings > Remote Access.";
   if (!host.generation || !host.machineId) return "Upgrade the desktop and daemon, then pair this machine again.";
   if (!host.online) return "This machine is offline. Connect its daemon to the relay before adding a project.";
   return null;

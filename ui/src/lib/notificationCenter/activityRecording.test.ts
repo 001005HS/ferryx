@@ -3,7 +3,7 @@ import type { ActivityNotificationEvent, WorkspaceState } from "../../state/work
 import { NotificationCoordinator, type NotificationDecision } from "../notificationCoordinator";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../notificationSettings";
 import { createNotificationCenterStore, type NotificationCenterStore } from "./notificationCenterStore";
-import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./activityRecording";
+import { isNotificationTargetObserved, noteObservationInteraction, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./activityRecording";
 
 vi.mock("../tauri", () => ({
   dispatchNotification: vi.fn().mockResolvedValue({ submitted: true }),
@@ -93,6 +93,54 @@ describe("accepted-event recording adapters", () => {
     expect(store.getSnapshot().entries).toHaveLength(1);
   });
 
+  it("upgrades a bell at t=0 to an actionable agent entry on waiting at t=200ms with one notification banner", () => {
+    const bellEvents = bus<RecordingTarget>();
+    const activityEvents = bus<ActivityNotificationEvent>();
+    const instance = coordinator(false);
+    const unsubscribeBell = wireBellRecording({ events: bellEvents.events, isObserved: () => false, store });
+    const unsubscribeActivity = wireActivityRecording({ events: activityEvents.events, isObserved: () => false, store });
+
+    // bell at t=0
+    const bell = { ...event, agentLabel: undefined };
+    bellEvents.emit(bell, instance.handleTerminalBell(bell));
+    expect(dispatchNotification).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().entries).toEqual([
+      expect.objectContaining({ reason: "bell", subject: "terminal", revision: 1 }),
+    ]);
+
+    // waiting transition at t=200ms
+    vi.advanceTimersByTime(200);
+    const waitingEvent: ActivityNotificationEvent = {
+      ...event,
+      previousState: "working",
+      state: "waiting",
+    };
+    activityEvents.emit(
+      waitingEvent,
+      instance.handleAgentStateChange({ ...waitingEvent, nextState: waitingEvent.state }),
+    );
+
+    // assert exactly one notification banner fired
+    expect(dispatchNotification).toHaveBeenCalledTimes(1);
+
+    // AND the notification-center entry exists as an actionable agent entry
+    expect(store.getSnapshot().entries).toEqual([
+      expect.objectContaining({
+        reason: "waiting",
+        subject: "agent",
+        labels: expect.objectContaining({
+          agentLabel: "Codex",
+        }),
+        read: { unread: true },
+        revision: 2,
+        occurrenceCount: 2,
+      }),
+    ]);
+
+    unsubscribeBell();
+    unsubscribeActivity();
+  });
+
   it("preserves source occurrence identity and samples observation at each accepted event", () => {
     const events = bus<ActivityNotificationEvent & { occurrenceId: string; occurredAt: number }>();
     let observed = true;
@@ -106,6 +154,8 @@ describe("accepted-event recording adapters", () => {
 });
 
 describe("observation at recording time", () => {
+  // Focus alone no longer counts as observation, so these cases seed a recent interaction.
+  beforeEach(() => { noteObservationInteraction(Date.now()); });
   const state = {
     workspaceId: "project",
     layout: {
@@ -124,6 +174,15 @@ describe("observation at recording time", () => {
     expect(isNotificationTargetObserved(state, { ...event, tabId: "hidden" }, true)).toBe(false);
     expect(isNotificationTargetObserved(state, { ...event, sessionId: "background" }, true)).toBe(false);
     expect(isNotificationTargetObserved(state, { ...event, sessionId: "missing" }, true)).toBe(false);
+  });
+  it("does not count a focused but untouched window as observation", () => {
+    // The window keeps OS focus while the user reads on another monitor: an agent finishing here
+    // must stay unread, or its banner, sound and badge are all swallowed with nothing to show.
+    noteObservationInteraction(Date.now() - 120_000);
+    expect(isNotificationTargetObserved(state, event, true)).toBe(false);
+
+    noteObservationInteraction(Date.now());
+    expect(isNotificationTargetObserved(state, event, true)).toBe(true);
   });
   it("recognizes a visible secondary tab group", () => {
     const grouped = { ...state, layout: { ...state.layout, activeTabId: "other",

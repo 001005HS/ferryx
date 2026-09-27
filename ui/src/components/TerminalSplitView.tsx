@@ -34,7 +34,7 @@ import type {
   TerminalSession,
   WorkspaceTab,
 } from "../lib/types";
-import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
+import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
 import {
   isRedundantSplit as isRedundantPaneSplit,
@@ -779,6 +779,7 @@ function TabGroupView({
         onRenameTab={onRenameTab}
         onTogglePin={onToggleTabPin}
         onResetAgentState={onResetAgentState}
+        sessionIdForLifecycle={(tab) => focusedPaneSessionId(layout, tab)}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
         onMoveTabToSplit={moveTabToSplitEdge}

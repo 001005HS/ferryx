@@ -21,6 +21,13 @@ export type TerminalActivity = {
   seen?: boolean;
   /** This attention episode came from automatic restoration, not new agent work. */
   notificationSuppressed?: boolean;
+  /**
+   * What the agent is blocked on, when the producer can name it.
+   *
+   * Only the agent's own state report carries this: screen rules and title parsing infer a state
+   * word without ever seeing the question, so a `waiting` entry from those paths has no detail.
+   */
+  detail?: string;
 };
 
 export type ActivitySummary = {

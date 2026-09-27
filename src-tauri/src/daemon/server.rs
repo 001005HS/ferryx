@@ -1645,6 +1645,67 @@ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonRes
     }
 }
 
+/// Decides whether a v5 handover may commit after the successor has drained the transfer socket.
+///
+/// The predecessor gives up ownership of every session it offers BEFORE the commit. So a delivery
+/// shortfall is not a warning: committing retires the predecessor, and each undelivered session
+/// dies with the PTY master fd it still owned. Aborting instead leaves the predecessor serving all
+/// of them, which is always the survivable outcome.
+pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
+    if accepted >= offered {
+        return Ok(());
+    }
+    Err(format!(
+        "Aborting handover: predecessor offered {offered} session(s) but delivered {accepted}. \
+         Committing would terminate the {} undelivered session(s).",
+        offered.saturating_sub(accepted)
+    ))
+}
+
+/// Gate the commit on what the predecessor OWNED, not merely on what it managed to send.
+///
+/// `offered` counts only the sessions the predecessor successfully exported. A session that
+/// fails to export is therefore absent from BOTH sides of an `offered`/`accepted` comparison,
+/// so that check passes while the session dies with the predecessor's PTY master fd. This was
+/// observed in production: `requested=20 transferred=18` followed by `offered=18 accepted=18`
+/// and a commit -- two sessions lost with the check reporting success.
+///
+/// `owned == 0` means the peer is an older daemon that does not send the field; fall back to
+/// the delivery-only check rather than aborting every handover with such a predecessor.
+pub(crate) fn handover_delivery_verdict_owned(
+    owned: usize,
+    offered: usize,
+    accepted: usize,
+) -> Result<(), String> {
+    handover_delivery_verdict(offered, accepted)?;
+    if owned == 0 || accepted >= owned {
+        return Ok(());
+    }
+    Err(format!(
+        "Aborting handover: predecessor owned {owned} session(s) but only {accepted} survived the \
+         transfer. Committing would terminate the {} session(s) it could not export.",
+        owned.saturating_sub(accepted)
+    ))
+}
+
+/// Sessions the predecessor listed but did not export, whose durable remote snapshot lets the
+/// successor restore them after commit. An older predecessor counts these in `owned` even
+/// though only local PTYs travel over the handover socket.
+pub(crate) fn handover_restorable_unexported(
+    listed: &[String],
+    exported: &std::collections::HashSet<String>,
+    durable: &std::collections::HashSet<String>,
+) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+    for id in listed {
+        if seen.insert(id) && !exported.contains(id) && durable.contains(id) {
+            count += 1;
+        }
+    }
+    count
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -1961,6 +2022,7 @@ impl DaemonServer {
         String,
         Option<String>,
         Option<crate::daemon::protocol::AgentProviderSession>,
+        Option<String>,
     )> {
         let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
@@ -1976,6 +2038,7 @@ impl DaemonServer {
             report.state,
             report.agent,
             provider_session,
+            report.detail,
         ))
     }
 
@@ -2020,6 +2083,7 @@ impl DaemonServer {
                                         state: report.1.clone(),
                                         agent: report.2.clone(),
                                         provider_session: report.3.clone(),
+                                        detail: report.4.clone(),
                                     };
                                     if let Err(error) = sessions
                                         .validate_machine_agent_report(session.target, hint)
@@ -2046,6 +2110,7 @@ impl DaemonServer {
                                 state: report.1,
                                 agent: report.2,
                                 provider_session: report.3,
+                                detail: report.4,
                                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
                             });
                         }
@@ -2144,6 +2209,7 @@ impl DaemonServer {
                                         state: report.1.clone(),
                                         agent: report.2.clone(),
                                         provider_session: report.3.clone(),
+                                        detail: report.4.clone(),
                                     };
                                     if let Err(error) = sessions
                                         .validate_machine_agent_report(session.target, hint)
@@ -2170,6 +2236,7 @@ impl DaemonServer {
                                 state: report.1,
                                 agent: report.2,
                                 provider_session: report.3,
+                                detail: report.4,
                                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
                             });
                         }
@@ -2310,77 +2377,211 @@ impl DaemonServer {
 
             #[cfg(unix)]
             if crate::daemon::handover::is_v5_ownership_transfer_enabled() {
-                let transfer_id = uuid::Uuid::new_v4().to_string();
-                let handover_socket_path = crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
-                let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(&handover_socket_path)
-                    .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
-
-                let accept_handle = tokio::task::spawn_blocking(move || {
-                    let (stream, _creds) = listener.accept()?;
-                    let mut exports = Vec::new();
-                    while let Ok(Some(export)) = crate::daemon::handover_socket::recv_session(&stream) {
-                        exports.push(export);
+                let listed = match legacy_peer.list_sessions().await {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Failed to list predecessor sessions before handover transfer"
+                        );
+                        Vec::new()
                     }
-                    Ok::<_, crate::daemon::handover_socket::HandoverSocketError>(exports)
-                });
-
-                let transfer_resp = legacy_peer
-                    .send_request(&DaemonRequest::TransferSessions {
-                        handover_socket_path: handover_socket_path.to_string_lossy().into_owned(),
-                    })
-                    .await
-                    .map_err(|e| format!("TransferSessions request failed: {e}"))?;
-
-                let offered = match transfer_resp {
-                    DaemonResponse::TransferSessionsOk { transferred_count } => transferred_count,
-                    other => return Err(format!("TransferSessions failed: {other:?}")),
                 };
 
-                let exports = accept_handle
+                let transfer_id = uuid::Uuid::new_v4().to_string();
+                let handover_socket_path =
+                    crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
+                let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
+                    &handover_socket_path,
+                )
+                .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
+
+                let accept_handle = tokio::task::spawn_blocking(move || {
+                    let (stream, _creds) = listener.accept().map_err(|error| (error, 0usize))?;
+                    let mut exports = Vec::new();
+                    // Stopping at the first error silently strands every session behind it: the
+                    // predecessor has already given up ownership of them, so an early break here
+                    // is what turns a transport hiccup into dead terminals. Surface the error
+                    // instead, and let the caller decide whether the handover may proceed.
+                    loop {
+                        match crate::daemon::handover_socket::recv_session(&stream) {
+                            Ok(Some(export)) => exports.push(export),
+                            Ok(None) => break,
+                            Err(error) => return Err((error, exports.len())),
+                        }
+                    }
+                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
+                });
+
+                let transfer_outcome: Result<usize, String> = async {
+                    let transfer_resp = legacy_peer
+                        .send_request(&DaemonRequest::TransferSessions {
+                            handover_socket_path: handover_socket_path
+                                .to_string_lossy()
+                                .into_owned(),
+                        })
+                        .await
+                        .map_err(|e| format!("TransferSessions request failed: {e}"))?;
+
+                    let (offered, owned) = match transfer_resp {
+                        DaemonResponse::TransferSessionsOk {
+                            transferred_count,
+                            requested_count,
+                        } => (transferred_count, requested_count),
+                        other => return Err(format!("TransferSessions failed: {other:?}")),
+                    };
+
+                    let exports = accept_handle
+                        .await
+                        .map_err(|e| format!("Handover worker panicked: {e}"))?
+                        .map_err(|(error, received)| {
+                            format!(
+                                "Handover socket receive error after {received} of {offered} session(s): {error}"
+                            )
+                        })?;
+                    let accepted = exports.len();
+                    let exported: std::collections::HashSet<String> =
+                        exports.iter().map(|e| e.session_id.clone()).collect();
+                    let durable_path = self.remote_sessions_path.clone();
+                    let durable = crate::ipc::run_blocking(move || {
+                        if !durable_path.exists() {
+                            return Ok(std::collections::HashSet::new());
+                        }
+                        let raw = match std::fs::read_to_string(&durable_path) {
+                            Ok(r) => r,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    path = %durable_path.display(),
+                                    "Failed to read durable remote sessions snapshot for \
+                                     handover accounting"
+                                );
+                                return Ok(std::collections::HashSet::new());
+                            }
+                        };
+                        let value: serde_json::Value = match serde_json::from_str(&raw) {
+                            Ok(v) => v,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    path = %durable_path.display(),
+                                    "Failed to parse durable remote sessions snapshot for \
+                                     handover accounting"
+                                );
+                                return Ok(std::collections::HashSet::new());
+                            }
+                        };
+                        let set = value["remoteSessions"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|record| {
+                                        record["descriptor"]["backendSessionId"]
+                                            .as_str()
+                                            .map(ToString::to_string)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Ok::<_, crate::ipc::error::IpcError>(set)
+                    })
                     .await
-                    .map_err(|e| format!("Handover worker panicked: {e}"))?
-                    .map_err(|e| format!("Handover socket receive error: {e}"))?;
-                let accepted = exports.len();
-                // A predecessor that reports more than it delivered is the shape of a lossy
-                // handover: the sessions missing from `accepted` are the ones that lose their
-                // PTY owner when the predecessor retires.
-                tracing::info!(offered, accepted, "Received session exports over the handover socket");
-                if accepted != offered {
-                    tracing::warn!(
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            %error,
+                            "Durable remote snapshot read failed during handover accounting"
+                        );
+                        std::collections::HashSet::new()
+                    });
+                    let restorable =
+                        handover_restorable_unexported(&listed, &exported, &durable);
+                    let effective_owned = owned.saturating_sub(restorable);
+                    // A predecessor that reports more than it delivered is the shape of a lossy
+                    // handover: the sessions missing from `accepted` are the ones that lose their
+                    // PTY owner when the predecessor retires. `owned` is what the predecessor
+                    // actually held; `offered` already excludes sessions it failed to export, so
+                    // checking `accepted` against `offered` alone cannot see those casualties.
+                    tracing::info!(
+                        owned,
                         offered,
                         accepted,
-                        "Handover socket delivered fewer sessions than the predecessor reported"
+                        restorable,
+                        effective_owned,
+                        "Received session exports over the handover socket"
                     );
-                }
+                    if let Err(reason) =
+                        handover_delivery_verdict_owned(effective_owned, offered, accepted)
+                    {
+                        // Do NOT proceed. Committing here retires the predecessor, and every
+                        // session it offered but did not deliver dies with the PTY master fd it
+                        // still owned. Aborting leaves the predecessor serving all of them instead.
+                        return Err(reason);
+                    }
 
-                for export in exports {
-                    tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
-                    let (master, snapshot) = export.into_parts();
-                    let session_id = snapshot.session_id.clone();
-                    let output_rx = self
-                        .terminal_service
-                        .pty_manager()
-                        .adopt_transferred_session(master, snapshot)
-                        .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
-                    // The receiver must be held and pumped for as long as the adopted child runs.
-                    // Dropping it here marks the session's output channel closed, and the lifecycle
-                    // watcher would then close the session -- terminating the very child this
-                    // handover exists to preserve.
-                    self.terminal_service.pump_adopted_output(session_id, output_rx);
-                }
+                    for export in exports {
+                        tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
+                        let (master, snapshot) = export.into_parts();
+                        let session_id = snapshot.session_id.clone();
+                        let output_rx = self
+                            .terminal_service
+                            .pty_manager()
+                            .adopt_transferred_session(master, snapshot)
+                            .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                        // The receiver must be held and pumped for as long as the adopted child runs.
+                        // Dropping it here marks the session's output channel closed, and the lifecycle
+                        // watcher would then close the session -- terminating the very child this
+                        // handover exists to preserve.
+                        self.terminal_service.pump_adopted_output(session_id, output_rx);
+                    }
 
-                let commit_resp = legacy_peer
-                    .send_request(&DaemonRequest::CommitHandover {
-                        legacy_socket_path: None,
-                    })
-                    .await?;
-                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
-                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                    let commit_resp = legacy_peer
+                        .send_request(&DaemonRequest::CommitHandover {
+                            legacy_socket_path: None,
+                        })
+                        .await
+                        .map_err(|e| format!("CommitHandover request failed: {e}"))?;
+                    if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                        return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                    }
+                    Ok::<usize, String>(accepted)
                 }
-                tracing::info!(
-                    accepted,
-                    "Handover committed after adopting the transferred sessions"
-                );
+                .await;
+
+                match transfer_outcome {
+                    Ok(accepted) => {
+                        tracing::info!(
+                            accepted,
+                            "Handover committed after adopting the transferred sessions"
+                        );
+                        if let Err(error) = self
+                            .restore_remote_sessions_at(self.remote_sessions_path.clone())
+                            .await
+                        {
+                            tracing::error!(%error, "Handover committed, but restoring the predecessor's SSH/remote sessions failed; they will reattach on the next daemon start");
+                        }
+                    }
+                    Err(reason) => {
+                        let abort_resp = legacy_peer
+                            .send_request(&DaemonRequest::AbortHandover)
+                            .await;
+                        match abort_resp {
+                            Ok(DaemonResponse::AbortHandoverOk) => {
+                                tracing::warn!(
+                                    %reason,
+                                    "Handover transfer aborted; predecessor confirmed AbortHandover and resumed serving sessions"
+                                );
+                            }
+                            other => {
+                                tracing::error!(
+                                    %reason,
+                                    abort_result = ?other,
+                                    "Handover transfer failed ({reason}) and predecessor AbortHandover returned {other:?}; exported sessions stay paused on the predecessor"
+                                );
+                            }
+                        }
+                        return Err(reason);
+                    }
+                }
             } else {
                 let sessions = legacy_peer.list_sessions().await?;
                 let route = crate::daemon::manifest::HandoverRoute {
@@ -3457,35 +3658,74 @@ impl DaemonServer {
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
                     #[cfg(unix)]
                     {
-                        let path = std::path::PathBuf::from(handover_socket_path);
-                        match crate::daemon::handover_socket::connect_handover_socket(&path) {
-                            Ok((stream, _creds)) => {
-                                let sessions = self.terminal_service.list_sessions();
-                                let requested = sessions.len();
-                                let mut count = 0;
-                                let transfer_id = uuid::Uuid::new_v4().to_string();
-                                let mut seq = 1;
-                                for session_id in sessions {
-                                    if let Ok(export) = self.terminal_service.pty_manager().export_session(&session_id) {
-                                        if crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export).is_ok() {
-                                            count += 1;
-                                            seq += 1;
+                        if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
+                            daemon_error(format!("Failed to persist remote sessions before handover: {e}"))
+                        } else {
+                            let path = std::path::PathBuf::from(handover_socket_path);
+                            match crate::daemon::handover_socket::connect_handover_socket(&path) {
+                                Ok((stream, _creds)) => {
+                                    let sessions = self.terminal_service.pty_manager().list_sessions();
+                                    let requested = sessions.len();
+                                    let mut count = 0;
+                                    let mut failures: Vec<String> = Vec::new();
+                                    let transfer_id = uuid::Uuid::new_v4().to_string();
+                                    let mut seq = 1;
+                                    for session_id in sessions {
+                                        // A session dropped here dies when this predecessor retires: it
+                                        // has already promised the successor a handover, and nothing
+                                        // downstream can recover a session that was never sent. Name
+                                        // every casualty instead of silently skipping it.
+                                        match self.terminal_service.pty_manager().export_session(&session_id) {
+                                            Ok(export) => {
+                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
+                                                    Ok(()) => {
+                                                        count += 1;
+                                                        seq += 1;
+                                                    }
+                                                    Err(error) => {
+                                                        tracing::error!(
+                                                            session_id = %session_id,
+                                                            %error,
+                                                            "Failed to send a session to the successor; it will not survive this handover"
+                                                        );
+                                                        failures.push(format!("{session_id}: send failed: {error}"));
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                tracing::error!(
+                                                    session_id = %session_id,
+                                                    %error,
+                                                    "Failed to export a session for handover; it will not survive this handover"
+                                                );
+                                                failures.push(format!("{session_id}: export failed: {error}"));
+                                            }
                                         }
                                     }
+                                    let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                    // The gap between what this predecessor was asked for and what it
+                                    // could actually export is the shape of a lossy handover.
+                                    if !failures.is_empty() {
+                                        tracing::error!(
+                                            requested,
+                                            transferred = count,
+                                            lost = failures.len(),
+                                            casualties = %failures.join("; "),
+                                            "Handover will lose sessions: they could not be exported or sent"
+                                        );
+                                    }
+                                    tracing::info!(
+                                        requested,
+                                        transferred = count,
+                                        "Transferred sessions to the successor over the handover socket"
+                                    );
+                                    DaemonResponse::TransferSessionsOk {
+                                        transferred_count: count,
+                                        requested_count: requested,
+                                    }
                                 }
-                                let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
-                                // The gap between what this predecessor was asked for and what it
-                                // could actually export is the shape of a lossy handover.
-                                tracing::info!(
-                                    requested,
-                                    transferred = count,
-                                    "Transferred sessions to the successor over the handover socket"
-                                );
-                                DaemonResponse::TransferSessionsOk {
-                                    transferred_count: count,
-                                }
+                                Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
                             }
-                            Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
                         }
                     }
                     #[cfg(not(unix))]
@@ -3507,7 +3747,17 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::AbortHandover) => {
                     match self.handover_manager.abort_handover() {
-                        Ok(()) => DaemonResponse::AbortHandoverOk,
+                        Ok(()) => {
+                            let resumed = self
+                                .terminal_service
+                                .pty_manager()
+                                .resume_paused_readers();
+                            tracing::warn!(
+                                resumed_count = resumed,
+                                "Predecessor resumed serving {resumed} exported session(s) after AbortHandover"
+                            );
+                            DaemonResponse::AbortHandoverOk
+                        }
                         Err(e) => daemon_error(e),
                     }
                 }
@@ -3792,12 +4042,33 @@ impl DaemonServer {
             "Spawning successor daemon for handover"
         );
         tokio::spawn(async move {
+            // Capture the successor's output to a durable log. With `Stdio::null()` a failed
+            // handover left no record at all, which is exactly the state a lost-session
+            // investigation needs and cannot get after the fact.
+            let successor_log = Some(get_runtime_dir().join("handover-successor.log"));
+            let successor_stdout = successor_log
+                .as_ref()
+                .and_then(|path| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .ok()
+                })
+                .map(std::process::Stdio::from);
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon")
                 .arg("--handover-from")
                 .arg(&legacy_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
+                .stdin(std::process::Stdio::null());
+            match successor_stdout {
+                Some(target) => {
+                    cmd.stdout(target);
+                }
+                None => {
+                    cmd.stdout(std::process::Stdio::null());
+                }
+            }
             if let Err(e) = cmd.spawn() {
                 // The canonical listener is already gone by this point. Abandoning the loop
                 // here would strand every live session with no reachable socket, so keep
@@ -4122,6 +4393,7 @@ impl DaemonServer {
                 state: Cow::Borrowed(&snapshot.state),
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
                 provider_session: snapshot.provider_session.clone(),
+                detail: snapshot.detail.as_deref().map(Cow::Borrowed),
                 is_snapshot: true,
                 origin: snapshot.origin,
             };
@@ -4181,6 +4453,7 @@ impl DaemonServer {
                                         state: Cow::Borrowed(&report.state.state),
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
                                         provider_session: report.state.provider_session,
+                                        detail: report.state.detail.as_deref().map(Cow::Borrowed),
                                         is_snapshot: report.is_snapshot,
                                         origin: report.state.origin,
                                     };
@@ -4205,6 +4478,7 @@ impl DaemonServer {
                                                 state: Cow::Borrowed(&current.state),
                                                 agent: current.agent.as_deref().map(Cow::Borrowed),
                                                 provider_session: current.provider_session,
+                                                detail: current.detail.as_deref().map(Cow::Borrowed),
                                                 is_snapshot: true,
                                                 origin: current.origin,
                                             };
@@ -4432,6 +4706,124 @@ fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// A live handover on 2026-09-26 lost 35 of 55 sessions: the successor's receive loop stopped
+    /// silently at the first socket error and the mismatch was only warned about, so the commit
+    /// went ahead and the predecessor closed the PTY fds of everything it had not delivered.
+    #[test]
+    fn a_short_delivery_aborts_the_handover_instead_of_committing() {
+        // The shape of the incident: 55 offered, 20 delivered.
+        let verdict = super::handover_delivery_verdict(55, 20);
+        let reason = verdict.expect_err("a short delivery must abort");
+        assert!(reason.contains("55"), "names how many were offered: {reason}");
+        assert!(reason.contains("20"), "names how many arrived: {reason}");
+        assert!(reason.contains("35"), "names how many would be terminated: {reason}");
+
+        // Losing even one session is enough to refuse.
+        assert!(super::handover_delivery_verdict(1, 0).is_err());
+        assert!(super::handover_delivery_verdict(2, 1).is_err());
+
+        // A complete delivery commits, including the empty case.
+        assert!(super::handover_delivery_verdict(0, 0).is_ok());
+        assert!(super::handover_delivery_verdict(55, 55).is_ok());
+    }
+
+    /// The delivery check above cannot see a session the predecessor never managed to export.
+    ///
+    /// Observed in production on 2026-09-26: `requested=20 transferred=18`, then
+    /// `offered=18 accepted=18`, then commit. The two failed exports were absent from BOTH
+    /// sides of the offered/accepted comparison, so the gate reported a clean handover while
+    /// those sessions died with the predecessor's PTY master fds.
+    #[test]
+    fn sessions_that_failed_to_export_also_abort_the_handover() {
+        // The exact production shape: owned 20, exported 18, all 18 delivered.
+        let verdict = super::handover_delivery_verdict_owned(20, 18, 18);
+        let reason = verdict.expect_err("failed exports must abort the handover");
+        assert!(reason.contains("20"), "names how many were owned: {reason}");
+        assert!(reason.contains("18"), "names how many survived: {reason}");
+        assert!(reason.contains("2"), "names how many would be terminated: {reason}");
+
+        // The delivery shortfall is still caught, and reported as a delivery failure.
+        assert!(super::handover_delivery_verdict_owned(55, 55, 20).is_err());
+
+        // A predecessor that owned, exported and delivered everything commits.
+        assert!(super::handover_delivery_verdict_owned(20, 20, 20).is_ok());
+        assert!(super::handover_delivery_verdict_owned(0, 0, 0).is_ok());
+
+        // An older predecessor does not send `requested_count`, which arrives as 0. That must
+        // fall back to the delivery check rather than aborting every handover with such a peer.
+        assert!(super::handover_delivery_verdict_owned(0, 18, 18).is_ok());
+        assert!(super::handover_delivery_verdict_owned(0, 18, 17).is_err());
+    }
+
+    #[test]
+    fn handover_restorable_unexported_credits_only_listed_unexported_durable_ids() {
+        use std::collections::HashSet;
+
+        let listed = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+        ];
+        let exported: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let durable: HashSet<String> = ["s1", "s2", "x"].iter().map(|s| s.to_string()).collect();
+
+        // listed [a,b,c,s1,s2], exported {a,b,c}, durable {s1,s2,x} gives 2.
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable),
+            2
+        );
+
+        // An id that is exported AND durable is not counted.
+        let mut durable_with_a = durable.clone();
+        durable_with_a.insert("a".to_string());
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable_with_a),
+            2
+        );
+
+        // A durable id the predecessor did not list is not counted (x).
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable),
+            2
+        );
+
+        // A listed, unexported id that is not durable is not counted.
+        let listed_with_unknown = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+            "not_durable".to_string(),
+        ];
+        assert_eq!(
+            super::handover_restorable_unexported(&listed_with_unknown, &exported, &durable),
+            2
+        );
+
+        // A duplicate in listed counts once.
+        let listed_with_dups = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+        ];
+        assert_eq!(
+            super::handover_restorable_unexported(&listed_with_dups, &exported, &durable),
+            2
+        );
+
+        // Integration of the numbers:
+        // 27 owned, 3 restorable => effective_owned = 24.
+        assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(3), 24, 24).is_ok());
+        // 27 owned, 2 restorable => effective_owned = 25 > 24 accepted => abort.
+        assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(2), 24, 24).is_err());
+    }
+
     use super::*;
     use crate::terminal::output_hub::OutputChunk;
     use tempfile::tempdir;
@@ -6073,6 +6465,7 @@ mod tests {
             state: "working".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         assert_eq!(
@@ -6153,6 +6546,7 @@ mod tests {
             state: "working".to_string(),
             agent: Some("codex".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         server.agent_states.publish_canonical(AgentState {
@@ -6160,6 +6554,7 @@ mod tests {
             state: "blocked".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
 
@@ -6217,6 +6612,7 @@ mod tests {
                 state: "working".to_string(),
                 agent: Some("omo".to_string()),
                 provider_session: None,
+                detail: None,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
             });
 
@@ -6317,6 +6713,7 @@ mod tests {
                 "working".to_string(),
                 Some("omo".to_string()),
                 None,
+                None,
             ))
         );
         let valid = DaemonServer::parse_agent_state_report(
@@ -6344,8 +6741,18 @@ mod tests {
             DaemonServer::parse_agent_state_report(
                 r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#
             ),
-            Some(("s1".to_string(), "idle".to_string(), None, None)),
+            Some(("s1".to_string(), "idle".to_string(), None, None, None)),
             "agent is optional so older extension copies keep working"
+        );
+        let with_detail = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"blocked","agent":"omo","detail":"Auth method — Which library should we use?"}"#,
+        )
+        .expect("a blocked report carries the question text");
+        assert_eq!(with_detail.1, "blocked");
+        assert_eq!(
+            with_detail.4.as_deref(),
+            Some("Auth method — Which library should we use?"),
+            "the question text must survive parsing, or the inbox row cannot show it"
         );
         for rejected in [
             r#"{"type":"agentState","sessionId":"s1","state":"bogus"}"#,

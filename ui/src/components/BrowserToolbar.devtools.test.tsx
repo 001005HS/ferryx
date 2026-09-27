@@ -1,24 +1,32 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import { invoke } from "@tauri-apps/api/core";
-import * as browserTauri from "../lib/browserTauri";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserTab } from "../lib/types";
 import { BrowserToolbar } from "./BrowserToolbar";
 
-vi.mock("@tauri-apps/api/core", () => ({
+const { invoke } = vi.hoisted(() => ({
   invoke: vi.fn(async () => undefined),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => undefined),
 }));
 
-const devtoolsSpy = vi.spyOn(browserTauri, "openBrowserDevtools");
-const elementPickerSpy = vi.spyOn(browserTauri, "injectBrowserElementPicker");
-const removePickerSpy = vi.spyOn(browserTauri, "removeBrowserElementPicker");
-const finishPickerSpy = vi.spyOn(browserTauri, "finishBrowserElementPick");
-const capabilitySpy = vi.spyOn(browserTauri, "getBrowserSnapshotCapability");
+vi.mock("../lib/browserTauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/browserTauri")>()),
+}));
+
+const browserTauri = await import("../lib/browserTauri");
+let devtoolsSpy = vi.spyOn(browserTauri, "openBrowserDevtools");
+let elementPickerSpy = vi.spyOn(browserTauri, "injectBrowserElementPicker");
+let removePickerSpy = vi.spyOn(browserTauri, "removeBrowserElementPicker");
+let finishPickerSpy = vi.spyOn(browserTauri, "finishBrowserElementPick");
+let capabilitySpy = vi.spyOn(browserTauri, "getBrowserSnapshotCapability");
+
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { BrowserToolbar } = await import("./BrowserToolbar");
 
 const tab: BrowserTab = {
   kind: "browser",
@@ -49,14 +57,17 @@ function renderToolbar(extra?: {
 describe("BrowserToolbar devtools", () => {
   beforeEach(() => {
     cleanup();
-    vi.mocked(invoke).mockClear();
+    invoke.mockClear();
+    devtoolsSpy = vi.spyOn(browserTauri, "openBrowserDevtools");
+    elementPickerSpy = vi.spyOn(browserTauri, "injectBrowserElementPicker");
+    removePickerSpy = vi.spyOn(browserTauri, "removeBrowserElementPicker");
+    finishPickerSpy = vi.spyOn(browserTauri, "finishBrowserElementPick");
+    capabilitySpy = vi.spyOn(browserTauri, "getBrowserSnapshotCapability");
     devtoolsSpy.mockClear();
     elementPickerSpy.mockClear();
     removePickerSpy.mockClear();
     finishPickerSpy.mockClear();
     capabilitySpy.mockClear();
-    // Default to native snapshot capture being available, which is the macOS behavior these
-    // tests exercise; the platform-limited case overrides this per test.
     capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"] });
     localStorage.clear();
   });

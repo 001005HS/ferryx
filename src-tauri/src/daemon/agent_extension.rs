@@ -138,6 +138,53 @@ mod tests {
             "a rotated provider session must publish even when the activity state repeats"
         );
     }
+
+    #[test]
+    fn bundled_extension_listens_to_the_events_senpi_actually_emits() {
+        // The ask machinery emits `herdr:blocked`; `ask-user:asked` is the same machine's own
+        // namespace and carries `waitForAnswer`. A subscription to a name nobody emits leaves
+        // the blocked count permanently zero, so an agent waiting on the user looks idle.
+        assert!(
+            EXTENSION_SOURCE.contains("\"herdr:blocked\""),
+            "extension must subscribe to the event the ask machinery emits"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("\"ask-user:asked\""),
+            "extension must read waitForAnswer from ask-user:asked"
+        );
+        assert!(
+            !EXTENSION_SOURCE.contains("\"ferryx:blocked\""),
+            "no producer emits ferryx:blocked; subscribing to it silently disables blocked state"
+        );
+    }
+
+    #[test]
+    fn bundled_extension_ignores_questions_the_agent_keeps_working_through() {
+        // `waitForAnswer: false` means the question stays open while the agent keeps working, so
+        // counting it would show a false "needs you" row for a session that is not waiting.
+        assert!(
+            EXTENSION_SOURCE.contains("waitForAnswer === false"),
+            "a non-blocking question must be excluded from the blocked count"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("nonBlockingIds"),
+            "the non-blocking set must exist so the later release does not unpublish a real block"
+        );
+    }
+
+    #[test]
+    fn bundled_extension_sends_the_blocked_detail() {
+        // The inbox shows the question text on the row; without `detail` on the wire the row can
+        // only name a state word, and the daemon drops an unknown field silently.
+        assert!(
+            EXTENSION_SOURCE.contains("detail"),
+            "the extension must send the blocked detail"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("questionLabel"),
+            "the detail must be derived from the question, not from a bare state word"
+        );
+    }
 }
 
 #[cfg(test)]
