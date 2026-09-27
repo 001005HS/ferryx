@@ -35,7 +35,7 @@ type TabBarProps = {
   onRenameTab?: (id: string, newLabel: string) => void;
   onTogglePin?: (id: string, pinned: boolean) => void;
   onResetAgentState?: (tabId: string) => void;
-  /** Session that the tab menu's Suspend/Restart act on. Defaults to the tab's own session. */
+  /** Session that the tab menu's Restart acts on. Defaults to the tab's own session. */
   sessionIdForLifecycle?: (tab: WorkspaceTab) => string | null;
   /** Terminal-pane split. Intentionally separate from whole-tab group split. */
   onSplitRight?: (tabId: string) => void;
@@ -331,9 +331,7 @@ export function TabBar({
     if (tab.kind !== "browser" && tab.kind !== "file") {
       const lifecycleSessionId = sessionIdForLifecycle?.(tab) ?? tab.sessionId;
       items.push({ kind: "separator" });
-      items.push({ kind: "item", id: "suspend-session", label: "Suspend Session" });
       items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
-      actions["suspend-session"] = () => requestSessionLifecycleAction("suspend", lifecycleSessionId);
       actions["restart-session"] = () => {
         onActivate(tab.id);
         requestSessionLifecycleAction("restart", lifecycleSessionId);

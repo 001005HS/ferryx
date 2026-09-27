@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe("TabBar lifecycle actions", () => {
-  it("(a) with sessionIdForLifecycle, invoking suspend-session and restart-session targets the focused pane session", () => {
+  it("(a) with sessionIdForLifecycle, invoking restart-session targets the focused pane session and suspend-session is absent", () => {
     const tab1 = terminalTab("tab-1", "Terminal 1");
     const onActivate = vi.fn();
     render(
@@ -113,31 +113,29 @@ describe("TabBar lifecycle actions", () => {
     );
 
     fireEvent.contextMenu(getTab("Terminal 1"), { clientX: 100, clientY: 20 });
-    clickMenuItem("suspend-session");
-    expect(lifecycle.request).toHaveBeenCalledWith("suspend", "session-pane-2");
+    expect(findEntryRecursively(menuItems(), "suspend-session")).toBeUndefined();
 
-    lifecycle.request.mockClear();
-
-    fireEvent.contextMenu(getTab("Terminal 1"), { clientX: 100, clientY: 20 });
     clickMenuItem("restart-session");
     expect(onActivate).toHaveBeenCalledWith("tab-1");
     expect(lifecycle.request).toHaveBeenCalledWith("restart", "session-pane-2");
   });
 
-  it("(b) without sessionIdForLifecycle, suspend-session uses the tab's own sessionId", () => {
+  it("(b) without sessionIdForLifecycle, restart-session uses the tab's own sessionId", () => {
     const tab1 = terminalTab("tab-1", "Terminal 1");
+    const onActivate = vi.fn();
     render(
       <TabBar
         tabs={[tab1]}
         activeTabId="tab-1"
-        onActivate={vi.fn()}
+        onActivate={onActivate}
         onClose={vi.fn()}
         onAdd={vi.fn()}
       />,
     );
 
     fireEvent.contextMenu(getTab("Terminal 1"), { clientX: 100, clientY: 20 });
-    clickMenuItem("suspend-session");
-    expect(lifecycle.request).toHaveBeenCalledWith("suspend", "session-tab-1");
+    clickMenuItem("restart-session");
+    expect(onActivate).toHaveBeenCalledWith("tab-1");
+    expect(lifecycle.request).toHaveBeenCalledWith("restart", "session-tab-1");
   });
 });
