@@ -273,7 +273,7 @@ async fn deadline_terminates_and_reaps_probe() {
         .unwrap();
     let pid = child.id().unwrap().to_string();
     assert_eq!(
-        collect_output(child, Duration::from_millis(20))
+        collect_output(child, Duration::from_millis(20), PROBE_OUTPUT_LIMIT)
             .await
             .unwrap_err()
             .code,

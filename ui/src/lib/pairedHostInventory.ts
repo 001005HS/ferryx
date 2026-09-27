@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { bootTrace } from "./tauri";
 import { remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY, type HostEndpoint, type RemoteHostStore } from "../state/remoteHostStore";
 
 // The built-in relay is the product default: pairing must work with the PIN
@@ -233,6 +234,35 @@ function endpoint(view: HostView): HostEndpoint {
     generation: view.generation, grantScope: view.grantScope, authStatus: view.authStatus, online: view.online };
 }
 
+const ALLOWED_FAILURE_CODES = new Set([
+  "DAEMON_UNAVAILABLE", "PAIRED_HOST_UNAVAILABLE", "HOST_UNAVAILABLE", "TIMEOUT",
+  "UNAUTHORIZED", "MACHINE_GRANT_REQUIRED", "INVALID_RELAY_ORIGIN", "WRONG_RELAY",
+  "PIN_EXPIRED", "EXPIRED_PIN", "INVALID_PIN", "PAIRED_HOST_STALE_GENERATION",
+  "STALE_HOST_GENERATION", "PAIRED_HOST_INVALID_RESPONSE", "INVENTORY_UNAVAILABLE",
+  "INVALID_HOST_VIEW", "MALFORMED_CAPABILITIES", "MALFORMED_INVENTORY",
+]);
+
+function sanitizeFailureCode(err: unknown): string {
+  if (err && typeof err === "object") {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string" && ALLOWED_FAILURE_CODES.has(code)) return code;
+    if (err instanceof Error && ALLOWED_FAILURE_CODES.has(err.message)) return err.message;
+  }
+  if (typeof err === "string" && ALLOWED_FAILURE_CODES.has(err)) return err;
+  return "PAIRED_HOST_UNAVAILABLE";
+}
+
+function recordInventoryUnavailable(operation: "list" | "capabilities", err: unknown): void {
+  try {
+    void bootTrace("paired.inventory.unavailable", { operation, code: sanitizeFailureCode(err) })
+      ?.catch(() => {
+        // Best-effort diagnostic logging; swallow rejection when backend/Tauri is unavailable
+      });
+  } catch {
+    // Best-effort diagnostic logging; swallow synchronous exceptions
+  }
+}
+
 /** Native owns credentials and transport cancellation; this adapter fences renderer callbacks. */
 export function createPairedHostInventory(store: RemoteHostStore, commands = nativePairedHostCommands, storage?: Storage) {
   let revision = 0;
@@ -353,7 +383,12 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
         const unlisten = await listen<InventoryChangeEvent>("paired_host_inventory_changed", (e) => {
           handleNativeEvent(e.payload);
         });
+        const refreshIfUnavailable = () => {
+          if (store.getState().nativeStatus === "unavailable") void refresh();
+        };
+        window.addEventListener("focus", refreshIfUnavailable);
         appWideUnlisten = () => {
+          window.removeEventListener("focus", refreshIfUnavailable);
           unlisten();
           appWideUnlisten = null;
         };
@@ -368,9 +403,32 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
   async function refresh() {
     const request = ++refreshRequest;
     const started = revision;
+    let failingOp: "list" | "capabilities" = "capabilities";
+    let failureError: unknown = null;
     try {
-      const [views, capability] = await Promise.all([commands.list(), commands.capabilities()]);
-      if (capability.pairedHostInventoryV1 !== true) throw new Error("INVENTORY_UNAVAILABLE");
+      const [views, capability] = await Promise.all([
+        commands.list().catch(err => {
+          if (!failureError) {
+            failingOp = "list";
+            failureError = err;
+          }
+          throw err;
+        }),
+        commands.capabilities().catch(err => {
+          if (!failureError) {
+            failingOp = "capabilities";
+            failureError = err;
+          }
+          throw err;
+        }),
+      ]);
+      if (!capability || capability.pairedHostInventoryV1 !== true) {
+        failingOp = "capabilities";
+        failureError = "INVENTORY_UNAVAILABLE";
+        throw new Error("INVENTORY_UNAVAILABLE");
+      }
+      failingOp = "list";
+      failureError = "INVALID_HOST_VIEW";
       const validViews = views.filter(v => {
         const gen = BigInt(v.generation);
         const fenced = fencedGenerations.get(v.hostId);
@@ -393,7 +451,12 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       proxyAvailable = capability.pairedDaemonProxyV1 === true;
       store.setHosts(hosts);
       store.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
-    } catch { if (request === refreshRequest && started === revision) unavailable(); }
+    } catch {
+      if (request === refreshRequest && started === revision) {
+        unavailable();
+        recordInventoryUnavailable(failingOp, failureError);
+      }
+    }
   }
 
   async function pair(request: PairHostRequest, onPaired?: (host: HostEndpoint) => void): Promise<PairResult> {

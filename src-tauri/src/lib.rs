@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_detect;
+pub mod agent_transcript;
 pub mod browser;
 pub mod cli;
 pub mod clipboard_image;

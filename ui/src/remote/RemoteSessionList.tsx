@@ -385,7 +385,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       {selectorOpen ? (
-        <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
+        <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-input text-foreground shadow-xl" role="dialog" aria-label="Workspace context">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div>
               <h2 className="text-sm font-semibold">Choose worktree</h2>
@@ -394,7 +394,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               type="button"
               aria-label="Close workspace context"
               onClick={() => onSelectorOpenChange(false)}
-              className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <X className="size-4" aria-hidden="true" />
             </button>
@@ -455,7 +455,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                               onSelect(option);
                               focusTerminalInput();
                             }}
-                            className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                            className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
                           >
                             <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
                               {loading ? (
@@ -510,7 +510,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         const currentOrdinal = tabs.length ? currentIndex + 1 : 0;
 
         return (
-          <div className="flex min-w-0 shrink-0 items-center border-b border-border bg-card px-1.5 py-0.5">
+          <div className="flex min-w-0 shrink-0 items-center border-b border-border bg-input px-1.5 py-0.5">
             <div className="flex items-center gap-0.5 shrink-0 pr-1 border-r border-border">
               <button
                 type="button"
@@ -529,7 +529,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                     focusTerminalInput();
                   }
                 }}
-                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
               >
                 <ChevronLeft className="size-3.5" aria-hidden="true" />
               </button>
@@ -556,7 +556,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                     focusTerminalInput();
                   }
                 }}
-                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
               >
                 <ChevronRight className="size-3.5" aria-hidden="true" />
               </button>
@@ -605,8 +605,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                     }}
                     className={`flex h-7 min-w-0 max-w-40 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
                       isActive
-                        ? "bg-accent text-accent-foreground font-semibold"
-                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        ? "bg-secondary text-foreground font-semibold"
+                        : "text-muted-foreground hover:bg-card hover:text-foreground"
                     }`}
                   >
                     {logo ? (
@@ -664,7 +664,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         ) : (
           <div className="flex flex-1 items-center justify-center p-6">
             <div className="max-w-sm text-center">
-              <span className="mx-auto flex size-12 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground">
+              <span className="mx-auto flex size-12 items-center justify-center rounded-lg border border-border bg-input text-muted-foreground">
                 <TerminalIcon className="size-5" aria-hidden="true" />
               </span>
               <h2 className="mt-4 text-sm font-semibold text-foreground">No focused terminal</h2>

@@ -355,6 +355,35 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
+        let current = self.agent_states.current(session_id)?;
+        match current.state.trim().to_ascii_lowercase().as_str() {
+            "working" => Some("working".to_string()),
+            "waiting" | "blocked" => Some("waiting".to_string()),
+            "done" => Some("done".to_string()),
+            _ => None,
+        }
+    }
+
+    /// The agent's own session identity, when its extension reported one. A transcript file is
+    /// named after that id, so preferring it resolves a session to its own conversation instead of
+    /// to whichever transcript in the same cwd happened to be written last.
+    pub fn session_provider_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::daemon::protocol::AgentProviderSession> {
+        self.agent_states.current(session_id)?.provider_session
+    }
+
+    /// Durable store of paired-host sessions, keyed by `descriptor.backendSessionId`.
+    ///
+    /// That key is the same id this service and the gateway route by, because a remote session is
+    /// registered in the terminal hub under it. Callers that need a session's host read the store
+    /// rather than holding the live runtime, which is owned by the daemon.
+    pub fn remote_sessions_store_path(&self) -> &std::path::Path {
+        &self.remote_sessions_path
+    }
+
     pub(crate) fn max_machine_sessions(&self) -> usize {
         if let Ok(val) = std::env::var("FERRYX_MAX_MACHINE_SESSIONS") {
             if let Ok(parsed) = val.parse::<usize>() {

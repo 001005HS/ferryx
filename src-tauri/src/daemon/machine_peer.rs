@@ -1,5 +1,6 @@
 //! Machine gateway negotiation is explicit; pre-contract owners fail closed.
 use super::{LegacyPeer, LegacyStream};
+use crate::daemon::client::read_transport_token;
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -59,6 +60,7 @@ impl LegacyPeer {
             for request in [
                 DaemonRequest::Handshake {
                     version: DAEMON_PROTOCOL_VERSION,
+                    token: read_transport_token(),
                 },
                 DaemonRequest::MachineGateway,
             ] {

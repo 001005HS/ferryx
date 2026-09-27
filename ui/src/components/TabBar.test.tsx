@@ -1,12 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
 import { saveBrowserSettings } from "../lib/browserSettings";
 import { clearSleepingSessions } from "../lib/sessionLifecycle";
-import type { WorkspaceTab } from "../lib/types";
+import type { SystemPermissionsStatus, WorkspaceTab } from "../lib/types";
 import { TabBar } from "./TabBar";
 import { SortableTab } from "./tab-dnd/SortableTab";
 
@@ -40,6 +40,31 @@ vi.mock("../lib/nativeMenu", () => ({
     },
   ),
 }));
+
+const mockTauri = vi.hoisted(() => ({
+  getSystemPermissionsStatus: vi.fn(),
+}));
+
+vi.mock("../lib/tauri", async () => {
+  const actual = await vi.importActual<typeof import("../lib/tauri")>("../lib/tauri");
+  return {
+    ...actual,
+    getSystemPermissionsStatus: () => mockTauri.getSystemPermissionsStatus(),
+  };
+});
+
+/**
+ * Reports `platform` as the HOST platform and resolves once TabBar has actually asked
+ * for it, so tests await the exact IPC request instead of a fixed delay.
+ */
+function stubHostPlatform(platform: string) {
+  return new Promise<void>((resolve) => {
+    mockTauri.getSystemPermissionsStatus.mockImplementation(() => {
+      resolve();
+      return Promise.resolve({ platform } as SystemPermissionsStatus);
+    });
+  });
+}
 
 function menuItems() {
   if (!nativeMenu.lastCall) throw new Error("native menu was not opened");
@@ -80,6 +105,12 @@ function clickMenuItem(idOrLabel: string) {
     nativeMenu.lastCall?.onAction(menuItem(idOrLabel).id);
   });
 }
+
+beforeEach(() => {
+  // Unresolved by default: tests that do not care about the host platform must not
+  // receive a state update outside act().
+  mockTauri.getSystemPermissionsStatus.mockImplementation(() => new Promise(() => {}));
+});
 
 afterEach(() => {
   cleanup();
@@ -520,17 +551,19 @@ describe("TabBar", () => {
     expect(tabBarSource).toMatch(/<SortableContext\s+items=\{sortableItems\}/);
   });
 
-  it("offers Windows terminal shell options in the new-tab menu on Windows and forwards selected shell to onAdd", () => {
+  it("offers Windows terminal shell options in the new-tab menu on a Windows host and forwards selected shell to onAdd", async () => {
+    // The browser OS is deliberately the opposite of the host: the menu must follow the host.
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
 
     try {
-      Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+      Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
       Object.defineProperty(navigator, "userAgent", {
-        value: "Windows NT 10.0; Win64; x64",
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
         configurable: true,
       });
 
+      const ready = stubHostPlatform("windows");
       const onAdd = vi.fn();
       render(
         <TabBar
@@ -542,6 +575,9 @@ describe("TabBar", () => {
           onAdd={onAdd}
         />,
       );
+      await act(async () => {
+        await ready;
+      });
 
       fireEvent.click(screen.getByRole("button", { name: "New tab" }));
       expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
@@ -576,21 +612,23 @@ describe("TabBar", () => {
     }
   });
 
-  it("does not offer Windows shell options in the new-tab menu on non-Windows platforms", () => {
+  it.each(["macos", "linux"])("does not offer Windows shell options in the new-tab menu on a %s host", async (hostPlatform) => {
+    // The browser OS is deliberately the opposite of the host: the menu must follow the host.
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
 
     try {
-      Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+      Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
       Object.defineProperty(navigator, "userAgent", {
-        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        value: "Windows NT 10.0; Win64; x64",
         configurable: true,
       });
 
+      const ready = stubHostPlatform(hostPlatform);
       const onAdd = vi.fn();
       render(
         <TabBar
-          groupId="group-mac"
+          groupId="group-non-win"
           tabs={[terminalTab("tab-1", "main")]}
           activeTabId="tab-1"
           onActivate={vi.fn()}
@@ -598,6 +636,9 @@ describe("TabBar", () => {
           onAdd={onAdd}
         />,
       );
+      await act(async () => {
+        await ready;
+      });
 
       fireEvent.click(screen.getByRole("button", { name: "New tab" }));
       expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");

@@ -184,7 +184,7 @@ export const AccountMachinesPage: React.FC<AccountMachinesPageProps> = ({
                           online
                         </span>
                       ) : (
-                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 rounded">
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-[#818181]/10 text-[#838383] border border-[#818181]/20 rounded">
                           offline
                         </span>
                       )}

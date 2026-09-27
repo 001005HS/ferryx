@@ -20,7 +20,8 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { resolveLocalSessionKey, type DesktopWorkspace } from "./features/ferryx/control/desktopInventory";
+import { buildDesktopInventory, resolveLocalSessionKey, type DesktopWorkspace } from "./features/ferryx/control/desktopInventory";
+import type { Agent } from "./features/ferryx/control/client";
 import type { AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -1569,6 +1570,13 @@ function WorkspaceApp({
   // Projects whose workspace state could not be resolved are reported instead of hidden, so the
   // inbox can say the list is partial rather than claiming it is complete.
   const unavailableHosts = useMemo( () => Array.from( new Set( projects .filter((project) => project.workspaceId !== activeProject.workspaceId) .filter((project) => !(getHmrWorkspaceState(project.workspaceId) ?? getWorkspaceSnapshot(project.workspaceId))) .map((project) => (project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") && project.target?.hostId ? project.target.hostId : "local") ) ), [activeProject.workspaceId, projects], );
+  const attentionRowsInventory = useMemo(
+    () => ({
+      agents: buildDesktopInventory(desktopWorkspaces, unavailableHosts).items,
+      localKeyOf: (agent: Agent) => resolveLocalSessionKey(agent, desktopWorkspaces),
+    }),
+    [desktopWorkspaces, unavailableHosts],
+  );
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -2934,17 +2942,7 @@ function WorkspaceApp({
           onResetAgentState={handleResetWorktreeAgentState}
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
-          attentionInventory={{
-            workspaces: desktopWorkspaces,
-            unavailableHosts,
-            onSelectAgent: (agent) => {
-              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
-              handleNotificationTarget({
-                workspaceId: agent.workspaceId,
-                sessionId: localKey ?? agent.target.backendSessionId,
-              });
-            },
-          }}
+          attentionInventory={attentionRowsInventory}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -3130,17 +3128,7 @@ function WorkspaceApp({
           open={true}
           onClose={handleCloseNotificationCenter}
           onNavigateToSession={handleNotificationTarget}
-          attentionInventory={{
-            workspaces: desktopWorkspaces,
-            unavailableHosts,
-            onSelectAgent: (agent) => {
-              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
-              handleNotificationTarget({
-                workspaceId: agent.workspaceId,
-                sessionId: localKey ?? agent.target.backendSessionId,
-              });
-            },
-          }}
+          attentionInventory={attentionRowsInventory}
           isSessionNavigable={(workspaceId, sessionId) => {
             if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
             const snapshot = workspaceId === activeProjectRef.current.workspaceId

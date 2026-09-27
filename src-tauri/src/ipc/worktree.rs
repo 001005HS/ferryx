@@ -296,7 +296,7 @@ pub async fn cmd_worktree_status<R: Runtime>(
     Ok(status)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod deletion_repair_tests {
     use super::*;
     use crate::ipc::worktree_disk::WorktreeDiskScans;

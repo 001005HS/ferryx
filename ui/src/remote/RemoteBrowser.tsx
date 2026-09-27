@@ -280,7 +280,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
 
   return (
     <div
-      className={`relative flex flex-col w-full h-full bg-neutral-950 text-white overflow-hidden select-none ${className}`}
+      className={`relative flex flex-col w-full h-full bg-[#0a0a0a] text-[#f5f5f5] overflow-hidden select-none ${className}`}
     >
       {/* Controls slot for Phase 6 composition */}
       {controls && (
@@ -306,7 +306,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             onLoad={() => handleImageLoad(imageUrl, frame)}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center text-neutral-500 text-sm">
+          <div className="flex flex-col items-center justify-center text-[#818181] text-sm">
             {status === "opening" && <span>Connecting to remote browser...</span>}
             {status === "ready" && <span>Waiting for screencast stream...</span>}
             {status === "paused" && (
@@ -322,27 +322,27 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
         {status === "paused" && imageUrl && (
           <div
             data-testid="remote-browser-paused-badge"
-            className="absolute top-2 right-2 px-2 py-1 bg-amber-900/80 text-amber-200 text-xs rounded font-medium pointer-events-none"
+            className="absolute top-2 right-2 px-2 py-1 bg-[#ffb900]/15 text-[#ffb900] border border-[#ffb900]/30 text-xs rounded font-medium pointer-events-none"
           >
             Paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
           </div>
         )}
 
         {status === "opening" && imageUrl && (
-          <div className="absolute top-2 right-2 px-2 py-1 bg-blue-900/80 text-blue-200 text-xs rounded font-medium pointer-events-none">
+          <div className="absolute top-2 right-2 px-2 py-1 bg-[#346bf1]/15 text-[#346bf1] border border-[#346bf1]/30 text-xs rounded font-medium pointer-events-none">
             Reconnecting...
           </div>
         )}
 
         {status === "closed" && (
           <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center p-4 z-20">
-            <p className="text-neutral-300 mb-2">
+            <p className="text-[#f5f5f5] mb-2">
               {error ? error.message : "Connection closed"}
             </p>
             <button
               type="button"
               onClick={reconnect}
-              className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-sm font-medium transition"
+              className="px-3 py-1.5 bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] rounded text-sm font-medium transition"
             >
               Reconnect
             </button>

@@ -12,6 +12,8 @@ import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 let statusSubscriber: ((status: any) => void) | null = null;
 const mockDownloadAndInstallUpdate = vi.fn().mockResolvedValue(undefined);
 
+const mockUpdatesManagedExternally = vi.fn().mockResolvedValue(false);
+
 vi.mock("./updater", () => ({
   subscribeUpdateStatus: vi.fn((listener: (status: any) => void) => {
     statusSubscriber = listener;
@@ -20,6 +22,7 @@ vi.mock("./updater", () => ({
     };
   }),
   downloadAndInstallUpdate: () => mockDownloadAndInstallUpdate(),
+  updatesManagedExternally: () => mockUpdatesManagedExternally(),
 }));
 
 const mockToast = {
@@ -60,6 +63,7 @@ describe("updateToast", () => {
   beforeEach(() => {
     storage = createMockStorage();
     vi.clearAllMocks();
+    mockUpdatesManagedExternally.mockResolvedValue(false);
     statusSubscriber = null;
   });
 
@@ -160,8 +164,19 @@ describe("updateToast", () => {
   });
 
   describe("initUpdateToasts", () => {
-    it("subscribes and handles status changes, allowing unsubscription", () => {
+    it("does not subscribe when updates are managed externally", async () => {
+      mockUpdatesManagedExternally.mockResolvedValueOnce(true);
       const unsub = initUpdateToasts();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(statusSubscriber).toBeNull();
+      unsub();
+    });
+
+    it("subscribes and handles status changes, allowing unsubscription", async () => {
+      const unsub = initUpdateToasts();
+      await Promise.resolve();
+      await Promise.resolve();
       expect(statusSubscriber).toBeTypeOf("function");
 
       statusSubscriber?.({ state: "available", version: "2026.9.1" });

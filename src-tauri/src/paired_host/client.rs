@@ -372,6 +372,24 @@ fn is_relay_transport(url: &Url) -> bool {
         .is_some_and(|first| first == "host")
 }
 
+fn classify_content_type(header: Option<&reqwest::header::HeaderValue>) -> &'static str {
+    match header.and_then(|v| v.to_str().ok()) {
+        Some(v) => {
+            let primary = v.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            if primary == "application/json" {
+                "json"
+            } else if primary.starts_with("text/") {
+                "text"
+            } else if !primary.is_empty() {
+                "other"
+            } else {
+                "none"
+            }
+        }
+        None => "none",
+    }
+}
+
 fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
         let mut error = project_remote_error(envelope.error);
@@ -447,6 +465,76 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     let mut details = serde_json::Map::new();
     details.insert("status".into(), serde_json::json!(status.as_u16()));
     details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+    let retryable = matches!(status.as_u16(), 429 | 503 | 504);
+    let machine_error = m::MachineError {
+        code: code.to_string(),
+        message,
+        retryable,
+        request_id: String::new(),
+        details,
+    };
+    ClientError {
+        code: code.to_string(),
+        request_id: None,
+        machine_error: Some(machine_error),
+        ambiguous: false,
+    }
+}
+
+fn sanitize_relay_stage(raw: &str) -> Option<&'static str> {
+    match raw {
+        crate::remote::relay_server::RELAY_STAGE_DATA_PAIRING_TIMEOUT => {
+            Some(crate::remote::relay_server::RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        }
+        crate::remote::relay_server::RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT => {
+            Some(crate::remote::relay_server::RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT)
+        }
+        _ => None,
+    }
+}
+
+fn map_operation_http_error(
+    status: reqwest::StatusCode,
+    content_type: Option<&reqwest::header::HeaderValue>,
+    relay_stage: Option<&str>,
+    bytes: &[u8],
+) -> ClientError {
+    if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
+        let error = project_remote_error(envelope.error);
+        return ClientError {
+            code: error.code.clone(),
+            request_id: Some(error.request_id.clone()),
+            machine_error: Some(error),
+            ambiguous: false,
+        };
+    }
+    let code = match status.as_u16() {
+        401 => "UNAUTHORIZED",
+        403 => "PERMISSION_DENIED",
+        404 => "NOT_FOUND",
+        429 => "RATE_LIMITED",
+        502 => "HOST_UNAVAILABLE",
+        503 => "MACHINE_SERVICE_UNAVAILABLE",
+        504 => "TIMEOUT",
+        400 => "INVALID_REQUEST",
+        _ => "PAIRED_HOST_REMOTE_ERROR",
+    };
+    let message = format!(
+        "The paired host operation failed with HTTP status {}",
+        status.as_u16()
+    );
+    let mut details = serde_json::Map::new();
+    details.insert("status".into(), serde_json::json!(status.as_u16()));
+    details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+    details.insert(
+        "contentTypeClass".into(),
+        serde_json::json!(classify_content_type(content_type)),
+    );
+    if status.as_u16() == 504 {
+        if let Some(stage) = relay_stage {
+            details.insert("relayStage".into(), serde_json::json!(stage));
+        }
+    }
     let retryable = matches!(status.as_u16(), 429 | 503 | 504);
     let machine_error = m::MachineError {
         code: code.to_string(),
@@ -835,15 +923,21 @@ impl MachineClient {
                 let limit=if directory {m::DIRECTORY_JSON_MAX_BYTES} else {m::MACHINE_JSON_MAX_BYTES};
                 if response.content_length().is_some_and(|n| n>limit as u64) { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); }
                 if status.as_u16()==204 { return Ok(b"null".to_vec()); }
-                let json=response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(';').next()==Some("application/json"));
-                if !json { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+                let json=response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(';').next().map(str::trim)==Some("application/json"));
+                if status.is_success() && !json { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+                let content_type = response.headers().get("content-type").cloned();
+                let relay_stage = response
+                    .headers()
+                    .get(crate::remote::relay_server::RELAY_STAGE_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(sanitize_relay_stage);
                 let bytes=tokio::time::timeout(Duration::from_secs(budget),async {
                     let mut bytes=Vec::new();
                     while let Some(chunk)=response.chunk().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))? {
                         if bytes.len()+chunk.len()>limit { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); } bytes.extend_from_slice(&chunk);
                     } Ok(bytes)
                 }).await.map_err(|_| ClientError::local("TIMEOUT"))??;
-                if !status.is_success() { let envelope: m::ErrorEnvelope=decode(&bytes)?; let error=project_remote_error(envelope.error); return Err(ClientError { code: error.code.clone(), request_id: Some(error.request_id.clone()), machine_error:Some(error), ambiguous:false }); }
+                if !status.is_success() { return Err(map_operation_http_error(status, content_type.as_ref(), relay_stage, &bytes)); }
                 Ok(bytes)
             })=> result.map_err(|_|ClientError::local("TIMEOUT"))?
         }

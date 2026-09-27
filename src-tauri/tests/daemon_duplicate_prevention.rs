@@ -37,6 +37,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut connection = BufReader::new(stream);
     let request = DaemonRequest::Handshake {
         version: DAEMON_PROTOCOL_VERSION,
+        token: None,
     };
     let wire = serde_json::to_string(&request)? + "\n";
     connection.get_mut().write_all(wire.as_bytes()).await?;

@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AttentionAskPanel } from "./notification/AttentionAskPanel";
+
 import {
   readAgentHistory,
   searchAgentHistory,
@@ -263,6 +265,10 @@ export function AgentHistoryDialog({
             </button>
           </div>
         </header>
+
+        <section className="border-b border-border/80 bg-muted/10" aria-label="Ask past conversations">
+          <AttentionAskPanel className="flex min-h-0 flex-col" />
+        </section>
 
         <div className="border-b border-border/80 bg-muted/20 px-5 py-3">
           <form

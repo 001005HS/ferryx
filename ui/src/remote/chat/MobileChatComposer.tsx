@@ -8,10 +8,6 @@ import {
   FileText,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
-import {
-  MobileChatQuickActions,
-  type QuickActionItem,
-} from "./MobileChatQuickActions";
 
 export interface ChatAttachment {
   readonly id: string;
@@ -33,8 +29,8 @@ export interface MobileChatComposerProps {
   readonly isRunning?: boolean;
   readonly disabled?: boolean;
   readonly placeholder?: string;
-  readonly quickActions?: readonly QuickActionItem[];
-  readonly onSelectQuickAction?: (action: QuickActionItem) => void;
+  readonly quickActions?: readonly unknown[];
+  readonly onSelectQuickAction?: (action: any) => void;
   readonly className?: string;
 }
 
@@ -54,13 +50,11 @@ export const MobileChatComposer = React.forwardRef<
   isRunning = false,
   disabled = false,
   placeholder = "Ask the repo agent, or run a command...",
-  quickActions,
-  onSelectQuickAction,
+  quickActions: _quickActions,
+  onSelectQuickAction: _onSelectQuickAction,
   className,
 }, ref) => {
   const [text, setText] = useState("");
-  const [history, setHistory] = useState<readonly string[]>([]);
-  const [historyIdx, setHistoryIdx] = useState<number>(-1);
   const [attachments, setAttachments] = useState<readonly ChatAttachment[]>([]);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const isComposingRef = useRef(false);
@@ -119,23 +113,31 @@ export const MobileChatComposer = React.forwardRef<
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     const pendingAttachments = attachments;
-    if (trimmed) {
-      setHistory((prev) => (prev[prev.length - 1] === trimmed ? prev : [...prev, trimmed]));
-      setHistoryIdx(-1);
+    for (const att of pendingAttachments) {
+      if (att.url) {
+        objectUrlsRef.current.delete(att.url);
+      }
     }
     onSend(trimmed, pendingAttachments);
     setText("");
     setAttachments([]);
-    revokeAllTrackedUrls();
     if (textareaRef.current) {
       textareaRef.current.style.height = "36px";
     }
-  }, [disabled, text, attachments, onSend, revokeAllTrackedUrls]);
+  }, [disabled, text, attachments, onSend]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
-        if (isComposingRef.current) return;
+        if (
+          isComposingRef.current ||
+          Boolean(e.nativeEvent?.isComposing) ||
+          Boolean((e as unknown as { isComposing?: boolean }).isComposing) ||
+          e.keyCode === 229 ||
+          (e.nativeEvent as KeyboardEvent | undefined)?.keyCode === 229
+        ) {
+          return;
+        }
         e.preventDefault();
         handleSend();
       }
@@ -194,170 +196,16 @@ export const MobileChatComposer = React.forwardRef<
     [revokeTrackedUrl]
   );
 
-  const handleQuickAction = useCallback(
-    (action: QuickActionItem) => {
-      if (action.id === "stop" || action.isDestructive) {
-        onStop?.();
-        return;
-      }
-      if (onSelectQuickAction) {
-        onSelectQuickAction(action);
-      } else {
-        setText(action.prompt);
-        textareaRef.current?.focus();
-      }
-    },
-    [onStop, onSelectQuickAction]
-  );
-
-  const insertTextAtCursor = useCallback((inserted: string) => {
-    const el = textareaRef.current;
-    if (!el) {
-      setText((prev) => prev + inserted);
-      return;
-    }
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? el.value.length;
-    const next = el.value.substring(0, start) + inserted + el.value.substring(end);
-    setText(next);
-    setTimeout(() => {
-      el.focus();
-      el.setSelectionRange(start + inserted.length, start + inserted.length);
-    }, 0);
-  }, []);
-
-  const handleAccessoryKey = useCallback(
-    (keyType: "esc" | "tab" | "ctrl-c" | "up" | "down" | "clear") => {
-      if (disabled) return;
-      switch (keyType) {
-        case "ctrl-c": {
-          if (isRunning && onStop) {
-            onStop();
-          } else {
-            onSend("\x03", []);
-          }
-          break;
-        }
-        case "esc": {
-          if (text.length > 0) {
-            setText("");
-            if (textareaRef.current) {
-              textareaRef.current.style.height = "36px";
-            }
-          } else {
-            onSend("\x1b", []);
-          }
-          break;
-        }
-        case "tab": {
-          insertTextAtCursor("  ");
-          break;
-        }
-        case "clear": {
-          onSend("clear", []);
-          break;
-        }
-        case "up": {
-          if (history.length === 0) break;
-          const nextIdx = historyIdx === -1 ? history.length - 1 : Math.max(0, historyIdx - 1);
-          setHistoryIdx(nextIdx);
-          setText(history[nextIdx] ?? "");
-          break;
-        }
-        case "down": {
-          if (history.length === 0 || historyIdx === -1) break;
-          const nextIdx = historyIdx + 1;
-          if (nextIdx >= history.length) {
-            setHistoryIdx(-1);
-            setText("");
-          } else {
-            setHistoryIdx(nextIdx);
-            setText(history[nextIdx] ?? "");
-          }
-          break;
-        }
-      }
-    },
-    [disabled, isRunning, onStop, onSend, text, insertTextAtCursor, history, historyIdx]
-  );
-
   const canSubmit = (text.trim().length > 0 || attachments.length > 0) && !disabled;
 
   return (
     <div
       data-testid="mobile-chat-composer"
       className={cn(
-        "flex flex-col w-full bg-zinc-950/95 border-t border-border/80 backdrop-blur-md pb-safe select-none",
+        "flex flex-col w-full bg-[rgba(10,10,10,0.92)] border-t border-[rgba(25,25,25,0.8)] rounded-2xl backdrop-blur-md pb-safe select-none",
         className
       )}
     >
-      <MobileChatQuickActions
-        onSelectAction={handleQuickAction}
-        isRunning={isRunning}
-        actions={quickActions}
-        disabled={disabled}
-      />
-
-      <div
-        data-testid="terminal-accessory-bar"
-        className="flex items-center gap-1.5 px-3 py-1 overflow-x-auto no-scrollbar border-t border-border/40 bg-zinc-900/60"
-      >
-        <button
-          type="button"
-          data-testid="accessory-key-esc"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("esc")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          ESC
-        </button>
-        <button
-          type="button"
-          data-testid="accessory-key-tab"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("tab")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          Tab
-        </button>
-        <button
-          type="button"
-          data-testid="accessory-key-ctrl-c"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("ctrl-c")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          Ctrl+C
-        </button>
-        <button
-          type="button"
-          data-testid="accessory-key-up"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("up")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          ↑
-        </button>
-        <button
-          type="button"
-          data-testid="accessory-key-down"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("down")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          ↓
-        </button>
-        <button
-          type="button"
-          data-testid="accessory-key-clear"
-          disabled={disabled}
-          onClick={() => handleAccessoryKey("clear")}
-          className="font-mono text-[10px] px-2 py-0.5 rounded border border-border/60 bg-secondary/40 text-muted-foreground active:bg-accent hover:text-foreground transition-colors disabled:opacity-40 shrink-0"
-        >
-          /clear
-        </button>
-      </div>
-
       {attachments.length > 0 && (
         <div
           data-testid="chat-composer-attachments"
@@ -369,13 +217,13 @@ export const MobileChatComposer = React.forwardRef<
               <div
                 key={att.id}
                 data-testid={`attachment-preview-${att.id}`}
-                className="group relative flex items-center gap-2 rounded-lg bg-zinc-900/90 border border-border/80 p-1.5 pr-2.5 shrink-0 max-w-[200px] shadow-sm"
+                className="group relative flex items-center gap-2 rounded-lg bg-[#111111]/90 border border-border/80 p-1.5 pr-2.5 shrink-0 max-w-[200px] shadow-sm"
               >
                 {isImage ? (
                   <img
                     src={att.url}
                     alt={att.name}
-                    className="size-8 rounded object-cover bg-zinc-950 border border-border/60"
+                    className="size-8 rounded object-cover bg-[#0a0a0a] border border-border/60"
                   />
                 ) : (
                   <div className="flex size-8 items-center justify-center rounded bg-secondary/40 text-muted-foreground border border-border/50">
@@ -404,7 +252,7 @@ export const MobileChatComposer = React.forwardRef<
         </div>
       )}
 
-      <div className="flex items-end gap-2 px-2.5 py-2">
+      <div className="flex items-end gap-2 px-[12px] py-2">
         <input
           ref={fileInputRef}
           type="file"
@@ -424,7 +272,7 @@ export const MobileChatComposer = React.forwardRef<
           <Plus className="size-4" />
         </button>
 
-        <div className="relative flex min-h-[38px] flex-1 items-center rounded-xl bg-zinc-900/90 border border-border/80 focus-within:border-primary/80 focus-within:ring-1 focus-within:ring-primary/30 px-3 py-1.5 transition-all">
+        <div className="relative flex min-h-[38px] flex-1 items-center rounded-xl bg-[rgba(26,27,27,0.9)] border border-[rgba(25,25,25,0.8)] focus-within:border-[#346bf1]/80 focus-within:ring-1 focus-within:ring-[#346bf1]/30 px-[14px] pb-2.5 pt-1.5 transition-all">
           <textarea
             ref={textareaRef}
             data-testid="chat-composer-textarea"
@@ -436,14 +284,16 @@ export const MobileChatComposer = React.forwardRef<
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            className="w-full resize-none bg-transparent font-sans text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none max-h-36 overflow-y-auto leading-relaxed scrollbar-thin"
+            className="w-full resize-none bg-transparent font-sans text-sm text-[#f5f5f5] placeholder:text-[#838383] focus:outline-none max-h-36 overflow-y-auto leading-relaxed scrollbar-thin"
           />
         </div>
 
         <button
           type="button"
           data-testid="mic-button"
-          disabled={disabled}
+          disabled
+          aria-label="Voice input is not supported"
+          title="Voice input is not supported"
           className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground active:bg-secondary/60 transition-colors disabled:opacity-40 disabled:pointer-events-none"
         >
           <Mic className="size-4" />
@@ -467,7 +317,7 @@ export const MobileChatComposer = React.forwardRef<
             className={cn(
               "flex size-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm",
               canSubmit
-                ? "bg-primary text-primary-foreground hover:brightness-110 active:brightness-95"
+                ? "bg-[#346bf1] text-[#ffffff] hover:brightness-110 active:brightness-95"
                 : "bg-secondary/40 text-muted-foreground/50 border border-border/40 cursor-not-allowed"
             )}
           >

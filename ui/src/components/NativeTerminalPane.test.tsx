@@ -2115,10 +2115,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expectedChordCalls: 0,
     },
     {
-      description: "surfaces an error and sends no chord when the clipboard held no image",
+      description: "degrades to the agent's paste chord without an error toast when the clipboard held no image",
       result: null,
       expectedPaste: null,
-      expectedChordCalls: 0,
+      expectedChordCalls: 1,
     },
   ])(
     "sends a clipboard image to the SSH host owning a remote pane and $description",
@@ -2170,9 +2170,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           expectedPaste === null ? [] : [expectedPaste],
         );
         if (result === null) {
-          expect(toastMocks.error).toHaveBeenCalledWith(
-            "No clipboard image could be read to send to the remote host.",
-          );
+          // A host that cannot read a clipboard image is not a failure: the pane hands the paste
+          // back to the terminal, so the agent reads the clipboard through its own paste chord.
+          expect(toastMocks.error).not.toHaveBeenCalled();
         }
       });
     },
@@ -3234,7 +3234,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(sendInputCalls).toHaveLength(0);
   });
 
-  it("silent-failure surface: when invoke resolves null for the upload command -> toast.error called and still NO 0x16 sent", async () => {
+  it("degrades to the agent's paste chord with no error toast when the remote host cannot read a clipboard image", async () => {
     const workspaceId = `ssh:${"c".repeat(64)}`;
     const sessionId = "term-session-ssh-dom-paste-null";
     const session = { ...createSession(sessionId), workspaceId };
@@ -3263,16 +3263,54 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pasteEvent.defaultPrevented).toBe(true);
 
     await waitFor(() => {
-      expect(toastMocks.error).toHaveBeenCalledWith(
-        "No clipboard image could be read to send to the remote host.",
+      const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
       );
+      expect(chordCalls).toHaveLength(1);
     });
 
-    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd, args]) =>
-        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
-    );
-    expect(sendInputCalls).toHaveLength(0);
+    expect(toastMocks.error).not.toHaveBeenCalled();
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
+  });
+
+  it("degrades to the agent's paste chord with no error toast when this platform cannot read a clipboard image", async () => {
+    const sessionId = "term-session-local-dom-paste-null";
+    const session = createSession(sessionId);
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return null;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+    toastMocks.error.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+      );
+      expect(chordCalls).toHaveLength(1);
+    });
+
+    expect(toastMocks.error).not.toHaveBeenCalled();
   });
 
   it("routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste", () => {

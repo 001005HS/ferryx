@@ -240,7 +240,7 @@ impl FakeLegacyDaemon {
                             Err(_) => return,
                         };
                         let response = match request {
-                            DaemonRequest::Handshake { version } => serde_json::json!({
+                            DaemonRequest::Handshake { version, .. } => serde_json::json!({
                                 "type": "handshakeOk", "version": version, "pid": 1, "epoch": 1
                             }),
                             other => {

@@ -243,6 +243,7 @@ impl TestDaemonClient {
 
         let hs = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: None,
         };
         let mut hs_json = serde_json::to_string(&hs)?;
         hs_json.push('\n');
@@ -991,6 +992,7 @@ async fn test_daemon_protocol_mismatch_explicit_error_and_no_fallback() {
     let invalid_version = DAEMON_PROTOCOL_VERSION + 999;
     let hs = DaemonRequest::Handshake {
         version: invalid_version,
+        token: None,
     };
     let mut hs_json = serde_json::to_string(&hs).unwrap();
     hs_json.push('\n');

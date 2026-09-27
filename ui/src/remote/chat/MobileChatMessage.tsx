@@ -39,7 +39,7 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
   return (
     <code
       className={cn(
-        "bg-zinc-800 text-sky-300 px-1.5 py-0.5 rounded font-mono text-xs",
+        "bg-[#1a1b1b] text-[#4bb8f0] px-1.5 py-0.5 rounded font-mono text-xs",
         className
       )}
       {...props}
@@ -63,15 +63,15 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
   };
 
   return (
-    <div className="relative group my-2.5 rounded-xl border border-zinc-800 bg-zinc-950/90 overflow-hidden shadow-xs">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/60 border-b border-zinc-800/80 text-[11px] font-mono text-zinc-400">
-        <span className="uppercase text-[10px] tracking-wider text-zinc-500 font-semibold">
+    <div className="relative group my-2.5 rounded-xl border border-[#191919] bg-[#0a0a0a]/90 overflow-hidden shadow-xs">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-[#111111]/60 border-b border-[#191919] text-[11px] font-mono text-[#838383]">
+        <span className="uppercase text-[10px] tracking-wider text-[#818181] font-semibold">
           {language || "code"}
         </span>
         <button
           type="button"
           onClick={handleCopy}
-          className="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors p-1 rounded hover:bg-white/5"
+          className="flex items-center gap-1 text-[10px] text-[#838383] hover:text-[#f5f5f5] transition-colors p-1 rounded hover:bg-white/5"
         >
           {copied ? (
             <>
@@ -86,7 +86,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
           )}
         </button>
       </div>
-      <div className="overflow-x-auto p-3 text-[11px] font-mono text-zinc-200 leading-relaxed scrollbar-thin scrollbar-thumb-zinc-750">
+      <div className="overflow-x-auto p-3 text-[11px] font-mono text-[#f5f5f5] leading-relaxed scrollbar-thin scrollbar-thumb-[#191919]">
         <pre className="!bg-transparent !p-0 !m-0">
           <code className={className} {...props}>
             {children}
@@ -132,7 +132,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   const metaRow = (
     <div className="flex items-center gap-1.5">
       {formattedTime && (
-        <span className="text-[10px] text-zinc-500 font-mono select-none">
+        <span className="font-mono text-xs text-[#838383] select-none">
           {formattedTime}
         </span>
       )}
@@ -141,7 +141,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         data-testid="message-copy-button"
         onClick={handleCopy}
         title="Copy message"
-        className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors"
+        className="p-0.5 rounded text-[#818181] hover:text-[#838383] hover:bg-[#1a1b1b]/60 transition-colors"
       >
         {copied ? (
           <Check className="size-3 text-emerald-400" />
@@ -156,13 +156,13 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
     return (
       <div
         className={cn(
-          "flex flex-col items-end gap-1 my-2 max-w-[88%] ml-auto",
+          "mb-5 flex flex-col items-end gap-1 max-w-[88%] ml-auto",
           className
         )}
       >
         <div
           data-testid="user-message-bubble"
-          className="rounded-2xl rounded-tr-xs bg-primary text-primary-foreground px-3.5 py-2.5 shadow-xs leading-relaxed text-sm break-words select-text"
+          className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-[#161616] text-[#f5f5f5] leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{content}</p>
           {attachments.length > 0 && (
@@ -186,7 +186,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
           type="button"
           data-testid="worked-for-toggle"
           onClick={() => setWorkExpanded((prev) => !prev)}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-mono text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors"
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-[#838383] hover:text-[#f5f5f5]"
         >
           <ChevronRight
             className={cn("size-3 transition-transform", workExpanded && "rotate-90")}
@@ -195,78 +195,78 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         </button>
       )}
 
+      {content && (
+        <div
+          data-testid="assistant-message-body"
+          className="w-full text-[#f5f5f5] leading-relaxed text-base break-words select-text"
+        >
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code: ({ node, inline, className, children, ...props }: any) => {
+                const contentStr = String(children);
+                const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
+                const hasNewline = contentStr.includes("\n");
+                const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
+                const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
+
+                if (isPureInline && !isFenced) {
+                  return (
+                    <InlineCode className={className} {...props}>
+                      {children}
+                    </InlineCode>
+                  );
+                }
+                return (
+                  <CodeBlock className={className} {...props}>
+                    {children}
+                  </CodeBlock>
+                );
+              },
+              pre: ({ children }: any) => <>{children}</>,
+              p: ({ children }: any) => {
+                const childArray = React.Children.toArray(children);
+                const hasBlockChild = childArray.some(
+                  (child) =>
+                    React.isValidElement(child) &&
+                    (child.type === CodeBlock ||
+                      (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
+                );
+                if (hasBlockChild) {
+                  return <div className="mb-2 last:mb-0">{children}</div>;
+                }
+                return <p className="mb-2 last:mb-0">{children}</p>;
+              },
+              ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+              ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+              a: ({ href, children }) => (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[#346bf1] hover:text-[#346bf1]/80 underline underline-offset-2"
+                >
+                  {children}
+                </a>
+              ),
+              blockquote: ({ children }) => (
+                <blockquote className="border-l-2 border-[#191919] pl-2.5 my-2 text-[#838383] italic">
+                  {children}
+                </blockquote>
+              ),
+            }}
+          >
+            {content}
+          </ReactMarkdown>
+
+          {attachments.length > 0 && (
+            <AttachmentList attachments={attachments} className="mt-2" />
+          )}
+        </div>
+      )}
+
       {(!durationLabel || workExpanded) && (
         <>
-          {content && (
-            <div
-              data-testid="assistant-message-body"
-              className="w-full text-zinc-200 leading-relaxed text-sm break-words select-text"
-            >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  code: ({ node, inline, className, children, ...props }: any) => {
-                    const contentStr = String(children);
-                    const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
-                    const hasNewline = contentStr.includes("\n");
-                    const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
-                    const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
-
-                    if (isPureInline && !isFenced) {
-                      return (
-                        <InlineCode className={className} {...props}>
-                          {children}
-                        </InlineCode>
-                      );
-                    }
-                    return (
-                      <CodeBlock className={className} {...props}>
-                        {children}
-                      </CodeBlock>
-                    );
-                  },
-                  pre: ({ children }: any) => <>{children}</>,
-                  p: ({ children }: any) => {
-                    const childArray = React.Children.toArray(children);
-                    const hasBlockChild = childArray.some(
-                      (child) =>
-                        React.isValidElement(child) &&
-                        (child.type === CodeBlock ||
-                          (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
-                    );
-                    if (hasBlockChild) {
-                      return <div className="mb-2 last:mb-0">{children}</div>;
-                    }
-                    return <p className="mb-2 last:mb-0">{children}</p>;
-                  },
-                  ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-                  a: ({ href, children }) => (
-                    <a
-                      href={href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sky-400 hover:text-sky-300 underline underline-offset-2"
-                    >
-                      {children}
-                    </a>
-                  ),
-                  blockquote: ({ children }) => (
-                    <blockquote className="border-l-2 border-zinc-750 pl-2.5 my-2 text-zinc-400 italic">
-                      {children}
-                    </blockquote>
-                  ),
-                }}
-              >
-                {content}
-              </ReactMarkdown>
-
-              {attachments.length > 0 && (
-                <AttachmentList attachments={attachments} className="mt-2" />
-              )}
-            </div>
-          )}
-
           {toolCalls && toolCalls.length > 0 && (
             <div className="w-full mt-1.5">
               {toolCalls.map((tc, index) => (

@@ -32,7 +32,19 @@ function providerSessionFromContext(ctx): unknown {
   // the session manager; ctx.providerSession exists solely in mocked shapes.
   const sessionManager = ctx?.sessionManager;
   const id = sessionManager?.getSessionId?.();
-  if (typeof id !== "string" || id.length === 0) return undefined;
+  if (typeof id !== "string" || id.length === 0) {
+    // The pi runtime does not always hand the session manager to extensions, so fall back to the
+    // identity the agent's own PTY carries. Without this the daemon receives no provider session
+    // and every session in a workspace resolves to the same transcript.
+    const envId = typeof process !== "undefined" ? process.env?.PI_SESSION_ID : undefined;
+    if (typeof envId !== "string" || envId.length === 0) return undefined;
+    const envFile = typeof process !== "undefined" ? process.env?.PI_SESSION_FILE : undefined;
+    return {
+      key: "session_id",
+      id: envId,
+      ...(typeof envFile === "string" && envFile.length > 0 ? { transcriptPath: envFile } : {}),
+    };
+  }
   const transcriptPath = sessionManager?.getSessionFile?.();
   return {
     key: "session_id",

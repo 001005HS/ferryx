@@ -11,13 +11,22 @@ vi.mock("./lib/pairedWorktreeActions", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lib/pairedWorktreeActions")>(),
   createPairedWorktreeActions: deletion.createPairedWorktreeActions,
 }));
-vi.mock("./components/Sidebar", () => ({ Sidebar: ({ onDeleteWorktree, onSelectWorktree }: {
+vi.mock("./components/Sidebar", () => ({ Sidebar: ({ onDeleteWorktree, onSelectWorktree, onSelectProject }: {
   onDeleteWorktree: (row: import("./lib/types").Worktree) => void;
   onSelectWorktree?: (row: import("./lib/types").Worktree) => void;
+  onSelectProject?: (project: RegisteredProject) => void;
 }) => <div>
   <button onClick={() => onDeleteWorktree(pairedWorktree)}>Delete paired fixture</button>
   {onSelectWorktree ? <button onClick={() => onSelectWorktree(pairedWorktree)}>Select paired worktree</button> : null}
+  {onSelectWorktree ? <button onClick={() => onSelectWorktree(secondPairedWorktree)}>Select second paired worktree</button> : null}
+  {onSelectProject ? <button onClick={() => onSelectProject(paired)}>Select paired project</button> : null}
 </div> }));
+
+const inventory = vi.hoisted(() => ({ refresh: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./lib/pairedHostInventory", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./lib/pairedHostInventory")>(),
+  pairedHostInventory: inventory,
+}));
 
 const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
@@ -126,6 +135,9 @@ const pairedWorktree: import("./lib/types").Worktree = {
   workspaceId: paired.workspaceId, path: "/srv/repo/feature", head: "abc123",
   branch: "refs/heads/orca/remote-project/feature", bare: false, detached: false, locked: null, prunable: null,
 };
+const secondPairedWorktree: import("./lib/types").Worktree = {
+  ...pairedWorktree, path: "/srv/repo/second", head: "def456", branch: "refs/heads/orca/remote-project/second",
+};
 
 describe("App paired desktop shell", () => {
   it("routes deletion of an inactive paired project's worktree through its owning project", async () => {
@@ -161,6 +173,33 @@ describe("App paired desktop shell", () => {
     });
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
+  });
+
+  it("refreshes unavailable paired inventory when selecting its project without refocusing the window", async () => {
+    seed([{ workspaceId: "local", repoRoot: "/local", gitRoot: null }, paired], "local");
+    await mount();
+    remoteHostStore.setState((state) => ({ ...state, nativeStatus: "unavailable", machineFeaturesEnabled: false }));
+    expect(inventory.refresh).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select paired project" })); });
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("refreshes unavailable inventory when selecting a different worktree in the active paired project", async () => {
+    seed([paired], paired.workspaceId);
+    await mount();
+    remoteHostStore.setState((state) => ({ ...state, nativeStatus: "unavailable", machineFeaturesEnabled: false }));
+    expect(inventory.refresh).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select second paired worktree" })); });
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    await act(async () => {
+      remoteHostStore.setState((state) => ({ ...state, nativeStatus: "ready", machineFeaturesEnabled: true }));
+    });
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: paired.workspaceId, cwd: secondPairedWorktree.path,
+      worktree: { wsId: "remote-project", slug: "second" },
+    }));
   });
 
   it("keeps local tabs and the palette mounted when inventory selection changes", async () => {
@@ -223,6 +262,23 @@ describe("App paired desktop shell", () => {
         cwd: pairedWorktree.path,
       }),
     );
+  });
+
+  it("routes two different paired worktree selections to distinct backend spawn paths", async () => {
+    remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
+    seed([paired], paired.workspaceId);
+    native.listWorktrees.mockResolvedValue([pairedWorktree, secondPairedWorktree]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select second paired worktree" })); });
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: paired.workspaceId, cwd: pairedWorktree.path,
+      worktree: { wsId: "remote-project", slug: "feature" },
+    }));
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: paired.workspaceId, cwd: secondPairedWorktree.path,
+      worktree: { wsId: "remote-project", slug: "second" },
+    }));
   });
 
   it("switches to paired project and preserves pending worktree when selected from another project", async () => {

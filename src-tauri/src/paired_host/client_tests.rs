@@ -70,9 +70,10 @@ async fn cleanup(root: tempfile::TempDir, task: tokio::task::JoinHandle<()>) {
 #[tokio::test]
 async fn real_http_non_json_redirect_and_body_limit() {
     for (mode, expected) in [
-        (0, "PAIRED_HOST_INVALID_RESPONSE"),
+        (0, "HOST_UNAVAILABLE"),
         (1, "PAIRED_HOST_REDIRECT_REJECTED"),
         (2, "PAYLOAD_TOO_LARGE"),
+        (3, "PAIRED_HOST_INVALID_RESPONSE"),
     ] {
         let route = Router::new().route(
             "/host/a/api/v1/fs/directories",
@@ -84,9 +85,14 @@ async fn real_http_non_json_redirect_and_body_limit() {
                     }
                     1 => axum::response::Redirect::temporary("http://127.0.0.1:1/stolen")
                         .into_response(),
-                    _ => (
+                    2 => (
                         [("content-type", "application/json")],
                         "x".repeat(m::DIRECTORY_JSON_MAX_BYTES + 1),
+                    )
+                        .into_response(),
+                    _ => (
+                        axum::http::StatusCode::OK,
+                        "private relay non-json",
                     )
                         .into_response(),
                 }
@@ -110,6 +116,130 @@ async fn real_http_non_json_redirect_and_body_limit() {
         assert!(!format!("{error:?}").contains("private relay"));
         cleanup(root, task).await;
     }
+}
+#[tokio::test]
+async fn http_non_2xx_preserves_status_for_non_json_and_malformed_json() {
+    for (status_code, content_type_header, body, expected_code, expected_class, retryable) in [
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            None,
+            "not found without content-type",
+            "NOT_FOUND",
+            "none",
+            false,
+        ),
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Some("text/plain"),
+            "plain 404 from proxy",
+            "NOT_FOUND",
+            "text",
+            false,
+        ),
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Some("text/html"),
+            "<html>502 Bad Gateway</html>",
+            "HOST_UNAVAILABLE",
+            "text",
+            false,
+        ),
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Some("application/json"),
+            r#"{"error":"invalid token","token":"secret-token-leak"}"#,
+            "UNAUTHORIZED",
+            "json",
+            false,
+        ),
+    ] {
+        let route = Router::new().route(
+            "/host/a/api/v1/fs/directories",
+            get(move |headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer fixture-secret");
+                let mut resp = (status_code, body).into_response();
+                if let Some(ct) = content_type_header {
+                    resp.headers_mut()
+                        .insert(axum::http::header::CONTENT_TYPE, ct.parse().unwrap());
+                } else {
+                    resp.headers_mut().remove(axum::http::header::CONTENT_TYPE);
+                }
+                resp
+            }),
+        );
+        let (root, service, host, task) = fixture(route).await;
+        let error = MachineClient::new()
+            .execute(
+                &service,
+                request(
+                    &host,
+                    Operation::Directories {
+                        path: Some("/space".into()),
+                        include_hidden: false,
+                    },
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        let machine_err = error
+            .machine_error
+            .as_ref()
+            .expect("machine error must be present");
+        assert_eq!(machine_err.retryable, retryable);
+        assert_eq!(
+            machine_err.details.get("httpStatus").and_then(|v| v.as_u64()),
+            Some(status_code.as_u16() as u64)
+        );
+        assert_eq!(
+            machine_err.details.get("contentTypeClass").and_then(|v| v.as_str()),
+            Some(expected_class)
+        );
+        let debug_str = format!("{error:?}");
+        assert!(!debug_str.contains("secret-token-leak"));
+        assert!(!debug_str.contains("plain 404 from proxy"));
+        assert!(!debug_str.contains("not found without content-type"));
+        assert!(!debug_str.contains("<html>"));
+        cleanup(root, task).await;
+    }
+
+    // Verify existing valid ErrorEnvelope is preserved with application/json
+    let req_id = "3941b9de-b16d-4d9a-ae0a-118f90fd91f4";
+    let valid_envelope_body = format!(
+        r#"{{"error":{{"code":"DIRECTORY_NOT_FOUND","message":"Not found.","retryable":false,"requestId":"{req_id}","details":{{}}}}}}"#
+    );
+    let route = Router::new().route(
+        "/host/a/api/v1/fs/directories",
+        get(move |headers: axum::http::HeaderMap| {
+            let body = valid_envelope_body.clone();
+            async move {
+                assert_eq!(headers["authorization"], "Bearer fixture-secret");
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    [("content-type", "application/json")],
+                    body,
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let (root, service, host, task) = fixture(route).await;
+    let error = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::Directories {
+                    path: Some("/space".into()),
+                    include_hidden: false,
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "DIRECTORY_NOT_FOUND");
+    assert_eq!(error.request_id.as_deref(), Some(req_id));
+    cleanup(root, task).await;
 }
 #[tokio::test]
 async fn generation_cancels_blocked_http_without_release() {
@@ -1291,4 +1421,65 @@ fn test_r5_n3_machine_rejection_stays_definitive_and_transport_uncertainty_relab
         transport.ambiguous,
         "transport uncertainty must be relabeled ambiguous"
     );
+}
+
+#[tokio::test]
+async fn http_504_relay_stage_allowlist_and_forgery_rejection() {
+    for (status_code, stage_header, expected_stage) in [
+        (
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            Some(crate::remote::relay_server::RELAY_STAGE_DATA_PAIRING_TIMEOUT),
+            Some(crate::remote::relay_server::RELAY_STAGE_DATA_PAIRING_TIMEOUT),
+        ),
+        (
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            Some(crate::remote::relay_server::RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT),
+            Some(crate::remote::relay_server::RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT),
+        ),
+        (
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            Some("unknown_forged_stage"),
+            None,
+        ),
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Some(crate::remote::relay_server::RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT),
+            None,
+        ),
+    ] {
+        let route = Router::new().route(
+            "/host/a/api/v1/fs/directories",
+            get(move || async move {
+                let mut response = (status_code, "gateway error").into_response();
+                if let Some(stage) = stage_header {
+                    response.headers_mut().insert(
+                        crate::remote::relay_server::RELAY_STAGE_HEADER,
+                        axum::http::HeaderValue::from_static(stage),
+                    );
+                }
+                response
+            }),
+        );
+        let (root, service, host, task) = fixture(route).await;
+        let error = MachineClient::new()
+            .execute(
+                &service,
+                request(
+                    &host,
+                    Operation::Directories {
+                        path: None,
+                        include_hidden: false,
+                    },
+                ),
+            )
+            .await
+            .unwrap_err();
+        let machine_err = error.machine_error.expect("machine error present");
+        let stage = machine_err
+            .details
+            .get("relayStage")
+            .and_then(|v| v.as_str());
+        assert_eq!(stage, expected_stage);
+        cleanup(root, task).await;
+    }
 }

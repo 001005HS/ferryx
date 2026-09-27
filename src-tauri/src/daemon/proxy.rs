@@ -1,6 +1,7 @@
 #[path = "machine_peer.rs"]
 mod machine_peer;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+use crate::daemon::client::read_transport_token;
 use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
 use crate::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
@@ -98,7 +99,10 @@ impl LegacyPeer {
         let mut reader = BufReader::new(read_half);
 
         let ver = *self.protocol_version.read();
-        let hs = DaemonRequest::Handshake { version: ver };
+        let hs = DaemonRequest::Handshake {
+            version: ver,
+            token: read_transport_token(),
+        };
         let mut hs_json = serde_json::to_string(&hs).map_err(|e| e.to_string())?;
         hs_json.push('\n');
         write_half
@@ -132,6 +136,7 @@ impl LegacyPeer {
 
                 let retry_hs = DaemonRequest::Handshake {
                     version: expected_version,
+                    token: read_transport_token(),
                 };
                 let mut retry_json = serde_json::to_string(&retry_hs).map_err(|e| e.to_string())?;
                 retry_json.push('\n');

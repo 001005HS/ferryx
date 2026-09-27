@@ -45,7 +45,6 @@ import {
 } from "../lib/storageKeys";
 import { revealPath, type RegisteredProject } from "../lib/tauri";
 import type { Agent } from "../features/ferryx/control/client";
-import type { DesktopWorkspace } from "../features/ferryx/control/desktopInventory";
 import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
@@ -105,9 +104,8 @@ type SidebarProps = {
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
   attentionInventory?: {
-    workspaces: DesktopWorkspace[];
-    unavailableHosts?: readonly string[];
-    onSelectAgent: (agent: Agent) => void;
+    agents: readonly Agent[];
+    localKeyOf: (agent: Agent) => string | null;
   };
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
