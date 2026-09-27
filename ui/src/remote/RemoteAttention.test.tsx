@@ -264,6 +264,55 @@ describe("RemoteAttention Affordance", () => {
     }
   });
 
+  it("keeps the worktree list as the sheet default and opens the two-state inbox from its icon", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithAttention = {
+      ...baseState,
+      activeContext: {
+        ...baseState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", activityState: "waiting" },
+          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex" },
+          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo" },
+          { id: "tab-4", label: "Build", activityState: "working" },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithAttention))
+      .mockResolvedValue(jsonResponse({ accepted: true }));
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+    await openWorktreeSheet();
+
+    expect(screen.queryByTestId("remote-attention-inbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Terminal tabs" })).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Inbox (2)" })); });
+    expect(screen.queryByRole("tablist", { name: "Terminal tabs" })).not.toBeInTheDocument();
+
+    const inbox = screen.getByTestId("remote-attention-inbox");
+    expect(within(inbox).getAllByTestId("attention-row").map((row) => row.dataset.attentionState)).toEqual(["needs-you", "done"]);
+    expect(within(inbox).getByText("omo")).toBeInTheDocument();
+    expect(within(inbox).getByTestId("attention-row-text")).toHaveTextContent("Fix login");
+
+    await act(async () => { fireEvent.click(within(inbox).getAllByTestId("attention-row")[0]); });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-3" }),
+        }),
+      );
+    });
+    expect(screen.queryByRole("dialog", { name: "Workspace context" })).not.toBeInTheDocument();
+  });
+
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithWaiting = {

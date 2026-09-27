@@ -20,7 +20,6 @@ export type AttentionInboxProps = {
   onOpen: (row: AttentionRow) => void;
   onDismiss?: (row: AttentionRow) => void;
   compact?: boolean;
-  openSessionCount?: number;
   now?: number;
   className?: string;
 };
@@ -57,7 +56,6 @@ export function AttentionInbox({
   onOpen,
   onDismiss,
   compact = false,
-  openSessionCount,
   now: fixedNow,
   className,
 }: AttentionInboxProps) {
@@ -77,15 +75,10 @@ export function AttentionInbox({
       >
         <span aria-hidden="true" className="mb-3 text-2xl leading-none text-status-warning">✧</span>
         <p className="text-[12.5px] font-semibold text-worktree-sidebar-foreground">
-          지금은 <span className="text-status-warning">아무도 기다리지 않습니다</span>.
+          Nobody is <span className="text-status-warning">waiting on you</span>.
         </p>
-        {openSessionCount !== undefined ? (
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            열린 세션 <b className="font-semibold text-worktree-sidebar-foreground/80">{openSessionCount}</b>개
-          </p>
-        ) : null}
         <p className="mt-2 max-w-[260px] text-[10.5px] leading-relaxed text-muted-foreground/80">
-          에이전트가 입력을 요구하거나 작업을 끝내면 여기에 나타납니다. 실행 중인 세션은 조용히 지나갑니다.
+          Agents show up here when they need your input or finish their work. Running sessions stay quiet.
         </p>
       </div>
     );
@@ -96,7 +89,7 @@ export function AttentionInbox({
       {bothStates ? (
         <div
           role="group"
-          aria-label="상태 필터"
+          aria-label="Status filter"
           className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-worktree-sidebar-border px-2.5 py-2 scrollbar-none"
         >
           {(["all", "needs-you", "done"] as const).map((id) => (
@@ -112,7 +105,7 @@ export function AttentionInbox({
                   : "border-worktree-sidebar-border text-muted-foreground hover:text-worktree-sidebar-foreground",
               )}
             >
-              {id === "all" ? "전체" : ATTENTION_STATE_SHORT_LABEL[id]}
+              {id === "all" ? "All" : ATTENTION_STATE_SHORT_LABEL[id]}
               <span className="text-[10px] tabular-nums opacity-75">{counts[id]}</span>
             </button>
           ))}
@@ -207,7 +200,7 @@ function AttentionInboxRow({
       {onDismiss ? (
         <button
           type="button"
-          aria-label={`${row.who} 알림 지우기`}
+          aria-label={`Dismiss ${row.who}`}
           onClick={() => onDismiss(row)}
           className="absolute right-1.5 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-white/[0.08] hover:text-worktree-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring group-hover:opacity-100"
         >

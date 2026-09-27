@@ -218,3 +218,19 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --input-rgb: 17 17 17;
   --input-alpha: 1;
 }
+
+@keyframes pane-inbox-flash {
+  0%, 35% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.pane-inbox-flash {
+  box-shadow: inset 0 0 0 2px rgba(253, 230, 138, 0.95), inset 0 0 18px rgba(253, 230, 138, 0.35);
+  animation: pane-inbox-flash 1400ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-inbox-flash {
+    animation-duration: 600ms;
+  }
+}

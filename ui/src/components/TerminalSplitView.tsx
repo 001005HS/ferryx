@@ -20,6 +20,7 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Rows2, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 
 import type { ActivitySummary, TerminalActivity } from "../lib/activity";
 import type {
@@ -1070,6 +1071,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   const needsAttention = attentionFrameEnabled && Boolean(
     activity && !activity.seen && (activity.state === "waiting" || activity.state === "done"),
   );
+  const flashSessionId = content.kind === "terminal" ? session.id : null;
+  const flashToken = usePaneFlashToken(flashSessionId);
 
   return (
     <NativeTerminalVisibilityProvider visible occluded={showsDropFeedback}>
@@ -1111,6 +1114,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
     >
       <PaneEdgeDropZones tabId={tab.id} leafId={leafId} />
+      {flashToken !== null && flashSessionId ? (
+        <div
+          key={flashToken}
+          data-testid="pane-inbox-flash"
+          aria-hidden="true"
+          className="pane-inbox-flash pointer-events-none absolute inset-0 z-20"
+          onAnimationEnd={() => clearPaneFlash(flashSessionId, flashToken)}
+        />
+      ) : null}
       {needsAttention ? (
         <>
           <div
@@ -1225,7 +1237,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   sessions={sessions}
                   active={isActive}
                   activity={activity}
-                  needsAttention={needsAttention}
+                  needsAttention={needsAttention || flashToken !== null}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
                   onReconnect={

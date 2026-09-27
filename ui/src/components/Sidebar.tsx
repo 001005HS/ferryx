@@ -17,10 +17,10 @@ import {
 } from "@dnd-kit/sortable";
 import {
   CheckCheck,
-  ChevronDown,
   ChevronRight,
   Folder,
   History,
+  Inbox,
   PanelLeftClose,
   Plus,
   Settings2,
@@ -108,7 +108,7 @@ type SidebarProps = {
   onOpenSettings?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
-  /** Present when the sidebar leads with the attention inbox and folds the worktree tree behind a pill. */
+  /** Present when the sidebar offers the attention inbox as a sub view behind its header icon. */
   attention?: SidebarAttention;
 };
 
@@ -118,16 +118,9 @@ export type SidebarAttention = {
   onDismiss: (row: AttentionRow) => void;
   onDismissAll: () => void;
   openSessionCount: number;
-  worktreeListOpen: boolean;
-  onWorktreeListOpenChange: (open: boolean) => void;
+  inboxOpen: boolean;
+  onInboxOpenChange: (open: boolean) => void;
 };
-
-const WORKTREE_REGION_ID = "sidebar-worktree-region";
-
-function projectPillLabel(project: RegisteredProject): string {
-  if (!project.target || project.target.kind === "local") return project.workspaceId;
-  return project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? project.workspaceId;
-}
 
 export function Sidebar({
   open = true,
@@ -157,13 +150,8 @@ export function Sidebar({
   onHide,
   attention,
 }: SidebarProps) {
-  const worktreeRegionRef = useRef<HTMLDivElement>(null);
-  const closeWorktreeList = attention?.onWorktreeListOpenChange;
-  // Picking a worktree is the end of a trip into the list, so the inbox comes back on its own.
-  const selectWorktree = useCallback((worktree: Worktree) => {
-    onSelectWorktree(worktree);
-    closeWorktreeList?.(false);
-  }, [closeWorktreeList, onSelectWorktree]);
+  const selectWorktree = onSelectWorktree;
+  const inboxOpen = attention?.inboxOpen ?? false;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [width, setWidth] = useState(loadSidebarWidth);
   const widthRef = useRef(width);
@@ -277,9 +265,6 @@ export function Sidebar({
       ? activeGroup.primaryProject.workspaceId
       : undefined;
   }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
-  const activeProject = projects.find((project) => project.workspaceId === activeProjectId);
-  const activeWorktreeRow = worktrees.find((worktree) => worktree.path === activePath);
-  const activeWorktreeLabel = activeWorktreeRow ? workspaceName(activeWorktreeRow) : undefined;
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -424,61 +409,52 @@ export function Sidebar({
             <Plus className="size-3.5" />
           </IconButton>
           {attention ? (
-            <div className="ml-auto flex items-center">
+            <div className="ml-auto flex items-center gap-0.5">
+              {inboxOpen ? (
+                <IconButton
+                  label="Mark all read"
+                  className="no-drag"
+                  size="sm"
+                  disabled={attention.rows.length === 0}
+                  onClick={attention.onDismissAll}
+                >
+                  <CheckCheck className="size-3.5" />
+                </IconButton>
+              ) : null}
               <IconButton
-                label="모두 읽음"
-                className="no-drag"
+                data-shortcut="notifications.toggle"
+                label={attention.rows.length > 0 ? `Inbox (${attention.rows.length})` : "Inbox"}
+                aria-pressed={inboxOpen}
+                className={cn("no-drag relative", inboxOpen && "bg-white/[0.08] text-worktree-sidebar-foreground")}
                 size="sm"
-                disabled={attention.rows.length === 0}
-                onClick={attention.onDismissAll}
+                onClick={() => attention.onInboxOpenChange(!inboxOpen)}
               >
-                <CheckCheck className="size-3.5" />
+                <Inbox className="size-3.5" />
+                {attention.rows.length > 0 ? (
+                  <span
+                    data-testid="sidebar-attention-badge"
+                    className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
+                  >
+                    {attention.rows.length > 9 ? "9+" : attention.rows.length}
+                  </span>
+                ) : null}
               </IconButton>
             </div>
           ) : null}
         </div>
 
-        {attention ? (
-          <div className="shrink-0 border-b border-worktree-sidebar-border px-2 pb-2">
-            <button
-              type="button"
-              aria-expanded={attention.worktreeListOpen}
-              aria-controls={WORKTREE_REGION_ID}
-              onClick={() => attention.onWorktreeListOpenChange(!attention.worktreeListOpen)}
-              className="no-drag flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md border border-worktree-sidebar-border bg-white/[0.03] px-2 text-left text-[11.5px] transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <Folder className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span className="shrink-0 truncate font-semibold">
-                {activeProject ? projectPillLabel(activeProject) : "프로젝트 없음"}
-              </span>
-              {activeWorktreeLabel ? (
-                <span className="min-w-0 truncate text-muted-foreground">/ {activeWorktreeLabel}</span>
-              ) : null}
-              <span className="sr-only">워크트리 전환</span>
-              <ChevronDown
-                aria-hidden="true"
-                className={cn("ml-auto size-3 shrink-0 text-muted-foreground transition-transform", attention.worktreeListOpen && "rotate-180")}
-              />
-            </button>
-          </div>
-        ) : null}
-
-        {attention && !attention.worktreeListOpen ? (
+        {attention && inboxOpen ? (
           <AttentionInbox
             rows={attention.rows}
             onOpen={attention.onOpen}
             onDismiss={attention.onDismiss}
-            openSessionCount={attention.openSessionCount}
           />
         ) : null}
 
         <div
-          ref={worktreeRegionRef}
-          id={WORKTREE_REGION_ID}
-          tabIndex={-1}
           data-testid="worktree-region"
-          hidden={attention ? !attention.worktreeListOpen : undefined}
-          className={cn("min-h-0 flex-1 flex-col outline-none", attention && !attention.worktreeListOpen ? "hidden" : "flex")}
+          hidden={inboxOpen || undefined}
+          className={cn("min-h-0 flex-1 flex-col", inboxOpen ? "hidden" : "flex")}
         >
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek">
             {projects.length === 0 ? (
@@ -617,7 +593,7 @@ export function Sidebar({
           {attention ? (
             <span className="mr-auto flex min-w-0 items-center gap-1.5 truncate pl-0.5 text-[10.5px] text-muted-foreground">
               <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-success" />
-              감시 중 {attention.openSessionCount}개 세션
+              {attention.openSessionCount} {attention.openSessionCount === 1 ? "session" : "sessions"} watched
             </span>
           ) : null}
           <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>

@@ -785,7 +785,7 @@ describe("Sidebar navigation", () => {
     expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
   });
 
-  it("leads with the inbox and folds the worktree tree behind the folder pill", () => {
+  it("shows the worktree tree by default and swaps to the inbox only through the inbox icon", () => {
     const attention = {
       rows: [{
         id: "row-1", revision: 1, workspaceId: "default", sessionId: "sess-1", state: "needs-you" as const,
@@ -795,28 +795,32 @@ describe("Sidebar navigation", () => {
       onDismiss: vi.fn(),
       onDismissAll: vi.fn(),
       openSessionCount: 3,
-      worktreeListOpen: false,
-      onWorktreeListOpenChange: vi.fn(),
+      inboxOpen: false,
+      onInboxOpenChange: vi.fn(),
     };
     const onSelectWorktree = vi.fn();
     const view = renderSidebar({ attention, projects, activeProjectId: "maho-workspace", onSelectWorktree });
-    const pill = screen.getByRole("button", { name: /워크트리 전환/ });
-    expect(pill).toHaveTextContent("maho-workspace");
-    expect(pill).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByTestId("worktree-region")).not.toBeVisible();
-    expect(screen.getByTestId("attention-row-text")).toHaveTextContent("Deploy — Ship it now?");
-
-    fireEvent.click(pill);
-    expect(attention.onWorktreeListOpenChange).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole("button", { name: "모두 읽음" }));
-    expect(attention.onDismissAll).toHaveBeenCalledTimes(1);
-
-    view.rerender(<Sidebar {...baseProps({ attention: { ...attention, worktreeListOpen: true }, projects, activeProjectId: "maho-workspace", onSelectWorktree })} />);
     expect(screen.getByTestId("worktree-region")).toBeVisible();
     expect(screen.queryByTestId("attention-row")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
+    const inboxButton = screen.getByRole("button", { name: "Inbox (1)" });
+    expect(inboxButton).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("sidebar-attention-badge")).toHaveTextContent("1");
     const group = screen.getByRole("list", { name: "maho-workspace worktrees" });
     fireEvent.click(within(group).getByRole("button", { name: /main/ }));
     expect(onSelectWorktree).toHaveBeenCalledWith(worktree);
-    expect(attention.onWorktreeListOpenChange).toHaveBeenLastCalledWith(false);
+    expect(attention.onInboxOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.click(inboxButton);
+    expect(attention.onInboxOpenChange).toHaveBeenCalledWith(true);
+
+    view.rerender(<Sidebar {...baseProps({ attention: { ...attention, inboxOpen: true }, projects, activeProjectId: "maho-workspace", onSelectWorktree })} />);
+    expect(screen.getByTestId("worktree-region")).not.toBeVisible();
+    expect(screen.getByTestId("attention-row-text")).toHaveTextContent("Deploy — Ship it now?");
+    expect(screen.getByRole("button", { name: "Inbox (1)" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+    expect(attention.onDismissAll).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Inbox (1)" }));
+    expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
   });
 });

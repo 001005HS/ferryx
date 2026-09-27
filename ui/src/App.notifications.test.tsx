@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, fireEvent, render, renderHook } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -265,8 +265,8 @@ vi.mock("./components/Sidebar", () => ({
     sidebarProps = props;
     const attention = props.attention;
     return (
-      <div data-testid="mock-sidebar" data-worktree-list-open={String(attention?.worktreeListOpen ?? false)}>
-        {attention && !attention.worktreeListOpen ? (
+      <div data-testid="mock-sidebar" data-inbox-open={String(attention?.inboxOpen ?? false)}>
+        {attention?.inboxOpen ? (
           <AttentionInbox rows={attention.rows} onOpen={attention.onOpen} onDismiss={attention.onDismiss} />
         ) : null}
       </div>
@@ -298,6 +298,13 @@ vi.mock("./components/TerminalSplitView", () => ({
 // them, and `workspaceStore` now imports this store at module scope, so the factory runs before
 // a plain `const` would be initialised. `vi.hoisted` lifts the box alongside the mock.
 const inboxBox = vi.hoisted(() => ({ current: null as ReturnType<typeof import("./lib/notificationCenter/notificationCenterStore").createNotificationCenterStore> | null }));
+const flashedSessions = vi.hoisted(() => [] as string[]);
+const paneFlashSessions = () => [...flashedSessions];
+vi.mock("./lib/paneFlash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./lib/paneFlash")>()),
+  flashPane: (sessionId: string) => { flashedSessions.push(sessionId); },
+}));
+
 vi.mock("./lib/notificationCenter/notificationCenterStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/notificationCenter/notificationCenterStore")>();
   if (!inboxBox.current) inboxBox.current = actual.createNotificationCenterStore();
@@ -368,6 +375,7 @@ function seedTwoProjects() {
 
 describe("App notification coordinator wiring", () => {
   beforeEach(() => {
+    flashedSessions.length = 0;
     resetWorkspaceRestore();
     inbox.dispose();
     localStorage.clear();
@@ -850,6 +858,7 @@ describe("App notification coordinator wiring", () => {
       const row = rowFor(clicked);
       await act(async () => { sidebarProps.attention!.onOpen(row); });
     };
+    const openInbox = () => act(() => { sidebarProps.attention!.onInboxOpenChange(true); });
 
     it("records focused observed done as seen despite the focus gate", async () => {
       currentActivityTargets = [target];
@@ -992,6 +1001,7 @@ describe("App notification coordinator wiring", () => {
       await act(async () => { await nativeFocusTrackingReady; });
       nativeFocusChanged?.({ payload: false });
       act(() => { emitActivityTargets(); });
+      openInbox();
       const rows = view.getAllByTestId("attention-row");
       expect(rows).toHaveLength(1);
       expect(rows[0].dataset.attentionState).toBe("done");
@@ -1004,6 +1014,7 @@ describe("App notification coordinator wiring", () => {
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
       expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
       expect(view.getByTestId("attention-inbox-empty")).toBeInTheDocument();
+      expect(paneFlashSessions()).toEqual(["sess-1"]);
     });
 
     it("dismisses a row from the inbox without navigating", async () => {
@@ -1012,33 +1023,31 @@ describe("App notification coordinator wiring", () => {
       await act(async () => { await nativeFocusTrackingReady; });
       nativeFocusChanged?.({ payload: false });
       act(() => { emitActivityTargets(); });
+      openInbox();
       dispatchWorkspaceAction.mockClear();
 
-      fireEvent.click(view.getByRole("button", { name: /알림 지우기$/ }));
+      fireEvent.click(within(view.getByTestId("attention-inbox")).getByRole("button", { name: /^Dismiss / }));
 
       expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
       expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
+      expect(paneFlashSessions()).toEqual([]);
     });
 
-    it("brings the inbox back over the worktree list with the notifications shortcut", async () => {
+    it("keeps the worktree list as the default and toggles the inbox with the notifications shortcut", async () => {
       const view = render(<App />);
       const shortcut = () => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
           key: "n", code: "KeyN", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
         }));
       });
-      act(() => { sidebarProps.attention!.onWorktreeListOpenChange(true); });
-      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("true");
+      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
 
       shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
 
       shortcut();
-      expect(view.queryByTestId("mock-sidebar")).toBeNull();
-
-      shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
     });
 
     it("shows the attention count on the collapsed sidebar and reopens the inbox from it", async () => {
@@ -1055,9 +1064,9 @@ describe("App notification coordinator wiring", () => {
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
       expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent("1");
 
-      fireEvent.click(view.getByRole("button", { name: "인박스 열기 (1)" }));
+      fireEvent.click(view.getByRole("button", { name: "Open inbox (1)" }));
 
-      expect(view.getByTestId("mock-sidebar").dataset.worktreeListOpen).toBe("false");
+      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
       expect(view.getAllByTestId("attention-row")).toHaveLength(1);
     });
 

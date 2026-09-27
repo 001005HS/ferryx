@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { resetNotificationSettings, saveNotificationSettings } from "../lib/notificationSettings";
+import { flashPane, resetPaneFlashForTests } from "../lib/paneFlash";
 import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
 
@@ -917,5 +918,53 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
     expect(screen.queryByTestId("attention-frame-corner-left")).not.toBeInTheDocument();
     expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
+  });
+});
+
+describe("inbox navigation flash", () => {
+  afterEach(() => resetPaneFlashForTests());
+
+  it("flashes only the target pane, fades out on its own, and leaves a sibling's attention frame alone", () => {
+    render(
+      <TerminalSplitView
+        layout={splitLayout()}
+        sessions={splitSessions()}
+        activityBySessionId={{
+          "session-1": { state: "done", title: "Done", isAgent: true, seen: true },
+          "session-2": { state: "waiting", title: "Waiting", isAgent: true, seen: false },
+        }}
+      />,
+    );
+    const [target, sibling] = screen.getAllByTestId("pane-leaf");
+    expect(screen.queryByTestId("pane-inbox-flash")).toBeNull();
+
+    act(() => flashPane("session-1"));
+
+    const flash = screen.getByTestId("pane-inbox-flash");
+    expect(target).toContainElement(flash);
+    expect(sibling).not.toContainElement(flash);
+    expect(target.querySelector('[data-testid="terminal-pane"]')).toHaveAttribute("data-needs-attention", "true");
+    expect(sibling.querySelector('[data-testid="terminal-pane"]')).toHaveAttribute("data-needs-attention", "true");
+    expect(sibling.querySelector('[data-testid="attention-frame-bottom"]')).not.toBeNull();
+
+    fireEvent.animationEnd(flash);
+
+    expect(screen.queryByTestId("pane-inbox-flash")).toBeNull();
+    expect(target.querySelector('[data-testid="terminal-pane"]')).toHaveAttribute("data-needs-attention", "false");
+    expect(sibling.querySelector('[data-testid="terminal-pane"]')).toHaveAttribute("data-needs-attention", "true");
+    expect(sibling.querySelector('[data-testid="attention-frame-bottom"]')).not.toBeNull();
+  });
+
+  it("restarts the flash when the same pane is reached again before the fade ends", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+    act(() => flashPane("session-1"));
+    const first = screen.getByTestId("pane-inbox-flash");
+
+    act(() => flashPane("session-1"));
+    const second = screen.getByTestId("pane-inbox-flash");
+    expect(second).not.toBe(first);
+
+    fireEvent.animationEnd(second);
+    expect(screen.queryByTestId("pane-inbox-flash")).toBeNull();
   });
 });
