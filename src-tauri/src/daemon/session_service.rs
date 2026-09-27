@@ -351,10 +351,20 @@ pub struct DaemonSessionService {
     pub(super) ssh_store_path: PathBuf,
     pub(super) session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
 }
 
 impl DaemonSessionService {
+    pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
+        self.desktop_geometries
+            .lock()
+            .insert(session_id.to_string(), (cols, rows));
+    }
+
+    pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
+        self.desktop_geometries.lock().get(session_id).copied()
+    }
     pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
         let current = self.agent_states.current(session_id)?;
         match current.state.trim().to_ascii_lowercase().as_str() {
@@ -854,7 +864,7 @@ impl DaemonSessionService {
             .map_err(|e| e.to_string())
     }
 
-    pub(super) async fn resize_session(
+    pub(crate) async fn resize_session(
         &self,
         id: &str,
         cols: u16,
@@ -1690,6 +1700,7 @@ impl DaemonSessionService {
         let session_metadata = Arc::clone(&self.session_metadata);
         let provider_session_claims = Arc::clone(&self.provider_session_claims);
         let agent_states = Arc::clone(&self.agent_states);
+        let desktop_geometries = Arc::clone(&self.desktop_geometries);
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
@@ -2019,6 +2030,7 @@ impl DaemonSessionService {
                 let cleanup_cache = Arc::clone(&spawn_idempotency_cache);
                 let cleanup_metadata = Arc::clone(&session_metadata);
                 let cleanup_claims = Arc::clone(&provider_session_claims);
+                let cleanup_desktop_geometries = Arc::clone(&desktop_geometries);
                 let cleanup_agent_states = Arc::clone(&agent_states);
                 let handover_manager = handover_manager.clone();
                 let terminal_service = Arc::clone(&terminal_service);
@@ -2136,6 +2148,9 @@ impl DaemonSessionService {
                                 .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
                         }
                     }
+                    cleanup_desktop_geometries
+                        .lock()
+                        .remove(&cleanup_session_id);
                     if let Some(manager) = handover_manager.upgrade() {
                         manager.check_retirement_if_empty(&terminal_service);
                     }
@@ -2229,6 +2244,7 @@ impl DaemonSessionService {
 
     pub(super) fn release_session_ownership(&self, session_id: &str) {
         self.session_router.remove_workspace(session_id);
+        self.desktop_geometries.lock().remove(session_id);
         self.spawn_idempotency_cache
             .lock()
             .retain(|_, entry| entry.session_id != session_id);

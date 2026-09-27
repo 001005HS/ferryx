@@ -1766,15 +1766,20 @@ async fn ws_terminal_handler(
         ));
     }
 
+    let mut initial_resized = false;
     let attachment = while_device_authorized(&mut revocation, async {
         if let Some((cols, rows)) =
             requested_geometry.filter(|_| device.permission == DevicePermission::Control)
         {
             if state.session_backend.recovery(&session_id).await?.is_none() {
-                state
+                if state
                     .session_backend
                     .resize(&session_id, cols, rows)
-                    .await?;
+                    .await
+                    .is_ok()
+                {
+                    initial_resized = true;
+                }
             }
         }
         state
@@ -1787,19 +1792,24 @@ async fn ws_terminal_handler(
     .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     Ok(ws.on_upgrade(move |socket| async move {
+        let resized = Arc::new(std::sync::atomic::AtomicBool::new(initial_resized));
         let _ = while_device_authorized(
             &mut revocation,
             handle_terminal_socket(
                 socket,
-                session_id,
+                session_id.clone(),
                 attachment,
                 device,
-                state,
+                Arc::clone(&state),
                 render_grid,
                 requested_geometry,
+                Arc::clone(&resized),
             ),
         )
         .await;
+        if resized.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
+        }
     }))
 }
 
@@ -1880,10 +1890,18 @@ async fn machine_terminal_upgrade(
         .max_write_buffer_size(1024 * 1024)
         .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
+            let session_id = session.target.session_id.clone();
             let mut fenced = lease.cancelled.clone();
             let generation = lease.generation;
+            let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let work = handle_machine_terminal_socket(
-                socket, session, attachment, generation, device, state,
+                socket,
+                session,
+                attachment,
+                generation,
+                device,
+                Arc::clone(&state),
+                Arc::clone(&resized),
             );
             tokio::select! {
                 biased;
@@ -1894,6 +1912,9 @@ async fn machine_terminal_upgrade(
             // No task is detached, no input survives this scope, and failed
             // upgrades also drop the captured lease without closing the PTY.
             drop(lease);
+            if resized.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
+            }
         });
     Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
 }
@@ -1923,6 +1944,7 @@ async fn handle_machine_terminal_socket(
     generation: u64,
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
+    resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use crate::remote::protocol::MachineTerminalControl;
     use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
@@ -2168,10 +2190,14 @@ async fn handle_machine_terminal_socket(
                                 && cols <= 1000
                                 && rows <= 1000 =>
                             {
-                                state
+                                let res = state
                                     .session_backend
                                     .resize(&target.session_id, cols, rows)
-                                    .await
+                                    .await;
+                                if res.is_ok() {
+                                    resized.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                                res
                             }
                             Ok(MachineTerminalControl::Signal {
                                 generation: supplied,
@@ -2242,6 +2268,7 @@ async fn handle_terminal_socket(
     state: Arc<RemoteGatewayState>,
     render_grid: bool,
     requested_geometry: Option<(u16, u16)>,
+    resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let recovery_state = Arc::new(parking_lot::RwLock::new(None));
     let mut recovery = match state.session_backend.recovery(&session_id).await {
@@ -2255,10 +2282,14 @@ async fn handle_terminal_socket(
         };
         if device.permission == DevicePermission::Control {
             if let Some((cols, rows)) = requested_geometry {
-                let _ = state
+                if state
                     .session_backend
                     .resize_generation(&session_id, status.generation, cols, rows)
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    resized.store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
         *recovery_state.write() = Some(status.clone());
@@ -2275,6 +2306,7 @@ async fn handle_terminal_socket(
             state,
             recovery,
             recovery_state,
+            resized,
         )
         .await;
         return;
@@ -2372,13 +2404,16 @@ async fn handle_terminal_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            let _ = ssh_control(
+                            let ok = ssh_control(
                                 &session_backend,
                                 &session_id_clone,
                                 &ctrl,
                                 can_control,
                             )
                             .await;
+                            if ok && matches!(ctrl, ClientControlMessage::RemoteResize { .. }) {
+                                resized.store(true, std::sync::atomic::Ordering::Release);
+                            }
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
@@ -2394,8 +2429,13 @@ async fn handle_terminal_socket(
                                     continue;
                                 }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                    if session_backend
+                                        .resize(&session_id_clone, cols, rows)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        resized.store(true, std::sync::atomic::Ordering::Release);
+                                    }
                                 }
                             }
                             ClientControlMessage::Signal { signal } => {
@@ -2521,6 +2561,7 @@ async fn handle_terminal_grid_socket(
     state: Arc<RemoteGatewayState>,
     mut recovery: Option<RecoveryStream>,
     recovery_state: Arc<parking_lot::RwLock<Option<RemoteRecoveryStatus>>>,
+    resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let is_ssh = recovery_state.read().is_some();
     let (mut sender, mut receiver) = socket.split();
@@ -2760,6 +2801,7 @@ async fn handle_terminal_grid_socket(
                             .await;
                             if let ClientControlMessage::RemoteResize { cols, rows, .. } = ctrl {
                                 if ok {
+                                    resized.store(true, std::sync::atomic::Ordering::Release);
                                     if let Some((cols, rows)) = validated_grid_geometry(cols, rows)
                                     {
                                         if !enqueue_grid_operation(
@@ -2787,8 +2829,13 @@ async fn handle_terminal_grid_socket(
                                     continue;
                                 }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                    if session_backend
+                                        .resize(&session_id_clone, cols, rows)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        resized.store(true, std::sync::atomic::Ordering::Release);
+                                    }
                                     if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
                                         mirror.resize(cols, rows)
                                     }) {

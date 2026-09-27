@@ -97,6 +97,12 @@ pub trait RemoteSessionBackend: Send + Sync {
         session_id: &'a str,
         signal: TerminalSignal,
     ) -> BoxFuture<'a, Result<(), String>>;
+    fn restore_desktop_geometry<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The router retains Local/SSH/legacy transport and generation validation;
@@ -162,6 +168,18 @@ impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionServi
         signal: TerminalSignal,
     ) -> BoxFuture<'a, Result<(), String>> {
         self.router().signal(id, signal)
+    }
+    fn restore_desktop_geometry<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if let Some((cols, rows)) = self.desktop_geometry(id) {
+                self.resize_session(id, cols, rows).await
+            } else {
+                Ok(())
+            }
+        })
     }
 }
 
