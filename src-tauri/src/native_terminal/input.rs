@@ -383,47 +383,59 @@ mod tests {
             None
         );
         assert_eq!(
-            natural_text_editing_bytes(&event(
-                KeyCode::ArrowLeft,
-                KeyModifiers::default(),
-                KeyAction::Press
-            ), true),
+            natural_text_editing_bytes(
+                &event(
+                    KeyCode::ArrowLeft,
+                    KeyModifiers::default(),
+                    KeyAction::Press
+                ),
+                true
+            ),
             None
         );
         assert_eq!(
-            natural_text_editing_bytes(&event(
-                KeyCode::ArrowLeft,
-                KeyModifiers {
-                    alt: true,
-                    shift: true,
-                    ..KeyModifiers::default()
-                },
-                KeyAction::Press
-            ), true),
+            natural_text_editing_bytes(
+                &event(
+                    KeyCode::ArrowLeft,
+                    KeyModifiers {
+                        alt: true,
+                        shift: true,
+                        ..KeyModifiers::default()
+                    },
+                    KeyAction::Press
+                ),
+                true
+            ),
             None
         );
         assert_eq!(
-            natural_text_editing_bytes(&event(
-                KeyCode::ArrowLeft,
-                KeyModifiers {
-                    super_key: true,
-                    ctrl: true,
-                    ..KeyModifiers::default()
-                },
-                KeyAction::Press
-            ), true),
+            natural_text_editing_bytes(
+                &event(
+                    KeyCode::ArrowLeft,
+                    KeyModifiers {
+                        super_key: true,
+                        ctrl: true,
+                        ..KeyModifiers::default()
+                    },
+                    KeyAction::Press
+                ),
+                true
+            ),
             None
         );
         assert_eq!(
-            natural_text_editing_bytes(&event(
-                KeyCode::ArrowLeft,
-                KeyModifiers {
-                    alt: true,
-                    super_key: true,
-                    ..KeyModifiers::default()
-                },
-                KeyAction::Press
-            ), true),
+            natural_text_editing_bytes(
+                &event(
+                    KeyCode::ArrowLeft,
+                    KeyModifiers {
+                        alt: true,
+                        super_key: true,
+                        ..KeyModifiers::default()
+                    },
+                    KeyAction::Press
+                ),
+                true
+            ),
             None
         );
     }
