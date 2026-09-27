@@ -1312,4 +1312,107 @@ describe("remote terminal grid contract", () => {
     expect(localWs.send).toHaveBeenCalledTimes(1);
     expect(localWs.send).toHaveBeenCalledWith(new TextEncoder().encode("a"));
   });
+
+  it("renders T3-style header with icon back chevron, Terminal title, and title subtitle in both embedded and standard modes", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onBack = vi.fn();
+    const { rerender } = render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        title="ferryx-ui · Local"
+        onBack={onBack}
+        embedded={true}
+      />,
+    );
+
+    const backButton = screen.getByTestId("remote-terminal-back");
+    expect(backButton).toHaveAttribute("aria-label", "Back to chat");
+    fireEvent.click(backButton);
+    expect(onBack).toHaveBeenCalledTimes(1);
+
+    expect(screen.getByText("Terminal")).toBeInTheDocument();
+    expect(screen.getByText("ferryx-ui · Local")).toBeInTheDocument();
+
+    rerender(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onBack={onBack}
+        embedded={false}
+      />,
+    );
+    expect(screen.getByText("Terminal")).toBeInTheDocument();
+    expect(screen.queryByText("Desktop terminal")).not.toBeInTheDocument();
+  });
+
+  it("degrades safely when onBack is not provided in both embedded and standard modes", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    const { rerender } = render(
+      <RemoteTerminal
+        sessionId="session-edge-1"
+        token="token-abc"
+        embedded={false}
+      />,
+    );
+
+    expect(screen.getByText("Terminal")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-back")).toBeNull();
+    expect(screen.queryByText("Desktop terminal")).not.toBeInTheDocument();
+
+    rerender(
+      <RemoteTerminal
+        sessionId="session-edge-1"
+        token="token-abc"
+        embedded={true}
+      />,
+    );
+
+    expect(screen.getByText("Terminal")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-back")).toBeNull();
+    expect(screen.queryByText("Desktop terminal")).not.toBeInTheDocument();
+  });
+
+  it("preserves terminal grid container full-bleed layout and embedded indicator wiring", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    const { rerender } = render(
+      <RemoteTerminal
+        sessionId="session-grid-1"
+        token="token-abc"
+        embedded={true}
+      />,
+    );
+
+    const grid = screen.getByTestId("remote-terminal-grid");
+    expect(grid).toBeInTheDocument();
+    expect(grid.className).toContain("relative");
+    expect(grid.className).toContain("min-h-0");
+    expect(grid.className).toContain("flex-1");
+    expect(grid.className).toContain("overflow-hidden");
+    expect(grid.className).toContain("bg-terminal");
+
+    expect(screen.queryByTestId("remote-terminal-overflow-indicator")).toBeNull();
+    expect(screen.queryByTestId("remote-terminal-buffered-indicator")).toBeNull();
+
+    rerender(
+      <RemoteTerminal
+        sessionId="session-grid-1"
+        token="token-abc"
+        embedded={false}
+      />,
+    );
+
+    const standardGrid = screen.getByTestId("remote-terminal-grid");
+    expect(standardGrid).toBeInTheDocument();
+    expect(standardGrid.className).toContain("relative");
+    expect(standardGrid.className).toContain("min-h-0");
+    expect(standardGrid.className).toContain("flex-1");
+    expect(standardGrid.className).toContain("overflow-hidden");
+    expect(standardGrid.className).toContain("bg-terminal");
+
+    expect(screen.queryByTestId("remote-terminal-overflow-indicator")).toBeNull();
+    expect(screen.queryByTestId("remote-terminal-buffered-indicator")).toBeNull();
+  });
 });

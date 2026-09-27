@@ -1,5 +1,6 @@
+import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MobileChatThreadList, type ThreadListRow } from "./MobileChatThreadList";
 
 const baseRows: ThreadListRow[] = [
@@ -26,8 +27,8 @@ describe("MobileChatThreadList", () => {
     expect(screen.getByText("Fix ferryx relay")).toBeInTheDocument();
     expect(screen.getByText("Bump version")).toBeInTheDocument();
     expect(screen.getByText("Write docs")).toBeInTheDocument();
-    expect(screen.getByText("main · 2")).toBeInTheDocument();
-    expect(screen.getByText("docs · 1")).toBeInTheDocument();
+    expect(screen.getByTestId("thread-group-main")).toHaveTextContent("main2");
+    expect(screen.getByTestId("thread-group-docs")).toHaveTextContent("docs1");
   });
 
   it("2. renders the monospace meta line joined as worktree · agent", () => {
@@ -38,7 +39,7 @@ describe("MobileChatThreadList", () => {
     expect(meta).toHaveClass("font-mono");
   });
 
-  it("3. renders the status label for working, waiting and done", () => {
+  it("3. renders the status label for working and waiting, but no label for done", () => {
     render(
       <MobileChatThreadList
         rows={[
@@ -52,11 +53,11 @@ describe("MobileChatThreadList", () => {
 
     expect(screen.getByText("Working")).toBeInTheDocument();
     expect(screen.getByText("Approval")).toBeInTheDocument();
-    expect(screen.getByText("Done")).toBeInTheDocument();
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
 
     const labels = screen.getAllByTestId("thread-row-status");
-    expect(labels).toHaveLength(3);
-    expect(labels.map((label) => label.getAttribute("data-status"))).toEqual(["working", "waiting", "done"]);
+    expect(labels).toHaveLength(2);
+    expect(labels.map((label) => label.getAttribute("data-status"))).toEqual(["working", "waiting"]);
   });
 
   it("4. marks exactly one active row", () => {
@@ -107,5 +108,23 @@ describe("MobileChatThreadList", () => {
     expect(screen.getByTestId("thread-row-row-2")).toBeInTheDocument();
     expect(screen.getByTestId("thread-row-row-3")).toBeInTheDocument();
     expect(screen.queryByTestId("thread-list-empty")).not.toBeInTheDocument();
+  });
+
+  it("8. renders provider glyph when agentType is supplied and omits it when absent", () => {
+    render(
+      <MobileChatThreadList
+        rows={[
+          { id: "with-agent", title: "With OMO", agentType: "omo" },
+          { id: "without-agent", title: "Without agent" },
+        ]}
+        onSelectRow={vi.fn()}
+      />,
+    );
+
+    const withAgentRow = screen.getByTestId("thread-row-with-agent");
+    const withoutAgentRow = screen.getByTestId("thread-row-without-agent");
+
+    expect(within(withAgentRow).getByTestId("thread-row-provider")).toBeInTheDocument();
+    expect(within(withoutAgentRow).queryByTestId("thread-row-provider")).not.toBeInTheDocument();
   });
 });

@@ -10,7 +10,7 @@ import {
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
-import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
+import { closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
@@ -1288,12 +1288,12 @@ export function useWorkspaceStore({
   }, [dispatch, bumpParkedActivity]);
 
   const createBrowserTab = useCallback(
-    async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string }) => {
+    async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string; opener?: { browserId: string; handle: string } }) => {
       const capturedWorktreePath = options?.worktreePath ?? stateRef.current.activeWorktreePath ?? undefined;
       const targetWorktree = capturedWorktreePath
         ? stateRef.current.worktrees.find((wt) => wt.path === capturedWorktreePath)
         : getActiveWorktree(stateRef.current);
-      const browserState = await createBrowser({
+      const createRequest: Parameters<typeof createBrowser>[0] = {
         browserId: options?.browserId,
         workspaceId,
         worktreePath: targetWorktree?.path,
@@ -1304,12 +1304,24 @@ export function useWorkspaceStore({
         // chrome plus any native terminal underneath until BrowserPane reports real bounds.
         // BrowserPane reveals it once the bounds update is acknowledged.
         visible: false,
-      });
+      };
+      // A popup tab is created linked to the tab that called window.open, so its OAuth
+      // callback can be routed back through the host.
+      const browserState = options?.opener
+        ? await createPopupBrowser(createRequest, options.opener)
+        : await createBrowser(createRequest);
       // Landing this tab after a project switch would attach one project's
       // browser to another's layout, and dropping it silently would orphan the
       // webview we just created.
       if (mountedWorkspaceIdRef.current !== workspaceId) {
-        await closeBrowser(browserState.browserId).catch(() => undefined);
+        // The tab is discarded here, so the webview close has no user-facing surface to fail
+        // into; it is still recorded rather than vanishing as a silent no-op.
+        await closeBrowser(browserState.browserId).catch((error: unknown) => {
+          switchDebug("browser.create.discarded-close.error", {
+            browserId: browserState.browserId,
+            error: String(error),
+          });
+        });
         return null;
       }
 
@@ -1456,12 +1468,12 @@ export function useWorkspaceStore({
   );
 
   const reloadBrowserTabAction = useCallback(
-    async (tabId: string, paneBrowserId?: string) => {
+    async (tabId: string, paneBrowserId?: string, options?: BrowserReloadOptions) => {
       const browserId = getBrowserIdForTab(stateRef.current.layout, tabId, paneBrowserId);
       if (!browserId) return;
       dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { loading: true } });
       try {
-        await reloadBrowser(browserId);
+        await reloadBrowser(browserId, options);
       } finally {
         dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { loading: false } });
       }

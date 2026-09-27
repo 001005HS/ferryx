@@ -61,6 +61,13 @@ fn dirs_home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub fn unsupported_screenshot_error() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::Unsupported,
+        "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
+    )
+}
+
 #[cfg(target_os = "macos")]
 pub async fn take_browser_screenshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -78,11 +85,16 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
     webview_label: &str,
     out_path: &str,
 ) -> Result<String, IpcError> {
-    let _ = (app, webview_label, out_path);
-    Err(IpcError::new(
-        IpcErrorCode::Unsupported,
-        "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
-    ))
+    // `app` and `webview_label` are unused on this target: the capture source is
+    // macOS-only. They stay in the signature so every platform exposes one shape,
+    // and the non-macOS build must not warn about them.
+    let _ = (app, webview_label);
+    // Reject an unusable output path BEFORE reporting the platform limitation, so a
+    // caller that asked for an impossible path gets that specific error instead of a
+    // blanket `Unsupported`. Nothing is written here, so the resolved path is
+    // deliberately dropped.
+    resolve_screenshot_path(out_path).map(|_resolved_path| ())?;
+    Err(unsupported_screenshot_error())
 }
 
 pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Sized>(
@@ -188,5 +200,29 @@ mod tests {
             .expect_err("should propagate unsupported error");
 
         assert_eq!(err.code, IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn test_unsupported_screenshot_error_contract() {
+        let err = unsupported_screenshot_error();
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
+        let code_str = serde_json::to_value(&err.code)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap();
+        assert_eq!(code_str, "UNSUPPORTED");
+        assert!(err.message.contains("macOS-only"));
+    }
+
+    #[test]
+    fn test_non_macos_screenshot_validates_path_before_unsupported() {
+        assert_eq!(
+            resolve_screenshot_path("").unwrap_err().code,
+            IpcErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            resolve_screenshot_path("   ").unwrap_err().code,
+            IpcErrorCode::InvalidArgument
+        );
     }
 }

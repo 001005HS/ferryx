@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
+  extractBrowserErrorCode,
   focusBrowser,
   getBrowserState,
   getBrowserSnapshotCapability,
@@ -29,6 +30,7 @@ import {
   openExternalUrl,
   setBrowserZoom,
   type BrowserDesignSnapshot,
+  type BrowserReloadOptions,
   type BrowserShortcutAction,
   type BrowserShortcutDomEvent,
   type BrowserSnapshotCapability,
@@ -39,9 +41,11 @@ import {
   BROWSER_HISTORY_EVENT,
   clearBrowserHistory,
   loadBrowserHistory,
+  searchBrowserHistory,
   type BrowserHistoryEntry,
 } from "../lib/browserHistory";
 import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, useBrowserSettings } from "../lib/browserSettings";
+import { isHardReloadSupportedPlatform } from "../lib/shortcuts";
 import type { BrowserTab } from "../lib/types";
 
 // Keep the toolbar's zoom clamps in lockstep with the Settings-exposed zoom levels
@@ -49,10 +53,21 @@ import type { BrowserTab } from "../lib/types";
 const BROWSER_ZOOM_MIN = Math.min(...BROWSER_ZOOM_LEVELS) / 100;
 const BROWSER_ZOOM_MAX = Math.max(...BROWSER_ZOOM_LEVELS) / 100;
 
+/** Every toolbar failure names the action the user took plus the backend's structured code, so a
+ * failed action can never read as a successful one. The code comes from the IPC error contract,
+ * never from matching message prose. */
+function actionFailureMessage(action: string, error: unknown): string {
+  return `${action} failed: ${extractBrowserErrorCode(error)}`;
+}
+
 interface BrowserToolbarProps {
   tab: BrowserTab;
   onNavigate: (url: string) => void;
-  onReload: () => void;
+  // Reload carries an optional cache-bypass request: the backend reaches the platform binding
+  // (macOS `WKWebView.reloadFromOrigin`, Linux WebKitGTK `reload_bypass_cache`) and answers a
+  // structured error where this build has no such binding (Windows carries no WebView2 binding),
+  // so the flag is never silently dropped on the way to the engine.
+  onReload: (options?: BrowserReloadOptions) => void;
   onGoBack?: () => void;
   onGoForward?: () => void;
   onToggleElementPick?: () => void;
@@ -79,7 +94,7 @@ export function BrowserToolbar({
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
   const [historyEntries, setHistoryEntries] = useState<BrowserHistoryEntry[]>(loadBrowserHistory);
   const [snapshotCapability, setSnapshotCapability] = useState<BrowserSnapshotCapability | null>(null);
-  const [elementPickError, setElementPickError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [designSnapshot, setDesignSnapshot] = useState<BrowserDesignSnapshot | null>(null);
   const [designSending, setDesignSending] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
@@ -92,16 +107,7 @@ export function BrowserToolbar({
 
   const omniboxEntries = useMemo(() => {
     if (!settings.rememberBrowsingHistory) return [];
-    const prefix = historyQuery.trim().toLocaleLowerCase();
-    const entries = prefix
-      ? historyEntries.filter((entry) => {
-          const url = entry.url.toLocaleLowerCase();
-          const title = (entry.title ?? "").toLocaleLowerCase();
-          const compactUrl = url.replace(/^https?:\/\//, "");
-          return url.startsWith(prefix) || compactUrl.startsWith(prefix) || title.startsWith(prefix);
-        })
-      : historyEntries;
-    return entries.slice(0, 8);
+    return searchBrowserHistory(historyEntries, historyQuery, 8);
   }, [historyEntries, historyQuery, settings.rememberBrowsingHistory]);
 
   useEffect(() => {
@@ -145,18 +151,21 @@ export function BrowserToolbar({
   const handleGoBack = async () => {
     try {
       await goBackBrowser(tab.browserId);
+      setActionError(null);
       onGoBack?.();
-    } catch {
-      // Native state remains authoritative; a later state sync can recover.
+    } catch (error) {
+      // Native state remains authoritative, but the user's click must not vanish as a no-op.
+      setActionError(actionFailureMessage("Back", error));
     }
   };
 
   const handleGoForward = async () => {
     try {
       await goForwardBrowser(tab.browserId);
+      setActionError(null);
       onGoForward?.();
-    } catch {
-      // Native state remains authoritative; a later state sync can recover.
+    } catch (error) {
+      setActionError(actionFailureMessage("Forward", error));
     }
   };
 
@@ -173,6 +182,9 @@ export function BrowserToolbar({
           break;
         case "reload":
           onReload();
+          break;
+        case "reload-hard":
+          onReload({ ignoreCache: true });
           break;
         case "back":
           void handleGoBack();
@@ -202,7 +214,11 @@ export function BrowserToolbar({
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      // Without this subscription the native shortcut bridge is inert for this tab, which the
+      // user experiences as shortcuts that simply do nothing.
+      if (!disposed) setActionError(actionFailureMessage("Shortcut listener", error));
+    });
 
     return () => {
       disposed = true;
@@ -224,16 +240,20 @@ export function BrowserToolbar({
       // slips through surfaces below the toolbar instead of leaving the pick silently dead.
       void finishBrowserElementPick(tab.browserId)
         .then((snapshot) => {
-          setElementPickError(null);
+          setActionError(null);
           setDesignSnapshot(snapshot);
         })
         .catch((error) => {
-          setElementPickError(error instanceof Error ? error.message : "Element pick failed");
+          setActionError(actionFailureMessage("Element pick", error));
         });
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      // A missing subscription means a pick could never complete; say so instead of leaving the
+      // picker armed and permanently silent.
+      if (!disposed) setActionError(actionFailureMessage("Element pick listener", error));
+    });
     return () => {
       disposed = true;
       unlisten?.();
@@ -279,36 +299,40 @@ export function BrowserToolbar({
   };
 
   const handleExternalOpen = () => {
-    if (tab.url && tab.url !== "about:blank") {
-      void openExternalUrl(tab.url);
+    if (!tab.url || tab.url === "about:blank") return;
+    void openExternalUrl(tab.url)
+      .then(() => setActionError(null))
+      .catch((error: unknown) => setActionError(actionFailureMessage("Open in system browser", error)));
+  };
+
+  const applyZoom = async (nextZoom: number) => {
+    // The optimistic value must not outlive a rejected IPC: showing 110% while the page stays at
+    // 100% is exactly the lie the zoom readout must never tell.
+    const previousZoom = zoomFactor;
+    setZoomFactor(nextZoom);
+    try {
+      await setBrowserZoom(tab.browserId, nextZoom);
+      setActionError(null);
+    } catch (error) {
+      setZoomFactor(previousZoom);
+      setActionError(actionFailureMessage("Zoom", error));
     }
   };
 
   const handleZoomIn = async () => {
-    const nextZoom = Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10);
-    setZoomFactor(nextZoom);
-    try {
-      await setBrowserZoom(tab.browserId, nextZoom);
-    } catch {
-      // Native state will resynchronize on the next browser state event.
-    }
+    await applyZoom(Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10));
   };
 
   const handleZoomOut = async () => {
-    const nextZoom = Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10);
-    setZoomFactor(nextZoom);
-    try {
-      await setBrowserZoom(tab.browserId, nextZoom);
-    } catch {
-      // Native state will resynchronize on the next browser state event.
-    }
+    await applyZoom(Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10));
   };
 
   const handleFocus = async () => {
     try {
       await focusBrowser(tab.browserId);
-    } catch {
-      // The tab may have been closed while the command was queued.
+      setActionError(null);
+    } catch (error) {
+      setActionError(actionFailureMessage("Focus", error));
     }
   };
 
@@ -320,8 +344,9 @@ export function BrowserToolbar({
         setHistoryQuery("");
       }
       setZoomFactor(state.zoomFactor);
-    } catch {
-      // The tab may have been closed while the command was queued.
+      setActionError(null);
+    } catch (error) {
+      setActionError(actionFailureMessage("Sync state", error));
     }
   };
 
@@ -343,6 +368,16 @@ export function BrowserToolbar({
       setOmniboxOpen(false);
     }
     updateSettings({ rememberBrowsingHistory: remember });
+  };
+
+  const hardReloadSupported = isHardReloadSupportedPlatform();
+
+  const handleReload = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (hardReloadSupported && event.shiftKey) {
+      onReload({ ignoreCache: true });
+      return;
+    }
+    onReload();
   };
 
   return (
@@ -371,8 +406,9 @@ export function BrowserToolbar({
           </button>
           <button
             type="button"
-            onClick={onReload}
+            onClick={handleReload}
             aria-label="Reload"
+            title={hardReloadSupported ? "Reload (Shift+Click bypasses the cache)" : "Reload"}
             data-shortcut="browser.reload"
             className="p-1 rounded hover:bg-muted transition-colors"
           >
@@ -430,7 +466,11 @@ export function BrowserToolbar({
           <button
             type="button"
             onClick={() => {
-              void openBrowserDevtools(tab.browserId);
+              // A rejected devtools open is otherwise an unhandled rejection: the user clicks and
+              // nothing happens, with no reason shown anywhere.
+              void openBrowserDevtools(tab.browserId)
+                .then(() => setActionError(null))
+                .catch((error: unknown) => setActionError(actionFailureMessage("DevTools", error)));
             }}
             title="DevTools"
             aria-label="DevTools"
@@ -442,8 +482,14 @@ export function BrowserToolbar({
             type="button"
             disabled={!elementPickSupported}
             onClick={() => {
-              if (elementPicking) void removeBrowserElementPicker(tab.browserId);
-              else void injectBrowserElementPicker(tab.browserId);
+              // Arming the picker is the user's action; a rejection here would otherwise leave the
+              // button pressed with nothing listening for a pick.
+              const togglePicker = elementPicking
+                ? removeBrowserElementPicker(tab.browserId)
+                : injectBrowserElementPicker(tab.browserId);
+              void togglePicker
+                .then(() => setActionError(null))
+                .catch((error: unknown) => setActionError(actionFailureMessage("Element picker", error)));
               onToggleElementPick?.();
             }}
             title={elementPickSupported ? "Select element" : "Select element (unavailable on this platform)"}
@@ -459,9 +505,9 @@ export function BrowserToolbar({
         </div>
       </div>
 
-      {elementPickError ? (
-        <div role="alert" className="border-t border-border/70 px-3 py-1 text-[10px] text-destructive">
-          {elementPickError}
+      {actionError ? (
+        <div role="alert" data-testid="browser-toolbar-error" className="border-t border-border/70 px-3 py-1 text-[10px] text-destructive">
+          {actionError}
         </div>
       ) : null}
       {designSnapshot ? (
@@ -478,7 +524,7 @@ export function BrowserToolbar({
             void deliverDesignFeedback({ sessionId: request.sessionId, memo: request.memo, snapshot, workspaceId: request.workspaceId })
               .then(() => { setDesignSnapshot(null); setDesignSending(false); })
               .catch((error) => {
-                setDesignError(error instanceof Error ? error.message : String(error));
+                setDesignError(actionFailureMessage("Design feedback", error));
                 setDesignSending(false);
               });
           }}

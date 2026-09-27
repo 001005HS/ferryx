@@ -4,6 +4,7 @@ import {
   downloadAndInstallUpdate,
   subscribeUpdateStatus,
   type UpdateStatus,
+  updatesManagedExternally,
 } from "./updater";
 
 export const UPDATE_TOAST_ID = "update-available";
@@ -109,8 +110,11 @@ export function initUpdateToasts(): () => void {
     return unsubscribe ?? (() => {});
   }
   initialized = true;
-  unsubscribe = subscribeUpdateStatus((status) => {
-    handleUpdateStatusChange(status);
+  void updatesManagedExternally().then((managed) => {
+    if (managed || !initialized) return;
+    unsubscribe = subscribeUpdateStatus((status) => {
+      handleUpdateStatusChange(status);
+    });
   });
   return () => {
     initialized = false;

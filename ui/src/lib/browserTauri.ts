@@ -13,6 +13,7 @@ import type {
 export const BROWSER_SESSION_CREATED_EVENT = "browser_session_created";
 export const BROWSER_OPEN_REQUESTED_EVENT = "browser_open_requested";
 export const BROWSER_DOWNLOAD_REQUESTED_EVENT = "browser_download_requested";
+export const BROWSER_DOWNLOAD_UPDATED_EVENT = "browser_download_updated";
 export const BROWSER_SHORTCUT_REQUESTED_EVENT = "browser_shortcut_requested";
 export const BROWSER_ELEMENT_PICKED_EVENT = "browser_element_picked";
 export const BROWSER_LINK_CLICKED_EVENT = "browser_link_clicked";
@@ -50,9 +51,24 @@ export type BrowserDownloadRequestedPayload = {
   targetUrl: string;
 };
 
+export type DownloadStatus = "pending" | "inProgress" | "completed" | "failed" | "cancelled";
+
+export interface DownloadRecord {
+  id: string;
+  url: string;
+  filePath: string;
+  status: DownloadStatus;
+  totalBytes?: number | null;
+  receivedBytes: number;
+  error?: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export type BrowserShortcutAction =
   | "focus-address"
   | "reload"
+  | "reload-hard"
   | "back"
   | "forward"
   | "find"
@@ -155,6 +171,11 @@ const browserLifecycleQueues = new Map<string, Promise<void>>();
 
 function enqueueBrowserLifecycle(browserId: string, operation: () => Promise<void>): Promise<void> {
   const previous = browserLifecycleQueues.get(browserId) ?? Promise.resolve();
+  // `previous` is awaited only for ordering, never to inspect its outcome: its rejection was
+  // already delivered to the caller that enqueued that step (setBrowserVisible's only caller is
+  // BrowserPane's updateVisibility, which reports it as a display error, and every closeBrowser
+  // caller awaits the returned promise or collects it with Promise.allSettled). Dropping it here
+  // therefore cannot hide a failure from anyone, while a failed step must not stall the queue.
   const next = previous.catch(() => undefined).then(operation);
   browserLifecycleQueues.set(browserId, next);
 
@@ -210,8 +231,14 @@ export async function goForwardBrowser(browserId: string): Promise<void> {
   return invoke<void>("cmd_browser_go_forward", { browserId });
 }
 
-export async function reloadBrowser(browserId: string): Promise<void> {
-  return invoke<void>("cmd_browser_reload", { browserId });
+/** `ignoreCache` asks the platform engine to revalidate instead of serving the HTTP cache
+ * (macOS `reloadFromOrigin`, Linux `reload_bypass_cache`; the backend refuses it elsewhere). */
+export type BrowserReloadOptions = {
+  ignoreCache?: boolean;
+};
+
+export async function reloadBrowser(browserId: string, options?: BrowserReloadOptions): Promise<void> {
+  return invoke<void>("cmd_browser_reload", { browserId, ignoreCache: options?.ignoreCache ?? false });
 }
 
 function isWebviewNotFoundError(err: unknown): boolean {
@@ -221,6 +248,112 @@ function isWebviewNotFoundError(err: unknown): boolean {
     return (err as Record<string, unknown>).code === "WEBVIEW_NOT_FOUND";
   }
   return false;
+}
+
+export type BrowserDisplayOperation = "bounds" | "visibility";
+
+export type BrowserDisplayError = {
+  operation: BrowserDisplayOperation;
+  code: string;
+};
+
+export type BrowserCookieImportFailureReason =
+  | "no-profile"
+  | "no-tab"
+  | "keychain-denied"
+  | "no-cookies"
+  | "unsupported-platform"
+  | "cookie-import-failed";
+
+export type BrowserCookieImportErrorPayload = {
+  code?: string;
+  message?: string;
+  details?: {
+    reason?: BrowserCookieImportFailureReason | string;
+    [key: string]: unknown;
+  } | null;
+};
+
+export function extractBrowserCookieImportReason(err: unknown): BrowserCookieImportFailureReason | string | null {
+  if (!err || typeof err !== "object") return null;
+  const details = (err as Record<string, unknown>).details;
+  if (details && typeof details === "object" && details !== null) {
+    const reason = (details as Record<string, unknown>).reason;
+    if (typeof reason === "string" && reason.trim()) {
+      return reason.trim();
+    }
+  }
+  return null;
+}
+
+export function getBrowserCookieImportActionableMessage(
+  reason: BrowserCookieImportFailureReason | string,
+): string | null {
+  switch (reason) {
+    case "no-tab":
+      return "Open a browser tab using this profile before importing cookies.";
+    case "keychain-denied":
+      return "Allow Keychain access in the macOS prompt to import cookies.";
+    case "no-profile":
+      return "Browser profile directory or cookie database was not found.";
+    case "no-cookies":
+      return "No importable cookies found in the selected profile.";
+    case "unsupported-platform":
+      return "Installed browser cookie import is not supported on this platform.";
+    case "cookie-import-failed":
+      return "Failed to import cookies from browser profile.";
+    default:
+      return null;
+  }
+}
+
+export function formatBrowserCookieImportError(err: unknown): string {
+  if (!err) return "UNKNOWN_ERROR";
+
+  if (typeof err === "object" && err !== null) {
+    const errObj = err as Record<string, unknown>;
+    const reason = extractBrowserCookieImportReason(err);
+
+    if (reason) {
+      const actionable = getBrowserCookieImportActionableMessage(reason);
+      return actionable ? `${reason}: ${actionable}` : reason;
+    }
+
+    const code = typeof errObj.code === "string" ? errObj.code.trim() : undefined;
+    if (code) {
+      return code;
+    }
+
+    if (err instanceof Error && err.message.trim()) {
+      return err.message.trim();
+    }
+
+    const message = typeof errObj.message === "string" ? errObj.message.trim() : undefined;
+    if (message) {
+      return message;
+    }
+  }
+
+  if (typeof err === "string" && err.trim()) {
+    return err.trim();
+  }
+
+  return "UNKNOWN_ERROR";
+}
+
+export function extractBrowserErrorCode(err: unknown): string {
+  if (!err) return "UNKNOWN_ERROR";
+  if (typeof err === "object") {
+    const code = (err as Record<string, unknown>).code;
+    if (typeof code === "string" && code.trim()) return code.trim();
+    if (err instanceof Error && err.message) return err.message.trim();
+    const message = (err as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  if (typeof err === "string" && err.trim()) {
+    return err.trim();
+  }
+  return "UNKNOWN_ERROR";
 }
 
 export async function setBrowserBounds(
@@ -295,6 +428,23 @@ export async function importBrowserCookies(profileId: string, filePath: string):
   return result.importedCount;
 }
 
+export async function importInstalledBrowserCookies(
+  profileId: string,
+  source: "chrome" | "edge",
+  sourceProfile?: string,
+): Promise<{ importedCount: number; skippedCount: number }> {
+  return invoke<{ importedCount: number; skippedCount: number }>(
+    "cmd_browser_import_installed_cookies",
+    {
+      request: {
+        profileId,
+        source,
+        sourceProfile,
+      },
+    },
+  );
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("cmd_browser_open_external", { url });
 }
@@ -313,6 +463,22 @@ export async function clearBrowserFind(browserId: string): Promise<void> {
 
 export async function downloadBrowserUrl(url: string, filePath: string): Promise<void> {
   return invoke<void>("cmd_browser_download", { url, filePath });
+}
+
+export async function downloadBrowserUrlWithSession(
+  browserId: string,
+  url: string,
+  filePath: string,
+): Promise<DownloadRecord> {
+  return invoke<DownloadRecord>("cmd_browser_download_with_cookies", {
+    request: { url, filePath, browserId },
+  });
+}
+
+export function onBrowserDownloadUpdated(
+  listener: (payload: DownloadRecord) => void,
+): Promise<UnlistenFn> {
+  return listen<DownloadRecord>(BROWSER_DOWNLOAD_UPDATED_EVENT, (event) => listener(event.payload));
 }
 
 export function onBrowserOpenRequested(
@@ -361,4 +527,92 @@ export async function browserAutomationAct(
   request: BrowserAutomationRequest,
 ): Promise<void> {
   return invoke<void>("cmd_browser_automation_act", { request });
+}
+
+export type BrowserOpenerLink = { browserId: string; handle: string };
+
+/** The opener fields a popup-open event carries; absent for a plain open. */
+export type BrowserPopupOpenRequestedPayload = BrowserOpenRequestedPayload & {
+  openerBrowserId?: string | null;
+  popupHandle?: string | null;
+};
+
+export const BROWSER_CLOSE_REQUESTED_EVENT = "browser_close_requested";
+
+export type BrowserCloseRequestedPayload = {
+  browserId: string;
+};
+
+/**
+ * The popup link a popup-open event carries, or undefined when the open was not a popup.
+ * Without both fields the tab is created as a normal tab, which is what keeps
+ * `window.opener` null in a tab a page did not open. */
+export function popupOpenerLink(payload: BrowserOpenRequestedPayload): BrowserOpenerLink | undefined {
+  const popup = payload as BrowserPopupOpenRequestedPayload;
+  const browserId = popup.openerBrowserId ?? null;
+  const handle = popup.popupHandle ?? null;
+  if (!browserId || !handle) return undefined;
+  return { browserId, handle };
+}
+
+/**
+ * Creates the tab for a page's `window.open`, linked back to the tab that called it, so the
+ * OAuth callback can be routed through the host. */
+export async function createPopupBrowser(
+  request: CreateBrowserRequest,
+  opener: BrowserOpenerLink,
+): Promise<BrowserState> {
+  const settings = loadBrowserSettings();
+  const profile = resolveSupportedBrowserProfileId(request.profile ?? settings.defaultProfileId, settings);
+  const zoomFactor = request.zoomFactor ?? settings.defaultZoom / 100;
+  return invoke<BrowserState>("cmd_browser_create", {
+    request: { ...request, profile, zoomFactor },
+    opener,
+  });
+}
+
+/** The id of the browser tab showing `browserId`, so a host close request can close it. */
+export function browserTabIdForBrowserId(
+  tabs: ReadonlyArray<{ id: string; kind?: string; browserId?: string }>,
+  browserId: string,
+): string | null {
+  for (const tab of tabs) {
+    if (tab.kind === "browser" && tab.browserId === browserId) return tab.id;
+  }
+  return null;
+}
+
+/** A popup's own page called `window.close()`; the host closes that tab. */
+export function onBrowserPopupCloseRequested(
+  listener: (payload: BrowserCloseRequestedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserCloseRequestedPayload>(BROWSER_CLOSE_REQUESTED_EVENT, (event) => listener(event.payload));
+}
+
+export const BROWSER_TAB_SWITCH_EVENT = "browser_tab_switch";
+
+export type BrowserTabSwitchPayload = {
+  browserId: string;
+  index: number;
+};
+
+/**
+ * Tells the backend whether this window actually put a CLI-opened browser session into a tab.
+ * `adopted: false` is what makes `ferryx browser open` report the tab was not shown.
+ */
+export async function reportBrowserAdoption(
+  browserId: string,
+  adopted: boolean,
+  reason?: string,
+): Promise<boolean> {
+  return invoke<boolean>("cmd_browser_session_adoption", { browserId, adopted, reason });
+}
+
+/**
+ * `tab switch` addresses a browser session, but only this window knows which layout tab owns it.
+ */
+export function onBrowserTabSwitch(
+  listener: (payload: BrowserTabSwitchPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserTabSwitchPayload>(BROWSER_TAB_SWITCH_EVENT, (event) => listener(event.payload));
 }

@@ -6,9 +6,8 @@ import {
   notificationCenterStore,
   type NotificationCenterStore,
 } from "../../lib/notificationCenter/notificationCenterStore";
-import { actionableCount } from "../../lib/notificationCenter/attentionView";
+import { actionableEntryCount } from "../../features/ferryx/control/attentionRows";
 import type { Agent } from "../../features/ferryx/control/client";
-import type { DesktopWorkspace } from "../../features/ferryx/control/desktopInventory";
 import { IconButton } from "../ui/IconButton";
 import { NotificationCenterPopover, type IsSessionNavigable } from "./NotificationCenterPopover";
 import { useNotificationCenter } from "./useNotificationCenter";
@@ -24,9 +23,8 @@ export interface NotificationCenterButtonProps {
   isNotificationCenterOpen?: boolean;
   onOpenChangeNotificationCenter?: (open: boolean) => void;
   attentionInventory?: {
-    workspaces: DesktopWorkspace[];
-    unavailableHosts?: readonly string[];
-    onSelectAgent: (agent: Agent) => void;
+    agents: readonly Agent[];
+    localKeyOf: (agent: Agent) => string | null;
   };
   /** False when the caller renders the popover itself, so the dialog is never mounted twice. */
   renderPopover?: boolean;
@@ -81,7 +79,7 @@ export function NotificationCenterButton({
   const { state } = useNotificationCenter(store);
   // The badge answers "does anything need me?", so it counts blocked-on-you work and finished
   // work nobody has looked at — never plain mentions, or it would stay lit permanently.
-  const actionable = actionableCount(state.entries);
+  const actionable = actionableEntryCount(state.entries);
 
   return (
     <div ref={internalAnchorRef} className="no-drag relative inline-flex">

@@ -2,6 +2,7 @@ use crate::browser::model::*;
 use crate::browser::security::{validate_url, BrowserError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -28,6 +29,7 @@ pub struct ManagedBrowserSession {
     pub viewport_revision: u64,
     pub remote_snapshot_id: Option<String>,
     pub map_revision: u64,
+    pub creation_sequence: u64,
     history: Vec<String>,
     history_index: usize,
     /// Set once the platform reports real engine history flags. The shadow
@@ -102,12 +104,14 @@ fn is_valid_browser_id(value: &str) -> bool {
 #[derive(Default, Clone)]
 pub struct BrowserManager {
     sessions: Arc<RwLock<HashMap<String, ManagedBrowserSession>>>,
+    creation_counter: Arc<AtomicU64>,
 }
 
 impl BrowserManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            creation_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -140,6 +144,7 @@ impl BrowserManager {
         let visible = req.visible.unwrap_or(true);
         let zoom_factor = req.zoom_factor.unwrap_or(1.0).clamp(0.25, 5.0);
 
+        let creation_sequence = self.creation_counter.fetch_add(1, Ordering::SeqCst);
         let session = ManagedBrowserSession {
             browser_id: browser_id.clone(),
             webview_label: webview_label.clone(),
@@ -162,6 +167,7 @@ impl BrowserManager {
             viewport_revision: 1,
             remote_snapshot_id: None,
             map_revision: 0,
+            creation_sequence,
             history: vec![valid_url],
             history_index: 0,
             native_history_flags: false,
@@ -559,17 +565,164 @@ impl BrowserManager {
 
     pub fn list_sessions(&self) -> Vec<BrowserSessionSummary> {
         let guard = self.sessions.read();
-        guard
-            .values()
-            .map(|s| BrowserSessionSummary {
-                browser_id: s.browser_id.clone(),
-                webview_label: s.webview_label.clone(),
-                workspace_id: s.workspace_id.clone(),
-                profile_id: s.profile_id.clone(),
-                url: s.url.clone(),
-                title: s.title.clone(),
-                visible: s.visible,
+        order_sessions_by_creation(
+            guard
+                .values()
+                .map(|s| {
+                    (
+                        s.creation_sequence,
+                        BrowserSessionSummary {
+                            browser_id: s.browser_id.clone(),
+                            webview_label: s.webview_label.clone(),
+                            workspace_id: s.workspace_id.clone(),
+                            profile_id: s.profile_id.clone(),
+                            url: s.url.clone(),
+                            title: s.title.clone(),
+                            visible: s.visible,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Orders browser sessions by creation sequence.
+///
+/// `tab list` indices are the CLI's index space for `tab switch` and `tab close`, so they must be
+/// stable between calls; a `HashMap` walk is not.
+pub fn order_sessions_by_creation(
+    sessions: Vec<(u64, BrowserSessionSummary)>,
+) -> Vec<BrowserSessionSummary> {
+    let mut ordered = sessions;
+    ordered.sort_by_key(|(sequence, _)| *sequence);
+    ordered
+        .into_iter()
+        .map(|(_, session)| session)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_request(browser_id: &str) -> CreateBrowserRequest {
+        CreateBrowserRequest {
+            browser_id: Some(browser_id.to_string()),
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com/".to_string(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        }
+    }
+
+    fn summary(browser_id: &str) -> BrowserSessionSummary {
+        BrowserSessionSummary {
+            browser_id: browser_id.to_string(),
+            webview_label: format!("browser-{browser_id}"),
+            workspace_id: None,
+            profile_id: BrowserProfileId::Default,
+            url: "https://example.com/".to_string(),
+            title: None,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn list_sessions_follows_creation_order_not_hash_order() {
+        // Given three sessions created in an order that no id sort would reproduce, when the
+        // manager lists them, then the CLI sees them in creation order.
+        let manager = BrowserManager::new();
+        for browser_id in ["zzz-first", "aaa-second", "mmm-third"] {
+            manager
+                .register_session(create_request(browser_id))
+                .expect("register session");
+        }
+
+        let listed: Vec<String> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|session| session.browser_id)
+            .collect();
+
+        assert_eq!(listed, vec!["zzz-first", "aaa-second", "mmm-third"]);
+    }
+
+    #[test]
+    fn list_sessions_is_stable_across_repeated_calls() {
+        // Given several sessions, when the list is taken twice, then the index space the CLI's
+        // `tab switch` relies on is identical both times.
+        let manager = BrowserManager::new();
+        for browser_id in ["b-1", "b-2", "b-3", "b-4", "b-5"] {
+            manager
+                .register_session(create_request(browser_id))
+                .expect("register session");
+        }
+
+        let first: Vec<String> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|session| session.browser_id)
+            .collect();
+        let second: Vec<String> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|session| session.browser_id)
+            .collect();
+
+        assert_eq!(first, second);
+        assert_eq!(first, vec!["b-1", "b-2", "b-3", "b-4", "b-5"]);
+    }
+
+    #[test]
+    fn order_sessions_by_creation_sorts_an_arbitrary_sequence_set() {
+        // Given sessions paired with out-of-order sequences, when they are ordered, then the
+        // result follows the sequences rather than the input positions.
+        let ordered = order_sessions_by_creation(vec![
+            (7, summary("third")),
+            (1, summary("first")),
+            (4, summary("second")),
+        ]);
+
+        assert_eq!(
+            ordered
+                .into_iter()
+                .map(|session| session.browser_id)
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn creation_sequence_increases_with_every_registered_session() {
+        // Given two sessions, when both are registered, then the second holds a strictly larger
+        // creation sequence so the ordering cannot tie.
+        let manager = BrowserManager::new();
+        let first = manager
+            .register_session(create_request("seq-first"))
+            .expect("register first session");
+        let second = manager
+            .register_session(create_request("seq-second"))
+            .expect("register second session");
+
+        let sequences: Vec<u64> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|session| {
+                manager
+                    .sessions
+                    .read()
+                    .get(&session.browser_id)
+                    .expect("managed session")
+                    .creation_sequence
             })
-            .collect()
+            .collect();
+
+        assert_eq!(sequences.len(), 2);
+        assert!(sequences[0] < sequences[1]);
+        assert_ne!(first.browser_id, second.browser_id);
     }
 }

@@ -31,7 +31,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, openExternalUrl, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -2066,11 +2066,20 @@ function WorkspaceApp({
     };
   }, [handleAddTerminalTab]);
 
+  const closedBrowserTabsRef = useRef<Array<{ url: string; profileId?: string; worktreePath?: string }>>([]);
+
   const handleCloseTab = useCallback(
     (tabId: string) => {
       if (activeRemoteHostRef.current) return;
       const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab || tab.pinned) return;
+      if (tab.kind === "browser" && tab.url) {
+        closedBrowserTabsRef.current.push({
+          url: tab.url,
+          profileId: tab.profileId,
+          worktreePath: tab.worktreePath,
+        });
+      }
       const currentState = stateRef.current;
       const sessionIds = tab.kind === "terminal"
         ? Object.values(currentState.layout.layoutsByTabId?.[tabId]?.sessionIdsByLeafId ?? {}).filter(Boolean)
@@ -2086,6 +2095,36 @@ function WorkspaceApp({
       void closeTab(tabId).catch(reportRuntimeError);
     },
     [closeTab, generalSettings.confirmCloseTab, reportRuntimeError],
+  );
+
+  const handleReopenClosedBrowserTab = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
+    const lastClosed = closedBrowserTabsRef.current.pop();
+    if (!lastClosed?.url) return;
+    void createBrowserTab(lastClosed.url, undefined, {
+      profileId: lastClosed.profileId,
+      worktreePath: lastClosed.worktreePath,
+    }).catch(reportRuntimeError);
+  }, [createBrowserTab, reportRuntimeError]);
+
+  const handleBrowserZoom = useCallback(
+    async (browserId: string, direction: "in" | "out" | "reset") => {
+      try {
+        if (direction === "reset") {
+          await setBrowserZoom(browserId, 1.0);
+          return;
+        }
+        const state = await getBrowserState(browserId);
+        const current = typeof state?.zoomFactor === "number" && !isNaN(state.zoomFactor) ? state.zoomFactor : 1.0;
+        const next = direction === "in"
+          ? Math.min(5.0, Number((current + 0.1).toFixed(2)))
+          : Math.max(0.25, Number((current - 0.1).toFixed(2)));
+        await setBrowserZoom(browserId, next);
+      } catch (err) {
+        reportRuntimeError(err);
+      }
+    },
+    [reportRuntimeError],
   );
 
   const handleClosePane = useCallback(
@@ -2434,8 +2473,8 @@ function WorkspaceApp({
   );
 
   const handleReloadBrowserTab = useCallback(
-    (tabId: string, browserId?: string) => {
-      void reloadBrowserTab(tabId, browserId).catch(reportRuntimeError);
+    (tabId: string, browserId?: string, options?: BrowserReloadOptions) => {
+      void reloadBrowserTab(tabId, browserId, options).catch(reportRuntimeError);
     },
     [reloadBrowserTab, reportRuntimeError],
   );
@@ -2479,6 +2518,7 @@ function WorkspaceApp({
       void createBrowserTab(payload.targetUrl, undefined, {
         profileId: payload.profileId,
         worktreePath: payload.worktreePath ?? undefined,
+        opener: popupOpenerLink(payload),
       }).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
@@ -2489,6 +2529,31 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [createBrowserTab, reportRuntimeError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // A popup's own page called window.close(): close the tab the host created for it. That
+    // close path is also what tells the opener its handle is closed, so a library polling
+    // popup.closed sees the cancel instead of waiting forever.
+    void onBrowserPopupCloseRequested((payload) => {
+      if (activeRemoteHostRef.current) return;
+      const tabs = [
+        ...stateRef.current.layout.tabs,
+        ...Object.values(stateRef.current.worktreeLayouts ?? {}).flatMap((layout) => layout.tabs),
+      ];
+      const tabId = browserTabIdForBrowserId(tabs, payload.browserId);
+      if (!tabId) return;
+      void closeTab(tabId).catch(reportRuntimeError);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [closeTab, reportRuntimeError]);
 
   useEffect(() => {
     let disposed = false;
@@ -2536,8 +2601,18 @@ function WorkspaceApp({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onBrowserSessionCreated((payload) => {
-      if (activeRemoteHostRef.current) return;
-      adoptBrowserSession(payload.browser, payload.workspaceId ?? undefined);
+      if (activeRemoteHostRef.current) {
+        toast.warning("Browser tab was not shown because a remote host is active.");
+        void reportBrowserAdoption(payload.browser.browserId, false, "remote-host-active").catch(reportRuntimeError);
+        return;
+      }
+      const adoptedTabId = adoptBrowserSession(payload.browser, payload.workspaceId ?? undefined);
+      if (!adoptedTabId) {
+        toast.warning("Browser tab was not shown: session could not be adopted.");
+        void reportBrowserAdoption(payload.browser.browserId, false, "adopt-failed").catch(reportRuntimeError);
+        return;
+      }
+      void reportBrowserAdoption(payload.browser.browserId, true).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -2547,6 +2622,37 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [adoptBrowserSession, reportRuntimeError]);
+
+  // `ferryx browser tab switch` names a browser session; only this window knows which layout tab
+  // owns it, and the CLI's tab index is a different index space from the layout tab order.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserTabSwitch((payload) => {
+      const { browserId } = payload;
+      const owner = stateRef.current.layout.tabs.find((tab) =>
+        tab.kind === "browser"
+          ? tab.browserId === browserId
+          : Object.values(stateRef.current.layout.layoutsByTabId[tab.id]?.contentsByLeafId ?? {}).some(
+              (content) =>
+                content.kind === "browser" &&
+                (content.browser?.browserId ?? content.browserId) === browserId,
+            ),
+      );
+      if (!owner) {
+        toast.warning(`Browser tab for ${browserId} is not open in this window.`);
+        return;
+      }
+      handleSelectTerminalTab(owner.id);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleSelectTerminalTab, reportRuntimeError]);
 
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
@@ -2743,6 +2849,29 @@ function WorkspaceApp({
         handleAddTerminalTab();
         return;
       }
+      if ((action as string) === "tab-new-browser") {
+        void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError);
+        return;
+      }
+      if ((action as string) === "tab-reopen-closed") {
+        handleReopenClosedBrowserTab();
+        return;
+      }
+      if ((action as string) === "zoom-in") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) void handleBrowserZoom(targetId, "in");
+        return;
+      }
+      if ((action as string) === "zoom-out") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) void handleBrowserZoom(targetId, "out");
+        return;
+      }
+      if ((action as string) === "zoom-reset") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) void handleBrowserZoom(targetId, "reset");
+        return;
+      }
       if (action === "tab-close") {
         handleCloseActiveSurface();
         return;
@@ -2793,6 +2922,10 @@ function WorkspaceApp({
     toggleSidebar,
     handleSplitActive,
     handleSelectWorktreeByIndex,
+    handleReopenClosedBrowserTab,
+    handleBrowserZoom,
+    createBrowserTab,
+    shortcutBrowserId,
     reportRuntimeError,
   ]);
 
@@ -2808,9 +2941,11 @@ function WorkspaceApp({
       return {
         "tab.newTerminal": handleAddTerminalTab,
         "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
+        "tab.reopenClosed": handleReopenClosedBrowserTab,
         "tab.close": handleCloseActiveSurface,
         "browser.focusAddress": browserShortcutsActive ? () => dispatchBrowserShortcut("focus-address") : undefined,
         "browser.reload": browserShortcutsActive ? () => dispatchBrowserShortcut("reload") : undefined,
+        "browser.hardReload": browserShortcutsActive ? () => dispatchBrowserShortcut("reload-hard") : undefined,
         "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
         "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
@@ -2845,9 +2980,9 @@ function WorkspaceApp({
         "commandPalette.open": handleOpenCommandPalette,
         "settings.toggle": handleToggleSettings,
         "notifications.toggle": handleToggleNotificationCenter,
-        "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
-        "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
-        "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
+        "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
+        "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
+        "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
       };
     },
     [
@@ -2871,6 +3006,8 @@ function WorkspaceApp({
       handleZoomIn,
       handleZoomOut,
       handleZoomReset,
+      handleReopenClosedBrowserTab,
+      handleBrowserZoom,
       reportRuntimeError,
       toggleSidebar,
     ],

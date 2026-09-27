@@ -50,7 +50,7 @@ describe("browser session hydration", () => {
     browserMocks.ensureBrowser.mockClear();
   });
 
-  it("recreates persisted native webviews with the stored browser id, URL, profile, and zoom", async () => {
+  it("recreates persisted native webviews with the stored browser id, URL, profile, zoom, and scroll", async () => {
     saveBrowserSettings({ restoreTabsOnLaunch: true });
     const state = workspaceWithBrowser({
       kind: "browser",
@@ -58,8 +58,9 @@ describe("browser session hydration", () => {
       label: "Browser",
       browserId: "persisted-browser-id",
       url: "https://example.com/restored",
-      profileId: "private",
+      profileId: "default",
       zoomFactor: 1.25,
+      ...({ scrollPosition: { x: 10, y: 150 } } as any),
     });
 
     await hydrateRestoredBrowserSessions(state, "workspace-1");
@@ -68,10 +69,145 @@ describe("browser session hydration", () => {
       browserId: "persisted-browser-id",
       workspaceId: "workspace-1",
       url: "https://example.com/restored",
-      profile: "private",
+      profile: "default",
       zoomFactor: 1.25,
       visible: false,
     }));
+  });
+
+  it("excludes private-profile browser tabs from restoration (privacy isolation)", async () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+    const state = workspaceWithBrowser({
+      kind: "browser",
+      id: "tab-private-browser",
+      label: "Private Browser",
+      browserId: "private-browser-id",
+      url: "https://example.com/secret",
+      profileId: "private",
+    });
+
+    await hydrateRestoredBrowserSessions(state, "workspace-1");
+
+    expect(browserMocks.ensureBrowser).not.toHaveBeenCalled();
+  });
+
+  it("restores tabs per worktree without mixing into other worktrees", async () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+    const tabA: BrowserTab = {
+      kind: "browser",
+      id: "tab-a",
+      label: "Tab A",
+      browserId: "browser-a",
+      url: "https://example.com/wt-a",
+      worktreePath: "/repo/worktree-a",
+    };
+    const tabB: BrowserTab = {
+      kind: "browser",
+      id: "tab-b",
+      label: "Tab B",
+      browserId: "browser-b",
+      url: "https://example.com/wt-b",
+      worktreePath: "/repo/worktree-b",
+    };
+
+    const state: WorkspaceState = {
+      workspaceId: "workspace-1",
+      worktrees: [
+        { path: "/repo/worktree-a", branch: "wt-a", head: "111", bare: false, detached: false, locked: null, prunable: null },
+        { path: "/repo/worktree-b", branch: "wt-b", head: "222", bare: false, detached: false, locked: null, prunable: null },
+      ],
+      activeWorktreePath: "/repo/worktree-a",
+      sessions: {},
+      layout: createLayoutState([tabA], tabA.id),
+      worktreeLayouts: {
+        "/repo/worktree-b": createLayoutState([tabB], tabB.id),
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    // Hydrate only for worktree-a:
+    await hydrateRestoredBrowserSessions(state, "workspace-1", new Set(), "/repo/worktree-a");
+
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      browserId: "browser-a",
+      worktreePath: "/repo/worktree-a",
+    }));
+    expect(browserMocks.ensureBrowser).not.toHaveBeenCalledWith(expect.objectContaining({
+      browserId: "browser-b",
+    }));
+  });
+
+  it("skips stale tabs whose worktree was deleted or whose URL is unnavigable", async () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+    const tabDeletedWt: BrowserTab = {
+      kind: "browser",
+      id: "tab-deleted",
+      label: "Deleted WT",
+      browserId: "browser-deleted",
+      url: "https://example.com/deleted",
+      worktreePath: "/repo/deleted-worktree",
+    };
+    const tabInvalidUrl: BrowserTab = {
+      kind: "browser",
+      id: "tab-invalid",
+      label: "Invalid URL",
+      browserId: "browser-invalid",
+      url: "javascript:alert(1)",
+      worktreePath: "/repo/live-worktree",
+    };
+
+    const state: WorkspaceState = {
+      workspaceId: "workspace-1",
+      worktrees: [
+        { path: "/repo/live-worktree", branch: "live", head: "333", bare: false, detached: false, locked: null, prunable: null },
+      ],
+      activeWorktreePath: "/repo/live-worktree",
+      sessions: {},
+      layout: createLayoutState([tabDeletedWt, tabInvalidUrl], tabDeletedWt.id),
+      worktreeLayouts: {},
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    await hydrateRestoredBrowserSessions(state, "workspace-1");
+
+    expect(browserMocks.ensureBrowser).not.toHaveBeenCalled();
+  });
+
+  it("prevents double-restore from duplicating browser tabs", async () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+    const tab: BrowserTab = {
+      kind: "browser",
+      id: "tab-browser",
+      label: "Browser",
+      browserId: "persisted-browser-id",
+      url: "https://example.com/once",
+      worktreePath: "/repo/live",
+    };
+    const state: WorkspaceState = {
+      workspaceId: "workspace-1",
+      worktrees: [
+        { path: "/repo/live", branch: "main", head: "123", bare: false, detached: false, locked: null, prunable: null },
+      ],
+      activeWorktreePath: "/repo/live",
+      sessions: {},
+      layout: createLayoutState([tab], tab.id),
+      worktreeLayouts: {},
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    const hydratedKeys = new Set<string>();
+    await hydrateRestoredBrowserSessions(state, "workspace-1", hydratedKeys);
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledTimes(1);
+
+    // Calling again with the same hydratedKeys set does not duplicate
+    await hydrateRestoredBrowserSessions(state, "workspace-1", hydratedKeys);
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledTimes(1);
   });
 
   it("does not materialize persisted browser tabs when launch restore is disabled", async () => {

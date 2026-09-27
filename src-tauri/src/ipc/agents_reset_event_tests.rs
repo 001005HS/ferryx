@@ -95,7 +95,8 @@ async fn reset_scenario(succeeds: bool) {
         assert!(matches!(
             handshake,
             DaemonRequest::Handshake {
-                version: DAEMON_PROTOCOL_VERSION
+                version: DAEMON_PROTOCOL_VERSION,
+                ..
             }
         ));
         let handshake = DaemonResponse::HandshakeOk {

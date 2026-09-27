@@ -1,4 +1,4 @@
-import { ChevronDown, Laptop } from "lucide-react";
+import { ChevronDown, Globe, Laptop, Terminal } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
@@ -25,7 +25,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
-import { decodeRemoteTerminalFrame, stripTerminalControlSequences } from "./remoteTerminalFrames";
+import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration } from "./agentConversation";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
 import { MobileChatThreadList } from "./chat/MobileChatThreadList";
@@ -123,6 +123,8 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
 
   return targets;
 }
+
+export { formatWorkedDuration } from "./agentConversation";
 
 function formatAttentionAriaLabel(
   target: WaitingTabTarget,
@@ -341,8 +343,23 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [viewMode, setViewMode] = useState<"threads" | "chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "threads" : "terminal"));
+  const [viewMode, setViewMode] = useState<"threads" | "chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "chat" : "terminal"));
   const [chatMessages, setChatMessages] = useState<MobileChatMessageProps[]>([]);
+  const chatAttachmentUrlsRef = useRef<Set<string>>(new Set());
+
+  const revokeChatAttachmentUrls = useCallback(() => {
+    chatAttachmentUrlsRef.current.forEach((url) => {
+      URL.revokeObjectURL(url);
+    });
+    chatAttachmentUrlsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      revokeChatAttachmentUrls();
+    };
+  }, [revokeChatAttachmentUrls]);
+  const lastConversationSessionRef = useRef<string | null>(null);
   const [chatIsRunning, setChatIsRunning] = useState(false);
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
@@ -363,7 +380,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const confirmationInFlightRef = useRef(false);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSubmittedPromptRef = useRef<string | null>(null);
+  const assistantTurnStartedAtRef = useRef<number | null>(null);
+  const lastAgentActivityRef = useRef<string | null>(null);
 
   const [accountSessionToken, setAccountSessionToken] = useState<string | null>(
     () => getStoredAccountSessionToken(),
@@ -950,6 +968,44 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
 
+  const turnDurationsRef = useRef<Map<string, string>>(new Map());
+
+  const finalizeAssistantTurnDuration = useCallback(() => {
+    const startedAt = assistantTurnStartedAtRef.current;
+    if (startedAt !== null) {
+      const elapsedMs = Date.now() - startedAt;
+      const durationLabel = formatWorkedDuration(elapsedMs);
+      setChatMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (!last || last.role !== "assistant") return prev;
+        turnDurationsRef.current.set(last.id, durationLabel);
+        return [...prev.slice(0, -1), { ...last, durationLabel }];
+      });
+      assistantTurnStartedAtRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    const tabs = model.context.terminalTabs ?? [];
+    const activeTab = tabs.find((tab) => tab.id === model.context.activeTabId) ?? tabs[0];
+    const nextState = activeTab?.activityState ?? null;
+    const previousState = lastAgentActivityRef.current;
+    lastAgentActivityRef.current = nextState;
+
+    if (nextState === "working") {
+      if (assistantTurnStartedAtRef.current === null) {
+        assistantTurnStartedAtRef.current = Date.now();
+      }
+      setChatIsRunning(true);
+      return;
+    }
+
+    if (previousState === "working") {
+      finalizeAssistantTurnDuration();
+      setChatIsRunning(false);
+    }
+  }, [model.context.activeTabId, model.context.terminalTabs, finalizeAssistantTurnDuration]);
+
   useEffect(() => {
     if (activeTunnelConnection && effectiveSessionId && !(sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId))) {
       void getSessionDaemonEpoch(effectiveSessionId);
@@ -978,86 +1034,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     let disposed = false;
     const abort = new AbortController();
 
-    const handleMessage = (data: any) => {
-      const raw = typeof data === "string"
-        ? data
-        : data instanceof Uint8Array
-        ? new TextDecoder().decode(data)
-        : data instanceof ArrayBuffer
-        ? new TextDecoder().decode(new Uint8Array(data))
-        : String(data ?? "");
-
-      if (!raw) return;
-
-      let displayText: string | null = null;
-      const frame = decodeRemoteTerminalFrame(raw);
-      if (frame) {
-        if (frame.kind === "replayGap") return;
-        if (frame.kind === "output" || frame.kind === "replay") {
-          displayText = frame.payload;
-        }
-      } else {
-        try {
-          const parsed = JSON.parse(raw);
-          if (parsed?.type === "output" && typeof parsed.data === "string") {
-            displayText = parsed.data;
-          } else if (parsed?.type === "agentTurn" || parsed?.type === "toolOutput") {
-            displayText = parsed.content ?? parsed.output ?? JSON.stringify(parsed);
-          } else if (parsed?.type === "grid" || parsed?.type === "remoteStatus") {
-            return;
-          }
-        } catch {
-          // Plain text / raw terminal chunk
-        }
-        if (displayText === null) {
-          displayText = raw;
-        }
-      }
-
-      if (displayText === null) return;
-      const chunk = stripTerminalControlSequences(displayText);
-      if (!chunk.trim()) return;
-
-      const submitted = lastSubmittedPromptRef.current;
-      let finalChunk = chunk;
-      if (submitted) {
-        const lines = chunk.split("\n");
-        const firstNonEmpty = lines.findIndex((line) => line.trim().length > 0);
-        if (firstNonEmpty >= 0 && lines[firstNonEmpty].trim() === submitted.trim()) {
-          lines.splice(firstNonEmpty, 1);
-          lastSubmittedPromptRef.current = null;
-          finalChunk = lines.join("\n");
-          if (!finalChunk.trim()) return;
-        }
-      }
-
-      setChatMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant") {
-          if (last.content.endsWith(finalChunk)) return prev;
-          const combined = `${last.content}${finalChunk}`;
-          const bounded = combined.length > 12000 ? combined.slice(combined.length - 12000) : combined;
-          return [
-            ...prev.slice(0, -1),
-            {
-              ...last,
-              content: bounded,
-              timestamp: Date.now(),
-            },
-          ];
-        }
-        return [
-          ...prev,
-          {
-            id: `assistant-${Date.now()}`,
-            role: "assistant",
-            content: finalChunk,
-            timestamp: Date.now(),
-          },
-        ];
-      });
-    };
-
     if (activeTunnelConnection) {
       getSessionDaemonEpoch(effectiveSessionId).then((epoch) => {
         if (disposed) return;
@@ -1065,6 +1041,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           const errMsg = `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`;
           console.error(errMsg);
           setCreationError(errMsg);
+          finalizeAssistantTurnDuration();
           setChatIsRunning(false);
           return;
         }
@@ -1078,11 +1055,11 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             }
             terminalSocketRef.current = ws;
             terminalSocketSessionIdRef.current = effectiveSessionId;
-            ws.onmessage = (event) => handleMessage(event.data);
             ws.onclose = () => {
               if (terminalSocketRef.current === ws) {
                 terminalSocketRef.current = null;
                 terminalSocketSessionIdRef.current = null;
+                finalizeAssistantTurnDuration();
                 setChatIsRunning(false);
               }
             };
@@ -1090,6 +1067,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               if (terminalSocketRef.current === ws) {
                 terminalSocketRef.current = null;
                 terminalSocketSessionIdRef.current = null;
+                finalizeAssistantTurnDuration();
                 setChatIsRunning(false);
               }
             };
@@ -1097,6 +1075,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           .catch((err) => {
             console.warn("Failed to connect terminal WebSocket via tunnel", err);
             setCreationError(err instanceof Error ? err.message : String(err));
+            finalizeAssistantTurnDuration();
             setChatIsRunning(false);
           });
       });
@@ -1105,13 +1084,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         .then((url) => {
           if (disposed) return;
           const ws = new WebSocket(url);
+          ws.binaryType = "arraybuffer";
           terminalSocketRef.current = ws;
           terminalSocketSessionIdRef.current = effectiveSessionId;
-          ws.onmessage = (event) => handleMessage(event.data);
           ws.onclose = () => {
             if (terminalSocketRef.current === ws) {
               terminalSocketRef.current = null;
               terminalSocketSessionIdRef.current = null;
+              finalizeAssistantTurnDuration();
               setChatIsRunning(false);
             }
           };
@@ -1119,6 +1099,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             if (terminalSocketRef.current === ws) {
               terminalSocketRef.current = null;
               terminalSocketSessionIdRef.current = null;
+              finalizeAssistantTurnDuration();
               setChatIsRunning(false);
             }
           };
@@ -1139,7 +1120,119 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         terminalSocketSessionIdRef.current = null;
       }
     };
-  }, [effectiveSessionId, token, activeTunnelConnection, transportBaseUrl, viewMode]);
+  }, [effectiveSessionId, token, activeTunnelConnection, transportBaseUrl, viewMode, finalizeAssistantTurnDuration]);
+
+  useEffect(() => {
+    if (viewMode !== "chat" || !effectiveSessionId || !token) return;
+
+    let cancelled = false;
+    let fetching = false;
+    const controller = new AbortController();
+
+    if (lastConversationSessionRef.current !== effectiveSessionId) {
+      lastConversationSessionRef.current = effectiveSessionId;
+      revokeChatAttachmentUrls();
+      setChatMessages([]);
+      setChatIsRunning(false);
+      assistantTurnStartedAtRef.current = null;
+      turnDurationsRef.current.clear();
+    }
+
+    const poll = async () => {
+      if (cancelled || fetching) return;
+      fetching = true;
+      try {
+        const page = await fetchAgentConversation({
+          baseUrl: transportBaseUrl,
+          sessionId: effectiveSessionId,
+          token,
+          limit: 200,
+          signal: controller.signal,
+        });
+        if (cancelled) return;
+        setChatMessages((prev) => {
+          const mapped = mapAgentConversation(page.items, {
+            activeTurnStartedAt: assistantTurnStartedAtRef.current,
+            previousMessages: prev,
+            turnDurationsMap: turnDurationsRef.current,
+          });
+          const optimisticText = new Set(
+            prev
+              .filter((message) => message.role === "user" && /^user-\d{13}$/.test(message.id))
+              .map((message) => message.content),
+          );
+          const coveredOrdinals = new Set(page.items.map((item) => item.ordinal));
+          const kept = prev.filter((message) => {
+            const match = /^(?:user|assistant)-(\d+)$/.exec(message.id);
+            return match === null || !coveredOrdinals.has(Number(match[1]));
+          });
+          const fresh = mapped.filter((message) =>
+            !(message.role === "user" && optimisticText.has(message.content)),
+          );
+          return [...kept, ...fresh].sort((a, b) => {
+            const aMatch = /^(?:user|assistant)-(\d+)$/.exec(a.id);
+            const bMatch = /^(?:user|assistant)-(\d+)$/.exec(b.id);
+            const aOrdinal = aMatch === null ? Number.POSITIVE_INFINITY : Number(aMatch[1]);
+            const bOrdinal = bMatch === null ? Number.POSITIVE_INFINITY : Number(bMatch[1]);
+            return aOrdinal - bOrdinal;
+          });
+        });
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof ConversationFetchError && error.code === "TRANSCRIPT_NOT_FOUND") {
+          revokeChatAttachmentUrls();
+          setChatMessages([]);
+        }
+      } finally {
+        fetching = false;
+      }
+    };
+
+    void poll();
+    const timer = setInterval(() => {
+      void poll();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [viewMode, effectiveSessionId, token, transportBaseUrl]);
+
+  /* Declared above the auth early return so the hook count is identical on the
+     login screen and after pairing; a hook below the guard changes the order. */
+  const createWorktree = useCallback(async () => {
+    const workspaceId = model.context.workspaceId;
+    if (!workspaceId || !token) return;
+    const entered = window.prompt("New worktree slug (letters, numbers and dashes)");
+    if (!entered) return;
+    const slug = entered.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!slug) {
+      setCreationError("Enter a slug using letters, numbers or dashes.");
+      return;
+    }
+    setCreationError(null);
+    try {
+      const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/worktrees"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: crypto.randomUUID(),
+          workspaceId,
+          worktree: { wsId: workspaceId, slug },
+        }),
+      });
+      if (!response.ok) {
+        const reason = (await response.text()).replace(/\/[^\s"]+/g, "<path>").slice(0, 140);
+        setCreationError(`Could not create worktree (HTTP ${response.status}). ${reason}`);
+        return;
+      }
+      await selectContext({ workspaceId, worktreeSlug: slug, worktreeLabel: null });
+    } catch (error) {
+      setCreationError(error instanceof Error ? error.message : "Worktree creation request failed");
+    }
+  }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
 
   if (!token) {
     if (!accountSessionToken) {
@@ -1186,32 +1279,34 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         title: tab.label,
         worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel ?? null,
         agentLabel: tab.agentType ?? null,
+        agentType: tab.agentType ?? null,
         status: tab.activityState,
       }))
     : model.options.map((option) => ({
         id: option.tabId ?? option.sessionId ?? `${option.workspaceId}:${option.worktreeSlug ?? "root"}`,
         title: option.sessionLabel ?? option.worktreeLabel ?? option.worktreeSlug ?? "Primary worktree",
         worktreeLabel: option.worktreeLabel,
+        agentType: null,
         status: option.attention,
       }));
 
   return (
-    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
+    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
-      <header className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-card px-2.5">
+      <header className="flex h-7 shrink-0 items-center justify-between border-b border-[#191919] bg-[#111111] px-2.5">
         <button
           type="button"
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-[#141414] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">F</span>
+          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-[#346bf1] text-[10px] font-bold text-[#ffffff]" aria-hidden="true">F</span>
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
-          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-muted-foreground" aria-label="Current desktop context">{contextName(model.context)}</span>
-          <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
+          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-[#838383]" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-[#838383] transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
           <span
@@ -1219,9 +1314,9 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             data-connection={transport.type}
             aria-label={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
             title={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
-            className={`flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none ${
+            className={`hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none sm:flex ${
               transport.type === "relay"
-                ? "bg-status-idle/15 text-muted-foreground"
+                ? "bg-status-idle/15 text-[#838383]"
                 : "bg-status-success/15 text-status-success"
             }`}
           >
@@ -1243,7 +1338,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             aria-expanded={hostDrawerOpen}
             data-testid="mobile-host-drawer-trigger"
             onClick={() => setHostDrawerOpen(true)}
-            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             {activeTunnelConnection ? (
               <span
@@ -1334,7 +1429,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               <button
                 type="button"
                 onClick={() => setConfirmDisconnect(false)}
-                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Cancel
               </button>
@@ -1343,21 +1438,21 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             <button
               type="button"
               onClick={() => setConfirmDisconnect(true)}
-              className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-[#838383] transition-colors hover:bg-[#141414] hover:text-[#f5f5f5] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               Disconnect
             </button>
           )}
 
-          <div className="flex items-center gap-1 border-l border-border/40 pl-2">
+          <div className="hidden items-center gap-1 border-l border-[#191919]/40 pl-2 sm:flex">
             <button
               type="button"
               data-testid="remote-view-mode-threads"
               onClick={() => setViewMode("threads")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "threads"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
+                  : "text-[#838383] hover:text-[#f5f5f5]"
               }`}
             >
               Threads
@@ -1368,8 +1463,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               onClick={() => setViewMode("chat")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "chat"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
+                  : "text-[#838383] hover:text-[#f5f5f5]"
               }`}
             >
               Chat
@@ -1380,8 +1475,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               onClick={() => setViewMode("terminal")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "terminal"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
+                  : "text-[#838383] hover:text-[#f5f5f5]"
               }`}
             >
               Terminal
@@ -1395,8 +1490,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               }}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "browser"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
+                  : "text-[#838383] hover:text-[#f5f5f5]"
               }`}
             >
               Browser
@@ -1415,10 +1510,11 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           if (!model.context.workspaceId) return;
           void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
         }}
+        onCreateWorktree={createWorktree}
         creationError={creationError}
       >
         {viewMode === "threads" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
             <MobileChatThreadList
               rows={threadRows}
               activeRowId={model.context.activeTabId ?? null}
@@ -1444,11 +1540,53 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             />
           </div>
         ) : viewMode === "chat" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
             <MobileChatWorkspace
+              headerTitle={
+                model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
+                model.context.activeTerminal?.title ??
+                model.context.workspaceId ??
+                undefined
+              }
+              headerSubtitle={`${model.context.worktreeLabel ?? model.context.workspaceId ?? ""} · ${
+                activeTunnelConnection
+                  ? (activeTunnelConnection.machine.displayName || activeTunnelConnection.machine.machineId)
+                  : activeHost?.name ?? "Local"
+              }`}
+              onBack={() => setViewMode("threads")}
+              headerActions={
+                <>
+                  <button
+                    type="button"
+                    data-testid="thread-header-action-terminal"
+                    aria-label="Open terminal"
+                    onClick={() => setViewMode("terminal")}
+                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] hover:text-[#f5f5f5]"
+                  >
+                    <Terminal className="size-4" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="thread-header-action-browser"
+                    aria-label="Browser"
+                    onClick={() => {
+                      setViewMode("browser");
+                      void fetchBrowserSessions();
+                    }}
+                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] hover:text-[#f5f5f5]"
+                  >
+                    <Globe className="size-4" aria-hidden="true" />
+                  </button>
+                </>
+              }
               messages={chatMessages}
               isRunning={chatIsRunning}
               onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
+                for (const att of attachments) {
+                  if (att.url && att.url.startsWith("blob:")) {
+                    chatAttachmentUrlsRef.current.add(att.url);
+                  }
+                }
                 const mappedAttachments: ComponentAttachment[] = attachments.map((att) => ({
                   id: att.id,
                   name: att.name,
@@ -1464,13 +1602,13 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                   attachments: mappedAttachments,
                 };
                 setChatMessages((prev) => [...prev, userMsg]);
+                assistantTurnStartedAtRef.current = Date.now();
                 setChatIsRunning(true);
 
                 if (effectiveSessionId && token) {
                   const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
                   const ws = terminalSocketRef.current;
                   if (ws && ws.readyState === 1 /* OPEN */) {
-                    lastSubmittedPromptRef.current = text;
                     ws.send(commandPayload);
                   } else {
                     console.warn("Terminal WebSocket is not open for input");
@@ -1487,6 +1625,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     console.warn("Terminal WebSocket is not open for interrupt");
                   }
                 }
+                finalizeAssistantTurnDuration();
                 setChatIsRunning(false);
               }}
               sessionId={effectiveSessionId ?? undefined}
@@ -1514,10 +1653,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             />
           </div>
         ) : viewMode === "browser" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
             {browserSessions.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-1 bg-card border-b border-border text-xs overflow-x-auto shrink-0">
-                <span className="text-muted-foreground text-[11px] shrink-0">Browsers:</span>
+              <div className="flex items-center gap-1.5 px-2 py-1 bg-[#111111] border-b border-[#191919] text-xs overflow-x-auto shrink-0">
+                <span className="text-[#838383] text-[11px] shrink-0">Browsers:</span>
                 {browserSessions.map((s) => (
                   <button
                     key={s.browserId}
@@ -1526,8 +1665,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     onClick={() => setSelectedBrowserId(s.browserId)}
                     className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
                       selectedBrowserId === s.browserId
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                        ? "bg-[#346bf1] text-[#ffffff]"
+                        : "bg-[#1a1b1b] text-[#838383] hover:bg-[#141414] hover:text-[#f5f5f5]"
                     }`}
                   >
                     {s.title || s.browserId}
@@ -1536,7 +1675,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                 <button
                   type="button"
                   onClick={() => void fetchBrowserSessions()}
-                  className="ml-auto text-[11px] text-muted-foreground hover:text-foreground"
+                  className="ml-auto text-[11px] text-[#838383] hover:text-[#f5f5f5]"
                 >
                   Refresh
                 </button>
@@ -1551,14 +1690,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                 onBack={() => setViewMode("terminal")}
               />
             ) : (
-              <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-muted-foreground gap-3">
+              <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-[#838383] gap-3">
                 <p className="text-sm font-medium">No active browser session selected</p>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
                     placeholder="Enter browser ID..."
                     data-testid="remote-manual-browser-id-input"
-                    className="px-2 py-1 text-xs rounded bg-card border border-border text-foreground font-mono"
+                    className="px-2 py-1 text-xs rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] font-mono"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
                         setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
@@ -1569,7 +1708,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     type="button"
                     data-testid="remote-fetch-browsers-btn"
                     onClick={() => void fetchBrowserSessions()}
-                    className="px-2.5 py-1 text-xs rounded bg-accent text-accent-foreground font-medium hover:bg-accent/80 transition"
+                    className="px-2.5 py-1 text-xs rounded bg-[#1a1b1b] text-[#f5f5f5] font-medium hover:bg-[#141414] transition"
                   >
                     Refresh Sessions
                   </button>
@@ -1582,10 +1721,15 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             key={`${effectiveSessionId}:${terminalRetryGeneration}`}
             sessionId={effectiveSessionId}
             token={token}
+            title={`${model.context.worktreeLabel ?? model.context.workspaceId ?? ""} · ${
+              activeTunnelConnection
+                ? (activeTunnelConnection.machine.displayName || activeTunnelConnection.machine.machineId)
+                : activeHost?.name ?? "Local"
+            }`}
             transportUrl={transportBaseUrl}
             onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
             activeTabId={model.context.activeTabId}
-            onBack={() => undefined}
+            onBack={() => setViewMode("chat")}
             embedded
             onSwipePreviousTab={handleSwipePreviousTab}
             onSwipeNextTab={handleSwipeNextTab}

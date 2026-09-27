@@ -611,6 +611,11 @@ pub enum ServerMessage {
         retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
+        /// Optional structured payload for the error. A typed remote-input refusal carries
+        /// the serialized `RefusedInputExplanation` (code / reason / inputClass / remediation)
+        /// here so the client renders the real reason instead of guessing from the message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
     },
     #[serde(rename_all = "camelCase")]
     BrowserState {

@@ -96,19 +96,47 @@ const mockStatusWindows: SystemPermissionsStatus = {
   },
 };
 
+const mockStatusLinux: SystemPermissionsStatus = {
+  platform: "linux",
+  allGranted: false,
+  fullDiskAccess: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  accessibility: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  notifications: {
+    status: "unknown",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Desktop notifications are managed by the desktop environment; most setups need no per-app grant.",
+  },
+};
+
 const savedProcessPlatform = process.platform;
 const savedPlatform = Object.getOwnPropertyDescriptor(window.navigator, "platform");
 const savedUserAgent = Object.getOwnPropertyDescriptor(window.navigator, "userAgent");
 
-async function renderStatus(status: SystemPermissionsStatus) {
+// `browserPlatform` defaults to the host platform; pass it explicitly to simulate a
+// remote web client whose browser OS differs from the paired host.
+async function renderStatus(status: SystemPermissionsStatus, browserPlatform: string = status.platform) {
   Object.defineProperty(process, "platform", {
-    value: status.platform === "macos" ? "darwin" : "win32",
+    value: browserPlatform === "macos" ? "darwin" : "win32",
   });
   Object.defineProperty(window.navigator, "platform", {
-    value: status.platform === "macos" ? "MacIntel" : "Win32", configurable: true,
+    value: browserPlatform === "macos" ? "MacIntel" : "Win32", configurable: true,
   });
   Object.defineProperty(window.navigator, "userAgent", {
-    value: status.platform === "macos" ? "Macintosh" : "Windows NT 10.0", configurable: true,
+    value: browserPlatform === "macos" ? "Macintosh" : "Windows NT 10.0", configurable: true,
   });
   // Subscribe to the exact IPC request before mounting; Vitest bounds the await.
   const ready = new Promise<void>((resolve) => {
@@ -275,6 +303,28 @@ describe("PermissionsSection", () => {
     expect(screen.getByText("Managed by OS")).toBeDefined();
     expect(screen.getByTestId("open-notifications-settings")).toBeDefined();
     expect(screen.queryByTestId("request-notifications")).toBeNull();
+  });
+
+  it("follows the host platform, not the browser OS, for macOS-only copy and controls", async () => {
+    // Given: a non-macOS host viewed from a remote web client running on a Mac browser.
+    await renderStatus(mockStatusWindows, "macos");
+
+    // Then: the host platform decides the copy and the macOS-only affordances.
+    expect(screen.queryByText(/Configure macOS permissions/)).toBeNull();
+    expect(screen.getByText(/Windows and Linux manage these permissions at the OS level/)).toBeDefined();
+    expect(screen.queryByText("How to grant permissions in macOS:")).toBeNull();
+    expect(screen.queryByTestId("rerun-permissions-onboarding")).toBeNull();
+  });
+
+  it("renders no Linux notifications action on a realistic Linux host", async () => {
+    // Given: the real Linux capability (canOpenSettings false, no launcher target).
+    await renderStatus(mockStatusLinux);
+
+    // Then: no dead button and no macOS advice.
+    expect(screen.queryByTestId("open-notifications-settings")).toBeNull();
+    expect(screen.queryByTestId("request-notifications")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Configure macOS permissions/)).toBeNull();
   });
 
   it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {

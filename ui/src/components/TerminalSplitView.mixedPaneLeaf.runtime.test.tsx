@@ -204,7 +204,7 @@ describe("TerminalSplitView mixed terminal and browser pane layout", () => {
     expect(onNavigateBrowserTab).toHaveBeenCalledWith("tab-term-1", "https://example.com/updated", "browser-leaf-1");
 
     fireEvent.click(screen.getByTestId("browser-reload-button"));
-    expect(onReloadBrowserTab).toHaveBeenCalledWith("tab-term-1", "browser-leaf-1");
+    expect(onReloadBrowserTab).toHaveBeenCalledWith("tab-term-1", "browser-leaf-1", undefined);
 
     // 5. Both pane-edge zones mount
     const termEdgeDropZones = within(paneLeaves[0]).getAllByTestId("pane-edge-drop-zone");

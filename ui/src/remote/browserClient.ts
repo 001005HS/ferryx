@@ -13,6 +13,7 @@ import {
   type BrowserDriverClaimedMessage,
   type BrowserDriverChangedMessage,
   type BrowserDriverReleasedMessage,
+  type BrowserErrorDetails,
   type BrowserErrorMessage,
   type BrowserFrame,
   type BrowserHelloMessage,
@@ -257,10 +258,12 @@ export class BrowserClient {
               code: string;
               retryable: boolean;
               retryAfterMs?: number;
+              details?: BrowserErrorDetails;
             };
             err.code = msg.code;
             err.retryable = msg.retryable;
             err.retryAfterMs = msg.retryAfterMs;
+            err.details = msg.details;
             this.rejectPending(msg.requestId, err);
           } else {
             for (const listener of this.errorListeners) {

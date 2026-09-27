@@ -98,9 +98,11 @@ describe("shortcut registry", () => {
     expect(SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
       "tab.newTerminal",
       "tab.newBrowser",
+      "tab.reopenClosed",
       "tab.close",
       "browser.focusAddress",
       "browser.reload",
+      "browser.hardReload",
       "browser.back",
       "browser.forward",
       "browser.find",
@@ -172,6 +174,8 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("tab.select1", true)).toBe("⌃1");
     expect(shortcutLabel("tab.select1", false)).toBe("Ctrl+1");
     expect(shortcutLabel("tab.select9", true)).toBe("⌃9");
+    expect(shortcutLabel("browser.hardReload", true)).toBe("⌘⇧R");
+    expect(shortcutLabel("browser.hardReload", false)).toBe("Ctrl+Shift+R");
     expect(shortcutLabel("zoom.in", true)).toBe("⌘=");
     expect(shortcutLabel("zoom.out", true)).toBe("⌘-");
     expect(shortcutLabel("zoom.reset", true)).toBe("⌘0");

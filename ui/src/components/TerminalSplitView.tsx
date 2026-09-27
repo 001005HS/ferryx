@@ -23,6 +23,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { requestSessionLifecycleAction, useSleepingSessionIds } from "../lib/sessionLifecycle";
 
 import type { ActivitySummary, TerminalActivity } from "../lib/activity";
+import type { BrowserReloadOptions } from "../lib/browserTauri";
 import type {
   BrowserTab,
   LayoutState,
@@ -200,7 +201,7 @@ type TerminalSplitViewProps = {
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
   defaultAgentId?: string | null;
   onNavigateBrowserTab?: (tabId: string, url: string, browserId?: string) => void;
-  onReloadBrowserTab?: (tabId: string, browserId?: string) => void;
+  onReloadBrowserTab?: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane?: (tabId: string, leafId: string) => void;
   onSetRatio?: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
@@ -663,7 +664,7 @@ type TabGroupViewProps = {
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
   defaultAgentId?: string | null;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
-  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onMoveTabToSplit?: (
     tabId: string,
@@ -745,7 +746,6 @@ function TabGroupView({
   const tabById = new Map(layout.tabs.map((tab) => [tab.id, tab]));
   const tabs = group.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab));
   const activeTab = tabs.find((tab) => tab.id === group.activeTabId) ?? tabs[0] ?? null;
-  const activeTabLayout = activeTab ? getTabPaneLayout(layout, activeTab) : null;
   const isFocused = layout.focusedGroupId === groupId;
 
   const focusGroup = () => {
@@ -826,32 +826,47 @@ function TabGroupView({
       />
 
       <TabGroupDropSurface groupId={groupId}>
-        {!activeTab ? null : activeTabLayout ? (
-          <PaneRenderer
-            node={activeTabLayout.root}
-            tab={activeTab}
-            tabLayout={activeTabLayout}
-            sessions={sessions}
-            activityBySessionId={activityBySessionId}
-            groupFocused={isFocused}
-            browserPanesVisible={browserPanesVisible}
-            dropFeedbackLeafId={dropFeedbackLeafId}
-            onNavigateBrowserTab={onNavigateBrowserTab}
-            onReloadBrowserTab={onReloadBrowserTab}
-            path=""
-            searchLeafId={searchLeafId}
-            onCloseSearch={onCloseSearch}
-            onReconnectAgentSession={onReconnectAgentSession}
-            onReconnectSshSession={onReconnectSshSession}
-            onOpenNewShell={onOpenNewShell}
-            onBackendSessionUnavailable={onBackendSessionUnavailable}
-            onSplitPane={onSplitPane}
-            onClosePane={onClosePane}
-            onSetRatio={onSetRatio}
-            onSwapPanes={onSwapPanes}
-            onFocusPane={onFocusPane}
-          />
-        ) : null}
+        {!activeTab
+          ? null
+          : tabs.map((tab) => {
+              const tabLayout = getTabPaneLayout(layout, tab);
+              if (!tabLayout) return null;
+              const isTabActive = tab.id === activeTab.id;
+              return (
+                <div
+                  key={tab.id}
+                  className={`h-full w-full min-h-0 min-w-0 ${isTabActive ? "" : "hidden"}`}
+                  style={{ display: isTabActive ? undefined : "none" }}
+                  data-tab-pane-container={tab.id}
+                  data-tab-pane-active={isTabActive}
+                >
+                  <PaneRenderer
+                    node={tabLayout.root}
+                    tab={tab}
+                    tabLayout={tabLayout}
+                    sessions={sessions}
+                    activityBySessionId={activityBySessionId}
+                    groupFocused={isFocused && isTabActive}
+                    browserPanesVisible={browserPanesVisible && isTabActive}
+                    dropFeedbackLeafId={isTabActive ? dropFeedbackLeafId : null}
+                    onNavigateBrowserTab={onNavigateBrowserTab}
+                    onReloadBrowserTab={onReloadBrowserTab}
+                    path=""
+                    searchLeafId={isTabActive ? searchLeafId : undefined}
+                    onCloseSearch={onCloseSearch}
+                    onReconnectAgentSession={onReconnectAgentSession}
+                    onReconnectSshSession={onReconnectSshSession}
+                    onOpenNewShell={onOpenNewShell}
+                    onBackendSessionUnavailable={onBackendSessionUnavailable}
+                    onSplitPane={onSplitPane}
+                    onClosePane={onClosePane}
+                    onSetRatio={onSetRatio}
+                    onSwapPanes={onSwapPanes}
+                    onFocusPane={onFocusPane}
+                  />
+                </div>
+              );
+            })}
       </TabGroupDropSurface>
     </div>
   );
@@ -892,7 +907,7 @@ type PaneRendererProps = {
     bindingKey?: string | null,
   ) => void;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
-  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
@@ -987,7 +1002,7 @@ type PaneLeafViewProps = {
     bindingKey?: string | null,
   ) => void;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
-  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
@@ -1295,7 +1310,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   tab={browserTab}
                   visible={browserPanesVisible}
                   onNavigate={(url) => onNavigateBrowserTab(tab.id, url, browserTab.browserId)}
-                  onReload={() => onReloadBrowserTab(tab.id, browserTab.browserId)}
+                  onReload={(options) => onReloadBrowserTab(tab.id, browserTab.browserId, options)}
                   designFeedbackTargets={designFeedbackTargetsForTab}
                 />
               );

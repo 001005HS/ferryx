@@ -115,7 +115,34 @@ fn linux_user_agent(arch: &str, display_server: &str) -> String {
 
 const MAX_URL_LENGTH_BYTES: usize = 8192;
 
+/// Security boundary context distinguishing local desktop execution from
+/// remote paired/web gateway execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserSecurityContext {
+    /// Local desktop execution (Tauri GUI window).
+    Local,
+    /// Remote client execution (Axum gateway / WebSockets).
+    Remote,
+}
+
+impl Default for BrowserSecurityContext {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
 pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
+    validate_url_with_context(url_str, BrowserSecurityContext::Local)
+}
+
+pub fn validate_url_remote(url_str: &str) -> Result<String, BrowserError> {
+    validate_url_with_context(url_str, BrowserSecurityContext::Remote)
+}
+
+pub fn validate_url_with_context(
+    url_str: &str,
+    context: BrowserSecurityContext,
+) -> Result<String, BrowserError> {
     let trimmed = url_str.trim();
     if trimmed.is_empty() {
         return Ok("about:blank".to_string());
@@ -138,7 +165,86 @@ pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
     match parsed.scheme() {
         "http" | "https" => Ok(parsed.to_string()),
         "about" if parsed.path() == "blank" => Ok("about:blank".to_string()),
+        "file" => {
+            // T15 Policy Option A: Local-only file scheme allowance for HTML documents.
+            // 1. Strictly forbidden in remote/non-local contexts.
+            if context == BrowserSecurityContext::Remote {
+                return Err(BrowserError::SchemeDenied(parsed.to_string()));
+            }
+            // 2. Localhost or empty host only; remote SMB/UNC file URLs are rejected.
+            let host_is_local = match parsed.host_str() {
+                None | Some("") | Some("localhost") => true,
+                _ => false,
+            };
+            if !host_is_local {
+                return Err(BrowserError::SchemeDenied(parsed.to_string()));
+            }
+            // 3. Document scope constraint: only rendered markup formats are permitted.
+            // Sensitive system files (/etc/passwd, keys, shell scripts) are rejected.
+            let path_lower = parsed.path().to_ascii_lowercase();
+            let is_html = path_lower.ends_with(".html")
+                || path_lower.ends_with(".htm")
+                || path_lower.ends_with(".xhtml");
+            if !is_html {
+                return Err(BrowserError::SchemeDenied(parsed.to_string()));
+            }
+
+            Ok(parsed.to_string())
+        }
         _ => Err(BrowserError::SchemeDenied(parsed.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod security_contract_tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_url_local_file_policy() {
+        assert_eq!(
+            validate_url("file:///tmp/x.html").unwrap(),
+            "file:///tmp/x.html"
+        );
+        assert_eq!(
+            validate_url("file:///Users/name/doc.htm").unwrap(),
+            "file:///Users/name/doc.htm"
+        );
+        // WHATWG URL canonicalization: file://localhost/path deliberately normalizes to
+        // no-authority file:///path to guarantee consistent local webview origin semantics.
+        assert_eq!(
+            validate_url("file://localhost/tmp/app.xhtml").unwrap(),
+            "file:///tmp/app.xhtml"
+        );
+        assert_eq!(
+            validate_url("file://localhost/tmp/app.xhtml").unwrap(),
+            validate_url("file:///tmp/app.xhtml").unwrap()
+        );
+
+        // Remote host file URL is denied even in local context
+        assert!(matches!(
+            validate_url("file://remote-server.invalid/path/x.html"),
+            Err(BrowserError::SchemeDenied(_))
+        ));
+
+        // Non-HTML files denied
+        assert!(matches!(
+            validate_url("file:///etc/passwd"),
+            Err(BrowserError::SchemeDenied(_))
+        ));
+        assert!(matches!(
+            validate_url("file:///tmp/payload.sh"),
+            Err(BrowserError::SchemeDenied(_))
+        ));
+
+        // Remote context strictly denies file:// scheme
+        assert!(matches!(
+            validate_url_with_context("file:///tmp/x.html", BrowserSecurityContext::Remote),
+            Err(BrowserError::SchemeDenied(_))
+        ));
+        assert!(matches!(
+            validate_url_remote("file:///tmp/x.html"),
+            Err(BrowserError::SchemeDenied(_))
+        ));
     }
 }
 

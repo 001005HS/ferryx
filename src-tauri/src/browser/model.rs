@@ -79,6 +79,16 @@ impl<'de> Deserialize<'de> for BrowserProfileId {
     }
 }
 
+/// Links a newly created popup tab back to the tab that called `window.open`, so the
+/// OAuth callback can be routed through the host. `handle` is the opener page's own
+/// popup id (`window.__ferryxPopupHandles[handle]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserOpenerLink {
+    pub browser_id: String,
+    pub handle: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBrowserRequest {
@@ -200,6 +210,19 @@ pub struct BrowserOpenRequestedPayload {
     pub target_url: String,
     pub profile_id: BrowserProfileId,
     pub worktree_path: Option<String>,
+    /// Set when this open came from a page's `window.open`: the tab that called it.
+    #[serde(default)]
+    pub opener_browser_id: Option<String>,
+    /// Set when this open came from a page's `window.open`: the opener page's popup id.
+    #[serde(default)]
+    pub popup_handle: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCloseRequestedPayload {
+    /// The popup tab whose own page called `window.close()`.
+    pub browser_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,9 +291,93 @@ pub struct BrowserAutomationSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum BrowserAutomationAction {
-    Click { reference: String },
-    Fill { reference: String, value: String },
-    Keypress { key: String },
+    Click {
+        reference: String,
+    },
+    Fill {
+        reference: String,
+        value: String,
+    },
+    Keypress {
+        key: String,
+    },
+    Dblclick {
+        reference: String,
+    },
+    Hover {
+        reference: String,
+    },
+    Focus {
+        reference: String,
+    },
+    Check {
+        reference: String,
+    },
+    Uncheck {
+        reference: String,
+    },
+    #[serde(rename = "scrollIntoView", alias = "scroll-into-view")]
+    ScrollIntoView {
+        reference: String,
+    },
+    Select {
+        reference: String,
+        value: String,
+    },
+    Scroll {
+        #[serde(default)]
+        reference: Option<String>,
+        #[serde(default, alias = "deltaX")]
+        x: Option<i64>,
+        #[serde(default, alias = "deltaY")]
+        y: Option<i64>,
+    },
+    Type {
+        #[serde(default)]
+        reference: Option<String>,
+        #[serde(alias = "value")]
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDialogEntry {
+    pub id: String,
+    pub r#type: String,
+    pub message: String,
+    pub default_value: Option<String>,
+    pub at_ms: u64,
+    pub handled: bool,
+    pub action: String,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDialogHandleRequest {
+    pub browser_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDialogPolicyRequest {
+    pub browser_id: String,
+    pub policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDownloadRequest {
+    pub url: String,
+    pub file_path: String,
+    #[serde(default)]
+    pub browser_id: Option<String>,
+    #[serde(default)]
+    pub cookies: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,4 +790,175 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_automation_actions_serde_roundtrip() {
+        let cases: Vec<(BrowserAutomationAction, &str)> = vec![
+            (
+                BrowserAutomationAction::Click {
+                    reference: "btn1".into(),
+                },
+                r#"{"type":"click","reference":"btn1"}"#,
+            ),
+            (
+                BrowserAutomationAction::Fill {
+                    reference: "input1".into(),
+                    value: "hello".into(),
+                },
+                r#"{"type":"fill","reference":"input1","value":"hello"}"#,
+            ),
+            (
+                BrowserAutomationAction::Keypress { key: "Enter".into() },
+                r#"{"type":"keypress","key":"Enter"}"#,
+            ),
+            (
+                BrowserAutomationAction::Dblclick {
+                    reference: "row1".into(),
+                },
+                r#"{"type":"dblclick","reference":"row1"}"#,
+            ),
+            (
+                BrowserAutomationAction::Hover {
+                    reference: "menu1".into(),
+                },
+                r#"{"type":"hover","reference":"menu1"}"#,
+            ),
+            (
+                BrowserAutomationAction::Focus {
+                    reference: "fld1".into(),
+                },
+                r#"{"type":"focus","reference":"fld1"}"#,
+            ),
+            (
+                BrowserAutomationAction::Check {
+                    reference: "chk1".into(),
+                },
+                r#"{"type":"check","reference":"chk1"}"#,
+            ),
+            (
+                BrowserAutomationAction::Uncheck {
+                    reference: "chk1".into(),
+                },
+                r#"{"type":"uncheck","reference":"chk1"}"#,
+            ),
+            (
+                BrowserAutomationAction::ScrollIntoView {
+                    reference: "item99".into(),
+                },
+                r#"{"type":"scrollIntoView","reference":"item99"}"#,
+            ),
+            (
+                BrowserAutomationAction::Select {
+                    reference: "opt1".into(),
+                    value: "v2".into(),
+                },
+                r#"{"type":"select","reference":"opt1","value":"v2"}"#,
+            ),
+            (
+                BrowserAutomationAction::Scroll {
+                    reference: Some("pane".into()),
+                    x: Some(0),
+                    y: Some(150),
+                },
+                r#"{"type":"scroll","reference":"pane","x":0,"y":150}"#,
+            ),
+            (
+                BrowserAutomationAction::Type {
+                    reference: Some("txt".into()),
+                    text: "abc".into(),
+                },
+                r#"{"type":"type","reference":"txt","text":"abc"}"#,
+            ),
+        ];
+
+        for (action, expected_json) in cases {
+            let serialized = serde_json::to_string(&action).unwrap();
+            assert_eq!(serialized, expected_json);
+            let deserialized: BrowserAutomationAction = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, action);
+        }
+
+        // Test alias support for scroll-into-view and deltaX/deltaY and value for type
+        let from_kebab: BrowserAutomationAction =
+            serde_json::from_str(r#"{"type":"scroll-into-view","reference":"x1"}"#).unwrap();
+        assert_eq!(
+            from_kebab,
+            BrowserAutomationAction::ScrollIntoView {
+                reference: "x1".into()
+            }
+        );
+
+        let scroll_alias: BrowserAutomationAction =
+            serde_json::from_str(r#"{"type":"scroll","deltaX":10,"deltaY":20}"#).unwrap();
+        assert_eq!(
+            scroll_alias,
+            BrowserAutomationAction::Scroll {
+                reference: None,
+                x: Some(10),
+                y: Some(20),
+            }
+        );
+
+        let type_alias: BrowserAutomationAction =
+            serde_json::from_str(r#"{"type":"type","value":"typed-val"}"#).unwrap();
+        assert_eq!(
+            type_alias,
+            BrowserAutomationAction::Type {
+                reference: None,
+                text: "typed-val".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_dialog_entry_serde_roundtrip() {
+        let entry = BrowserDialogEntry {
+            id: "d-1".into(),
+            r#type: "confirm".into(),
+            message: "Delete item?".into(),
+            default_value: None,
+            at_ms: 123456789,
+            handled: true,
+            action: "accept".into(),
+            result: Some("true".into()),
+        };
+        let serialized = serde_json::to_string(&entry).unwrap();
+        assert!(serialized.contains(r#""type":"confirm""#));
+        assert!(serialized.contains(r#""message":"Delete item?""#));
+        let deserialized: BrowserDialogEntry = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, entry);
+    }
+
+    #[test]
+    fn test_import_installed_browser_cookies_dto_serde() {
+        let req_json = r#"{"profileId":"default","source":"chrome","sourceProfile":"Profile 1"}"#;
+        let req: ImportInstalledBrowserCookiesRequest = serde_json::from_str(req_json).unwrap();
+        assert_eq!(req.profile_id, "default");
+        assert_eq!(req.source, crate::browser::cookies::InstalledBrowserKind::Chrome);
+        assert_eq!(req.source_profile.as_deref(), Some("Profile 1"));
+
+        let res = ImportInstalledBrowserCookiesResult {
+            imported_count: 42,
+            skipped_count: 5,
+        };
+        let res_json = serde_json::to_string(&res).unwrap();
+        assert_eq!(res_json, r#"{"importedCount":42,"skippedCount":5}"#);
+    }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportInstalledBrowserCookiesRequest {
+    pub profile_id: String,
+    pub source: crate::browser::cookies::InstalledBrowserKind,
+    #[serde(default)]
+    pub source_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportInstalledBrowserCookiesResult {
+    pub imported_count: usize,
+    pub skipped_count: usize,
+}
+

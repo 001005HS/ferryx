@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_detect;
+pub mod agent_transcript;
 pub mod browser;
 pub mod cli;
 pub mod clipboard_image;
@@ -1318,6 +1319,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 Arc::clone(&browser_cli_manager),
             )?;
             ipc::native_menu::register_menu_event_forwarder(app.handle());
+            crate::browser::download::register_download_event_forwarder(app.handle());
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             // P10/P11: schedule the ambiguous-close and pending-create reapers
             // for the whole app lifetime. Both run their first pass immediately
@@ -1526,6 +1528,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_go_back,
         cmd_browser_go_forward,
         cmd_browser_import_cookies,
+        cmd_browser_import_installed_cookies,
         cmd_browser_reload,
         cmd_browser_set_bounds,
         cmd_browser_set_visible,
@@ -1535,8 +1538,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_find,
         cmd_browser_clear_find,
         cmd_browser_download,
+        cmd_browser_download_with_cookies,
+        cmd_browser_download_list,
+        cmd_browser_download_cancel,
+        cmd_browser_get_dialogs,
+        cmd_browser_handle_dialog,
+        cmd_browser_set_dialog_policy,
+        cmd_browser_highlight,
         cmd_browser_automation_snapshot,
         cmd_browser_automation_act,
+        crate::browser::adoption::cmd_browser_session_adoption,
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,

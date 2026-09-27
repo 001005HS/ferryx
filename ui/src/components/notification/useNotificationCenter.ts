@@ -12,10 +12,13 @@ export function useNotificationCenter(store: NotificationCenterStore = notificat
   return {
     state,
     entries: unreadEntries,
+    /** The durable list must keep read items visible, so the merged view reads this, not `entries`. */
+    allEntries: state.entries,
     unreadCount,
     markEntriesRead: store.markEntriesRead,
     markAllRead: store.markAllRead,
     dismissEntry: store.dismissEntry,
+    dismissSession: store.dismissSession,
     clearAll: store.clearAll,
   };
 }

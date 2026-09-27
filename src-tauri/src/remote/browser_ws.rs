@@ -317,12 +317,34 @@ fn browser_error(
     retryable: bool,
     retry_after_ms: Option<u64>,
 ) -> ServerMessage {
+    browser_error_with_details(request_id, code, message, retryable, retry_after_ms, None)
+}
+
+/// Same frame as [`browser_error`], carrying the optional structured `details` payload
+/// (a `RefusedInputExplanation` for typed input refusals).
+fn browser_error_with_details(
+    request_id: Option<String>,
+    code: impl Into<String>,
+    message: impl AsRef<str>,
+    retryable: bool,
+    retry_after_ms: Option<u64>,
+    details: Option<serde_json::Value>,
+) -> ServerMessage {
     ServerMessage::BrowserError {
         request_id,
         code: code.into(),
         message: sanitize_public_string(message.as_ref()),
         retryable,
         retry_after_ms,
+        details,
+    }
+}
+
+/// Structured details that must ride along with an error frame, if the error carries any.
+pub fn remote_browser_error_details(err: &RemoteBrowserError) -> Option<serde_json::Value> {
+    match err {
+        RemoteBrowserError::InputRefused(explanation) => Some(explanation.to_details()),
+        _ => None,
     }
 }
 
@@ -334,6 +356,7 @@ pub fn map_remote_browser_error(err: &RemoteBrowserError) -> (&'static str, bool
         | RemoteBrowserError::Forbidden(m)
         | RemoteBrowserError::NotFound(m) => m.as_str(),
         RemoteBrowserError::WaitTimeout => "",
+        RemoteBrowserError::InputRefused(_) => "",
     };
 
     if msg.contains("BROWSER_STALE_FRAME") || msg.contains("stale frame") {
@@ -357,6 +380,7 @@ pub fn map_remote_browser_error(err: &RemoteBrowserError) -> (&'static str, bool
         RemoteBrowserError::NotFound(_) => ("BROWSER_NOT_FOUND", false, None),
         RemoteBrowserError::InvalidRequest(_) => ("BROWSER_INVALID_REQUEST", false, None),
         RemoteBrowserError::ExecutionFailed(_) => ("BROWSER_EXECUTION_FAILED", false, None),
+        RemoteBrowserError::InputRefused(_) => ("UNSUPPORTED", false, None),
     }
 }
 
@@ -1646,12 +1670,13 @@ impl BrowserWsSession {
                         Err(e) => {
                             // P2-03, R6-6: Preserve typed error codes from RemoteBrowserError
                             let (code, retryable, retry_after_ms) = map_remote_browser_error(&e);
-                            browser_error(
+                            browser_error_with_details(
                                 Some(request_id),
                                 code,
                                 e.to_string(),
                                 retryable,
                                 retry_after_ms,
+                                remote_browser_error_details(&e),
                             )
                         }
                     };
@@ -1758,12 +1783,13 @@ impl BrowserWsSession {
                     }
                     Err(e) => {
                         let (code, retryable, retry_after_ms) = map_remote_browser_error(&e);
-                        browser_error(
+                        browser_error_with_details(
                             Some(request_id),
                             code,
                             e.to_string(),
                             retryable,
                             retry_after_ms,
+                            remote_browser_error_details(&e),
                         )
                     }
                 };
@@ -2451,6 +2477,163 @@ pub mod tests {
                 }
                 _ => panic!("Expected BrowserError with code {}", expected_code),
             }
+        }
+    }
+
+    /// Frame-level wire shape: `details` is omitted when the error carries no structured
+    /// payload and rides along (camelCase) when it does, including across a round trip.
+    ///
+    /// RED mutation: drop `skip_serializing_if = "Option::is_none"` from the `details` field
+    /// of `ServerMessage::BrowserError` -> the "omitted when absent" assertion fails.
+    #[test]
+    fn test_browser_error_frame_details_wire_shape() {
+        let plain = browser_error(None, "BROWSER_EXECUTION_FAILED", "boom", false, None);
+        let plain_json = serde_json::to_value(&plain).expect("frame serializes");
+        assert!(
+            plain_json.get("details").is_none(),
+            "an error without a structured payload must omit details entirely"
+        );
+        assert_eq!(
+            plain_json.get("code").and_then(|v| v.as_str()),
+            Some("BROWSER_EXECUTION_FAILED")
+        );
+
+        let explanation = crate::browser::remote_input::RefusedInputToken::Canvas
+            .to_input_error()
+            .explanation();
+        let refused = RemoteBrowserError::InputRefused(explanation);
+        let (code, retryable, retry_after_ms) = map_remote_browser_error(&refused);
+        assert_eq!(
+            (code, retryable, retry_after_ms),
+            ("UNSUPPORTED", false, None)
+        );
+
+        let detailed = browser_error_with_details(
+            Some("r1".into()),
+            code,
+            refused.to_string(),
+            retryable,
+            retry_after_ms,
+            remote_browser_error_details(&refused),
+        );
+        let text = serde_json::to_string(&detailed).expect("frame serializes");
+        let reparsed: ServerMessage =
+            serde_json::from_str(&text).expect("frame must round-trip through the wire");
+        match reparsed {
+            ServerMessage::BrowserError {
+                code, details, ..
+            } => {
+                assert_eq!(code, "UNSUPPORTED");
+                let details = details.expect("details must survive the round trip");
+                assert_eq!(
+                    details.get("inputClass").and_then(|v| v.as_str()),
+                    Some("canvas_point")
+                );
+                assert_eq!(
+                    details.get("code").and_then(|v| v.as_str()),
+                    Some("UNSUPPORTED")
+                );
+            }
+            other => panic!("expected a BrowserError frame, got {other:?}"),
+        }
+
+        // A frame from a server that predates the field must still parse.
+        let legacy: ServerMessage = serde_json::from_str(
+            r#"{"type":"browserError","code":"UNSUPPORTED","message":"legacy","retryable":false}"#,
+        )
+        .expect("a frame without details must parse");
+        match legacy {
+            ServerMessage::BrowserError { details, .. } => assert!(details.is_none()),
+            other => panic!("expected a BrowserError frame, got {other:?}"),
+        }
+    }
+
+    /// A typed input refusal produced by the backend must reach the client as a BrowserError
+    /// frame whose `details` carry the real explanation (audit D-10 / T27).
+    ///
+    /// RED mutation: drop `remote_browser_error_details(&e)` from the command-error reply ->
+    /// `details` is None and the assertion below fails.
+    #[tokio::test]
+    async fn test_ws_input_refusal_reaches_the_wire_with_details() {
+        let now = Instant::now();
+        let refused = RemoteBrowserError::InputRefused(
+            crate::browser::remote_input::RefusedInputToken::Iframe
+                .to_input_error()
+                .explanation(),
+        );
+
+        let admission = AdmissionController::new();
+        let mut session = BrowserWsSession::new(
+            "c-refused".into(),
+            "d-refused".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ErrorBackend { err: refused });
+
+        let sub_msg = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: crate::remote::browser_protocol::BrowserImageFormat::Jpeg,
+                quality: None,
+                interval_ms: None,
+                max_edge: None,
+            },
+        };
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+
+        let claim_msg = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+
+        let cmd = ClientMessage::BrowserCommand {
+            request_id: "r3".into(),
+            request_seq: "1".into(),
+            browser_id: "b1".into(),
+            lease_epoch: session.lease_epoch.unwrap().to_string(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "1".into(),
+            command: "click".into(),
+            params: Some(serde_json::json!({ "reference": "target-1" })),
+        };
+        let resp = session
+            .handle_client_message(cmd, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        match resp {
+            ServerMessage::BrowserError {
+                code, details, ..
+            } => {
+                assert_eq!(code, "UNSUPPORTED");
+                let details = details.expect("a refused point click must explain itself to the client");
+                assert_eq!(
+                    details.get("reason").and_then(|v| v.as_str()),
+                    Some(crate::browser::remote_input::RefusedInputToken::Iframe.canonical_message())
+                );
+                assert_eq!(
+                    details.get("inputClass").and_then(|v| v.as_str()),
+                    Some("iframe_point")
+                );
+                assert!(details
+                    .get("remediation")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty()));
+            }
+            other => panic!("expected a BrowserError frame, got {other:?}"),
         }
     }
 

@@ -760,6 +760,8 @@ pub struct RemoteGatewayState {
     pub(crate) browse_home: RwLock<Option<PathBuf>>,
     #[cfg(test)]
     pub(crate) browse_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) agent_history_home: RwLock<Option<PathBuf>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     /// Absent for legacy/test constructors. Presence enables no future API.
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
@@ -950,6 +952,8 @@ impl RemoteGatewayState {
             browse_home: RwLock::new(None),
             #[cfg(test)]
             browse_probe: RwLock::new(None),
+            #[cfg(test)]
+            agent_history_home: RwLock::new(None),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
             terminal_service,
             daemon_epoch: AtomicU64::new(0),

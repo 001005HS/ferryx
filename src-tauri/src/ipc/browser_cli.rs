@@ -1,11 +1,14 @@
 use crate::browser::{
     BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry,
-    BrowserError, BrowserManager, BrowserSessionCreatedPayload, BrowserSessionSummary,
-    BrowserWaitCondition, CreateBrowserRequest,
+    BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+    BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+    CreateBrowserRequest,
 };
 use crate::ipc::browser::{
-    browser_automation_act, browser_automation_snapshot, close_browser_session,
-    create_browser_session, identify_browser_session, navigate_browser_session,
+    browser_automation_act, browser_automation_snapshot, browser_download_with_session,
+    browser_get_dialogs, browser_handle_dialog, browser_set_dialog_policy, close_browser_session,
+    create_browser_session, focus_browser_session, highlight_browser_session,
+    highlight_browser_session_with_duration, identify_browser_session, navigate_browser_session,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,21 @@ pub enum BrowserCliRequest {
         #[serde(alias = "browser_id")]
         browser_id: String,
         url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Back {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Forward {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Reload {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
     },
     #[serde(rename_all = "camelCase")]
     Close {
@@ -103,6 +121,81 @@ pub enum BrowserCliRequest {
         key: Option<String>,
         #[serde(default)]
         value: Option<String>,
+        #[serde(default, alias = "clear_all")]
+        clear_all: Option<bool>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        domain: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    TabList,
+    #[serde(rename_all = "camelCase")]
+    TabNew {
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default, alias = "workspace_id")]
+        workspace_id: Option<String>,
+        #[serde(default, alias = "worktree_path")]
+        worktree_path: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    TabSwitch {
+        #[serde(default, alias = "browser_id")]
+        browser_id: Option<String>,
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    #[serde(rename_all = "camelCase")]
+    TabClose {
+        #[serde(default, alias = "browser_id")]
+        browser_id: Option<String>,
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    #[serde(rename_all = "camelCase")]
+    StateSave {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        #[serde(alias = "out_path")]
+        out_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    StateLoad {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        #[serde(alias = "in_path")]
+        in_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Dialog {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        action: String,
+        #[serde(default, alias = "prompt_text")]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        policy: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Download {
+        #[serde(default, alias = "browser_id")]
+        browser_id: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        action: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Highlight {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        selector: String,
+        #[serde(default, alias = "duration_ms")]
+        duration_ms: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     RemoteAttach {
@@ -610,15 +703,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 )
             } else if let (Some(px), Some(py)) = (x, y) {
                 (
-                    format!(
-                        r#"(function() {{
-                            const el = document.elementFromPoint({}, {});
-                            if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
-                            el.click();
-                            return JSON.stringify({{ ok: true }});
-                        }})()"#,
-                        px, py
-                    ),
+                    crate::browser::remote_input::build_point_click_script(px, py),
                     Some(px),
                     Some(py),
                 )
@@ -634,17 +719,9 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 let pt = crate::browser::remote_input::map_point_mainframe(
                     u_val, v_val, &rect, false, false, false,
                 )
-                .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                .map_err(|e| IpcError::new(e.ipc_error_code(), e.to_string()))?;
                 (
-                    format!(
-                        r#"(function() {{
-                            const el = document.elementFromPoint({}, {});
-                            if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
-                            el.click();
-                            return JSON.stringify({{ ok: true }});
-                        }})()"#,
-                        pt.x, pt.y
-                    ),
+                    crate::browser::remote_input::build_point_click_script(pt.x, pt.y),
                     Some(pt.x),
                     Some(pt.y),
                 )
@@ -659,11 +736,22 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
             let res_str = crate::ipc::browser::eval_webview(webview, script).await?;
-            crate::browser::remote_input::decode_action_result(&res_str).map_err(|err_msg| {
-                IpcError::new(
-                    IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
-                    err_msg,
-                )
+            crate::browser::remote_input::decode_point_click_result(&res_str).map_err(|err| {
+                use crate::browser::remote_input::ActionDecodeError;
+                match err {
+                    ActionDecodeError::Refused(input_err) => IpcError::new(
+                        input_err.ipc_error_code(),
+                        input_err.to_string(),
+                    )
+                    .with_details(input_err.explanation().to_details()),
+                    ActionDecodeError::NotFound(message) => IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
+                        message,
+                    ),
+                    ActionDecodeError::Malformed(message) => {
+                        IpcError::new(IpcErrorCode::BrowserAutomationFailed, message)
+                    }
+                }
             })?;
             let mut res_map = serde_json::Map::new();
             res_map.insert("clicked".into(), serde_json::json!(true));
@@ -1062,6 +1150,13 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                                 IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()),
                                 msg,
                             )),
+                            crate::remote::browser_backend::RemoteBrowserError::InputRefused(
+                                explanation,
+                            ) => Err(IpcError::new(
+                                IpcErrorCode::Unsupported,
+                                explanation.to_string(),
+                            )
+                            .with_details(explanation.to_details())),
                         }
                     }
                 }
@@ -1435,6 +1530,7 @@ pub enum BrowserCliResponse {
     Acted,
     Opened {
         browser: BrowserSessionSummary,
+        adoption: crate::browser::adoption::BrowserAdoption,
     },
     Navigated,
     Closed,
@@ -1459,10 +1555,40 @@ pub enum BrowserCliResponse {
     StorageValue {
         value: Option<String>,
     },
+    TabSwitched {
+        browser: BrowserSessionSummary,
+        index: usize,
+    },
+    StateSaved {
+        path: String,
+    },
+    StateLoaded,
     #[serde(rename_all = "camelCase")]
     RemoteAttached {
         service_epoch: String,
         protocol_version: u32,
+    },
+    DialogHandled {
+        dialog: crate::browser::model::BrowserDialogEntry,
+    },
+    DialogEntries {
+        dialogs: Vec<crate::browser::model::BrowserDialogEntry>,
+    },
+    DialogPolicySet {
+        policy: String,
+    },
+    DownloadStarted {
+        download: crate::browser::download::DownloadRecord,
+    },
+    Downloads {
+        downloads: Vec<crate::browser::download::DownloadRecord>,
+    },
+    DownloadCancelled {
+        id: String,
+        cancelled: bool,
+    },
+    Highlighted {
+        highlight: crate::browser::picker::BrowserHighlightResult,
     },
     Error {
         code: String,
@@ -2036,12 +2162,25 @@ async fn execute_request<R: tauri::Runtime>(
                         browser: state.clone(),
                         workspace_id,
                     };
-                    let _ = app.emit(
+                    // The waiter must exist before the GUI can answer this event.
+                    let adoption_rx = crate::browser::adoption::expect(&state.browser_id);
+                    if let Err(error) = app.emit(
                         crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
                         payload,
-                    );
+                    ) {
+                        crate::browser::adoption::forget(&state.browser_id);
+                        return BrowserCliResponse::Error {
+                            code: ipc_error_code_string(IpcErrorCode::BrowserHostUnavailable),
+                            message: format!(
+                                "failed to deliver the browser session to the GUI: {error}"
+                            ),
+                        };
+                    }
+                    let adoption =
+                        crate::browser::adoption::await_ack(&state.browser_id, adoption_rx).await;
                     BrowserCliResponse::Opened {
                         browser: BrowserSessionSummary::from(state),
+                        adoption,
                     }
                 }
                 Err(error) => BrowserCliResponse::Error {
@@ -2059,6 +2198,43 @@ async fn execute_request<R: tauri::Runtime>(
                 };
             }
             match navigate_browser_session(app, manager, &browser_id, &url).await {
+                Ok(()) => BrowserCliResponse::Navigated,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Back { browser_id } => {
+            match crate::ipc::browser::history_navigation(app, manager, &browser_id, false) {
+                Ok(()) => BrowserCliResponse::Navigated,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Forward { browser_id } => {
+            match crate::ipc::browser::history_navigation(app, manager, &browser_id, true) {
+                Ok(()) => BrowserCliResponse::Navigated,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Reload { browser_id } => {
+            let res: Result<(), IpcError> = (|| {
+                let state = manager.begin_reload(&browser_id)?;
+                let webview = app
+                    .get_webview(&state.webview_label)
+                    .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+                webview
+                    .reload()
+                    .map_err(|e| BrowserError::Internal(e.to_string()))?;
+                Ok(())
+            })();
+            match res {
                 Ok(()) => BrowserCliResponse::Navigated,
                 Err(error) => BrowserCliResponse::Error {
                     code: ipc_error_code_string(error.code),
@@ -2125,7 +2301,7 @@ async fn execute_request<R: tauri::Runtime>(
             }
         }
         BrowserCliRequest::Focus { browser_id } => {
-            match crate::ipc::browser::focus_browser_session(app, manager, &browser_id) {
+            match focus_browser_session(app, manager, &browser_id) {
                 Ok(()) => BrowserCliResponse::Focused,
                 Err(error) => BrowserCliResponse::Error {
                     code: ipc_error_code_string(error.code),
@@ -2185,8 +2361,11 @@ async fn execute_request<R: tauri::Runtime>(
             action,
             key,
             value,
+            clear_all,
+            url,
+            domain,
         } => {
-            match crate::ipc::browser::storage_browser_session(
+            match crate::ipc::browser::storage_browser_session_extended(
                 app,
                 manager,
                 &browser_id,
@@ -2194,10 +2373,340 @@ async fn execute_request<R: tauri::Runtime>(
                 &action,
                 key.as_deref(),
                 value.as_deref(),
+                clear_all.unwrap_or(false),
+                url.as_deref(),
+                domain.as_deref(),
             )
             .await
             {
                 Ok(value) => BrowserCliResponse::StorageValue { value },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::TabList => BrowserCliResponse::List {
+            sessions: manager.list_sessions(),
+        },
+        BrowserCliRequest::TabNew {
+            url,
+            workspace_id,
+            worktree_path,
+        } => {
+            let target_url = url.unwrap_or_else(|| "http://localhost:3000".to_string());
+            if let Err(browser_error) = crate::browser::validate_url(&target_url) {
+                let ipc_error = IpcError::from(browser_error);
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(ipc_error.code),
+                    message: ipc_error.message,
+                };
+            }
+            let create_req = CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: workspace_id.clone(),
+                worktree_path,
+                url: target_url,
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            };
+            match create_browser_session(app, manager, create_req).await {
+                Ok(state) => {
+                    let payload = BrowserSessionCreatedPayload {
+                        browser: state.clone(),
+                        workspace_id,
+                    };
+                    // The waiter must exist before the GUI can answer this event.
+                    let adoption_rx = crate::browser::adoption::expect(&state.browser_id);
+                    if let Err(error) = app.emit(
+                        crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
+                        payload,
+                    ) {
+                        crate::browser::adoption::forget(&state.browser_id);
+                        return BrowserCliResponse::Error {
+                            code: ipc_error_code_string(IpcErrorCode::BrowserHostUnavailable),
+                            message: format!(
+                                "failed to deliver the browser session to the GUI: {error}"
+                            ),
+                        };
+                    }
+                    let adoption =
+                        crate::browser::adoption::await_ack(&state.browser_id, adoption_rx).await;
+                    BrowserCliResponse::Opened {
+                        browser: BrowserSessionSummary::from(state),
+                        adoption,
+                    }
+                }
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::TabSwitch { browser_id, index } => {
+            let sessions = manager.list_sessions();
+            let target_session = if let Some(idx) = index {
+                if idx == 0 || idx > sessions.len() {
+                    return BrowserCliResponse::Error {
+                        code: "BROWSER_TAB_OUT_OF_RANGE".into(),
+                        message: format!(
+                            "tab index {idx} out of range (total tabs: {})",
+                            sessions.len()
+                        ),
+                    };
+                }
+                Some((sessions[idx - 1].clone(), idx))
+            } else if let Some(ref id) = browser_id {
+                sessions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| &s.browser_id == id)
+                    .map(|(i, s)| (s.clone(), i + 1))
+            } else {
+                None
+            };
+
+            let (session, final_index) = match target_session {
+                Some(pair) => pair,
+                None => {
+                    let identifier = browser_id
+                        .or_else(|| index.map(|i| i.to_string()))
+                        .unwrap_or_else(|| "unspecified".into());
+                    return BrowserCliResponse::Error {
+                        code: "BROWSER_NOT_FOUND".into(),
+                        message: format!("browser tab '{identifier}' not found"),
+                    };
+                }
+            };
+
+            if let Err(error) = focus_browser_session(app, manager, &session.browser_id) {
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                };
+            }
+
+            // The layout tab index space differs from this CLI list, so the GUI resolves the
+            // owning tab from browserId alone; a shortcut index here would activate the wrong tab.
+            if let Err(error) = app.emit(
+                "browser_tab_switch",
+                serde_json::json!({
+                    "browserId": session.browser_id,
+                    "index": final_index
+                }),
+            ) {
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(IpcErrorCode::BrowserHostUnavailable),
+                    message: format!("failed to ask the GUI to activate the tab: {error}"),
+                };
+            }
+
+            BrowserCliResponse::TabSwitched {
+                browser: session,
+                index: final_index,
+            }
+        }
+        BrowserCliRequest::TabClose { browser_id, index } => {
+            let sessions = manager.list_sessions();
+            let target_id = if let Some(idx) = index {
+                if idx == 0 || idx > sessions.len() {
+                    return BrowserCliResponse::Error {
+                        code: "BROWSER_TAB_OUT_OF_RANGE".into(),
+                        message: format!(
+                            "tab index {idx} out of range (total tabs: {})",
+                            sessions.len()
+                        ),
+                    };
+                }
+                sessions[idx - 1].browser_id.clone()
+            } else if let Some(id) = browser_id {
+                if !sessions.iter().any(|s| s.browser_id == id) {
+                    return BrowserCliResponse::Error {
+                        code: "BROWSER_NOT_FOUND".into(),
+                        message: format!("browser tab '{id}' not found"),
+                    };
+                }
+                id
+            } else {
+                match identify_browser_session(manager) {
+                    Some(s) => s.browser_id,
+                    None => {
+                        return BrowserCliResponse::Error {
+                            code: "BROWSER_NOT_FOUND".into(),
+                            message: "no active browser tab to close".into(),
+                        };
+                    }
+                }
+            };
+
+            match close_browser_session(app, manager, &target_id).await {
+                Ok(()) => BrowserCliResponse::Closed,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::StateSave {
+            browser_id,
+            out_path,
+        } => {
+            match crate::ipc::browser::save_browser_state_session(
+                app,
+                manager,
+                &browser_id,
+                &out_path,
+            )
+            .await
+            {
+                Ok(path) => BrowserCliResponse::StateSaved { path },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::StateLoad {
+            browser_id,
+            in_path,
+        } => {
+            match crate::ipc::browser::load_browser_state_session(
+                app,
+                manager,
+                &browser_id,
+                &in_path,
+            )
+            .await
+            {
+                Ok(()) => BrowserCliResponse::StateLoaded,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Dialog {
+            browser_id,
+            action,
+            prompt_text,
+            policy,
+        } => match action.as_str() {
+            "accept" | "dismiss" => {
+                let request = BrowserDialogHandleRequest {
+                    browser_id: browser_id.clone(),
+                    action: action.clone(),
+                    prompt_text,
+                };
+                // With no pending dialog the webview reports `no_active_dialog`,
+                // which `browser_handle_dialog` maps to the structured
+                // BROWSER_DIALOG_NOT_FOUND code instead of faking a success.
+                match browser_handle_dialog(app, manager, request).await {
+                    Ok(dialog) => BrowserCliResponse::DialogHandled { dialog },
+                    Err(error) => BrowserCliResponse::Error {
+                        code: ipc_error_code_string(error.code),
+                        message: error.message,
+                    },
+                }
+            }
+            "list" => match browser_get_dialogs(app, manager, &browser_id).await {
+                Ok(dialogs) => BrowserCliResponse::DialogEntries { dialogs },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            },
+            "policy" => match policy {
+                Some(policy) => {
+                    match browser_set_dialog_policy(app, manager, &browser_id, &policy).await {
+                        Ok(()) => BrowserCliResponse::DialogPolicySet { policy },
+                        Err(error) => BrowserCliResponse::Error {
+                            code: ipc_error_code_string(error.code),
+                            message: error.message,
+                        },
+                    }
+                }
+                None => BrowserCliResponse::Error {
+                    code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                    message: "dialog policy requires a policy value".into(),
+                },
+            },
+            other => BrowserCliResponse::Error {
+                code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                message: format!(
+                    "unknown dialog action `{other}`: expected accept, dismiss, list, or policy"
+                ),
+            },
+        },
+        BrowserCliRequest::Download {
+            browser_id,
+            url,
+            path,
+            id,
+            action,
+        } => match action.as_str() {
+            "start" => match (browser_id, url, path) {
+                (Some(browser_id), Some(url), Some(path)) => {
+                    let request = BrowserDownloadRequest {
+                        url,
+                        file_path: path,
+                        browser_id: Some(browser_id),
+                        cookies: None,
+                    };
+                    match browser_download_with_session(app, manager, request).await {
+                        Ok(download) => BrowserCliResponse::DownloadStarted { download },
+                        Err(error) => BrowserCliResponse::Error {
+                            code: ipc_error_code_string(error.code),
+                            message: error.message,
+                        },
+                    }
+                }
+                _ => BrowserCliResponse::Error {
+                    code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                    message: "download start requires browserId, url, and path".into(),
+                },
+            },
+            "list" => BrowserCliResponse::Downloads {
+                downloads: crate::browser::download::list_downloads(),
+            },
+            "cancel" => match id {
+                Some(id) => {
+                    let cancelled = crate::browser::download::cancel_download(&id);
+                    BrowserCliResponse::DownloadCancelled { id, cancelled }
+                }
+                None => BrowserCliResponse::Error {
+                    code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                    message: "download cancel requires an id".into(),
+                },
+            },
+            other => BrowserCliResponse::Error {
+                code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                message: format!(
+                    "unknown download action `{other}`: expected start, list, or cancel"
+                ),
+            },
+        },
+        BrowserCliRequest::Highlight {
+            browser_id,
+            selector,
+            duration_ms,
+        } => {
+            let result = match duration_ms {
+                Some(duration_ms) => {
+                    highlight_browser_session_with_duration(
+                        app,
+                        manager,
+                        &browser_id,
+                        &selector,
+                        duration_ms,
+                    )
+                    .await
+                }
+                None => highlight_browser_session(app, manager, &browser_id, &selector).await,
+            };
+            match result {
+                Ok(highlight) => BrowserCliResponse::Highlighted { highlight },
                 Err(error) => BrowserCliResponse::Error {
                     code: ipc_error_code_string(error.code),
                     message: error.message,
@@ -2316,6 +2825,44 @@ mod tests {
         assert_eq!(json, r#"{"command":"list"}"#);
         let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, BrowserCliRequest::List);
+    }
+
+    #[test]
+    fn test_browser_cli_tab_and_state_requests_serialization() {
+        let tab_list = BrowserCliRequest::TabList;
+        let json = serde_json::to_string(&tab_list).unwrap();
+        assert_eq!(json, r#"{"command":"tabList"}"#);
+        assert_eq!(serde_json::from_str::<BrowserCliRequest>(&json).unwrap(), tab_list);
+
+        let tab_new = BrowserCliRequest::TabNew {
+            url: Some("https://example.com/app".into()),
+            workspace_id: Some("ws-main".into()),
+            worktree_path: None,
+        };
+        let new_json = serde_json::to_string(&tab_new).unwrap();
+        assert!(new_json.contains(r#""command":"tabNew""#));
+        assert_eq!(serde_json::from_str::<BrowserCliRequest>(&new_json).unwrap(), tab_new);
+
+        let tab_switch = BrowserCliRequest::TabSwitch {
+            browser_id: None,
+            index: Some(2),
+        };
+        let switch_json = serde_json::to_string(&tab_switch).unwrap();
+        assert_eq!(serde_json::from_str::<BrowserCliRequest>(&switch_json).unwrap(), tab_switch);
+
+        let state_save = BrowserCliRequest::StateSave {
+            browser_id: "b-1".into(),
+            out_path: "/tmp/state.json".into(),
+        };
+        let save_json = serde_json::to_string(&state_save).unwrap();
+        assert_eq!(serde_json::from_str::<BrowserCliRequest>(&save_json).unwrap(), state_save);
+
+        let state_load = BrowserCliRequest::StateLoad {
+            browser_id: "b-1".into(),
+            in_path: "/tmp/state.json".into(),
+        };
+        let load_json = serde_json::to_string(&state_load).unwrap();
+        assert_eq!(serde_json::from_str::<BrowserCliRequest>(&load_json).unwrap(), state_load);
     }
 
     #[test]
@@ -3335,6 +3882,9 @@ mod tests {
             action: "get".into(),
             key: Some("theme".into()),
             value: None,
+            clear_all: None,
+            url: None,
+            domain: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"storage""#));
@@ -3465,6 +4015,86 @@ mod tests {
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
         assert_eq!(resp["type"], "error");
         assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_focus_returns_structured_errors() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".to_string(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let b_id = &registered.browser_id;
+
+        // (1) A registered session whose webview does not exist (mock app) produces
+        // BrowserCliResponse::Error with code WEBVIEW_NOT_FOUND without panicking or silent success.
+        let resp = execute_request(
+            app.handle(),
+            &manager,
+            BrowserCliRequest::Focus {
+                browser_id: b_id.clone(),
+            },
+        )
+        .await;
+
+        match resp {
+            BrowserCliResponse::Error { code, message } => {
+                assert_eq!(code, "WEBVIEW_NOT_FOUND");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected BrowserCliResponse::Error with WEBVIEW_NOT_FOUND, got {other:?}"),
+        }
+
+        // (2) An unknown browser id produces BrowserCliResponse::Error with BROWSER_NOT_FOUND.
+        let resp_unknown = execute_request(
+            app.handle(),
+            &manager,
+            BrowserCliRequest::Focus {
+                browser_id: "unknown-browser-id".to_string(),
+            },
+        )
+        .await;
+
+        match resp_unknown {
+            BrowserCliResponse::Error { code, message } => {
+                assert_eq!(code, "BROWSER_NOT_FOUND");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected BrowserCliResponse::Error with BROWSER_NOT_FOUND, got {other:?}"),
+        }
+
+        // Also assert the wire round-trip via send_raw_line matching the model test helper.
+        let token = "test-token";
+        let raw_registered = format!(
+            "{{\"command\":\"focus\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}"
+        );
+        let wire_resp_registered =
+            send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_registered).await;
+        assert_eq!(wire_resp_registered["type"], "error");
+        assert_eq!(wire_resp_registered["code"], "WEBVIEW_NOT_FOUND");
+
+        let raw_unknown = format!(
+            "{{\"command\":\"focus\",\"browserId\":\"unknown-browser-id\",\"token\":\"{token}\"}}"
+        );
+        let wire_resp_unknown =
+            send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_unknown).await;
+        assert_eq!(wire_resp_unknown["type"], "error");
+        assert_eq!(wire_resp_unknown["code"], "BROWSER_NOT_FOUND");
+
+        // (3) Both cases returned cleanly rather than unwinding (reaching here proves no panic).
     }
 
     #[tokio::test]
@@ -4525,5 +5155,86 @@ mod tests {
 
         // Producer pauses on disconnect cleanup
         assert!(!service.is_producer_active("b-gui-stream"));
+    }
+
+    #[tokio::test]
+    async fn tab_switch_reports_a_failed_focus_instead_of_a_silent_success() {
+        // Given a registered tab whose webview does not exist, when the CLI switches to it, then
+        // the focus failure reaches the caller as a structured error, not as a successful switch.
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("tab-switch-focus-fails".into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let response = execute_request(
+            app.handle(),
+            &manager,
+            BrowserCliRequest::TabSwitch {
+                browser_id: Some("tab-switch-focus-fails".into()),
+                index: None,
+            },
+        )
+        .await;
+
+        match response {
+            BrowserCliResponse::Error { code, message } => {
+                assert_eq!(code, "WEBVIEW_NOT_FOUND");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected a structured focus failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_switch_reports_an_out_of_range_index() {
+        // Given two tabs, when the CLI asks for index 5, then the range check answers with the
+        // documented code instead of switching to an arbitrary tab.
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        for browser_id in ["tab-range-1", "tab-range-2"] {
+            manager
+                .register_session(CreateBrowserRequest {
+                    browser_id: Some(browser_id.into()),
+                    workspace_id: None,
+                    worktree_path: None,
+                    url: "https://example.com/".into(),
+                    profile: None,
+                    zoom_factor: None,
+                    bounds: None,
+                    visible: Some(true),
+                })
+                .expect("register session");
+        }
+
+        let response = execute_request(
+            app.handle(),
+            &manager,
+            BrowserCliRequest::TabSwitch {
+                browser_id: None,
+                index: Some(5),
+            },
+        )
+        .await;
+
+        match response {
+            BrowserCliResponse::Error { code, .. } => {
+                assert_eq!(code, "BROWSER_TAB_OUT_OF_RANGE");
+            }
+            other => panic!("expected an out-of-range error, got {other:?}"),
+        }
     }
 }

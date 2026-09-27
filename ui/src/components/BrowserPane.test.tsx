@@ -10,6 +10,13 @@ const eventMocks = vi.hoisted(() => ({
 
 const browserMocks = vi.hoisted(() => ({
   BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
+  extractBrowserErrorCode: vi.fn((err: unknown) => {
+    if (!err) return "UNKNOWN_ERROR";
+    if (typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
+      return (err as { code: string }).code;
+    }
+    return "UNKNOWN_ERROR";
+  }),
   getBrowserState: vi.fn(async () => ({
     browserId: "browser-1",
     webviewLabel: "browser-browser-1",
@@ -30,9 +37,19 @@ const browserMocks = vi.hoisted(() => ({
   setBrowserVisible: vi.fn(async () => undefined),
   onBrowserShortcutRequested: vi.fn(async () => () => undefined),
   onBrowserDownloadRequested: vi.fn(async () => () => undefined),
+  onBrowserDownloadUpdated: vi.fn(async () => () => undefined),
   findBrowser: vi.fn(),
   clearBrowserFind: vi.fn(),
   downloadBrowserUrl: vi.fn(),
+  downloadBrowserUrlWithSession: vi.fn(async () => ({
+    id: "dl-1",
+    url: "http://localhost:3000/file.zip",
+    filePath: "/tmp/file.zip",
+    status: "completed" as const,
+    receivedBytes: 1024,
+    createdAtMs: 1000,
+    updatedAtMs: 1000,
+  })),
   openExternalUrl: vi.fn(),
 }));
 

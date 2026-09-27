@@ -1,34 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronUp, Download, ExternalLink, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
   clearBrowserFind,
-  downloadBrowserUrl,
+  downloadBrowserUrlWithSession,
+  extractBrowserErrorCode,
   findBrowser,
   onBrowserDownloadRequested,
   onBrowserShortcutRequested,
   openExternalUrl,
   setBrowserBounds,
   setBrowserVisible,
+  type BrowserDisplayError,
   type BrowserFindResult,
   type BrowserShortcutAction,
   type BrowserShortcutDomEvent,
+  type BrowserReloadOptions,
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
 import { recordBrowserHistory } from "../lib/browserHistory";
 import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
   tab: BrowserTab;
   visible?: boolean;
   onNavigate: (url: string) => void;
-  onReload: () => void;
+  onReload: (options?: BrowserReloadOptions) => void;
   designFeedbackTargets?: DesignFeedbackTarget[];
 }
 
@@ -69,6 +73,24 @@ function extractDroppedHttpUrl(dataTransfer: DataTransfer): string | null {
   }
 }
 
+function parseErrorCode(err: unknown): string {
+  if (typeof extractBrowserErrorCode === "function") {
+    return extractBrowserErrorCode(err);
+  }
+  if (!err) return "UNKNOWN_ERROR";
+  if (typeof err === "object") {
+    const code = (err as Record<string, unknown>).code;
+    if (typeof code === "string" && code.trim()) return code.trim();
+    if (err instanceof Error && err.message) return err.message.trim();
+    const message = (err as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  if (typeof err === "string" && err.trim()) {
+    return err.trim();
+  }
+  return "UNKNOWN_ERROR";
+}
+
 export function BrowserPane({
   tab,
   visible = true,
@@ -84,8 +106,18 @@ export function BrowserPane({
   const [findQuery, setFindQuery] = useState("");
   const [findResult, setFindResult] = useState<BrowserFindResult>({ matchCount: 0, found: false });
   const [findError, setFindError] = useState<string | null>(null);
+  // Registration and find-clear failures are not find-bar content (the bar can be closed), so they
+  // surface in a pane-level alert row instead of being discarded. Each action clears only its own
+  // failure, so a later success never erases an unrelated one.
+  const [paneAlert, setPaneAlert] = useState<{ action: string; code: string } | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  const [displayError, setDisplayError] = useState<BrowserDisplayError | null>(null);
+  const [downloadsShelfOpen, setDownloadsShelfOpen] = useState(true);
+  // The download registry emits no lifecycle event of its own, so every shelf refresh is driven
+  // by an explicit signal: the page's `browser_download_requested` event, or a finished save.
+  const [downloadsRefreshToken, setDownloadsRefreshToken] = useState(0);
+  const updateBoundsRef = useRef<() => void>(() => undefined);
   // Latest find request wins: async find/clear responses can resolve out of order, so a stale
   // response for a superseded or cleared query must not overwrite the current result.
   const findRequestSeqRef = useRef(0);
@@ -106,6 +138,7 @@ export function BrowserPane({
   useEffect(() => {
     // Invalidate any in-flight find when the target browser changes or the pane unmounts, so a
     // late response cannot apply to a different browser reusing this component instance.
+    setDisplayError(null);
     return () => {
       findRequestSeqRef.current += 1;
     };
@@ -148,7 +181,11 @@ export function BrowserPane({
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      // Without this subscription the pane stops tracking the native tab (url, title, loading,
+      // navigation state) and silently freezes at whatever it last saw.
+      if (!disposed) setPaneAlert({ action: "Live state updates", code: parseErrorCode(error) });
+    });
 
     return () => {
       disposed = true;
@@ -176,15 +213,22 @@ export function BrowserPane({
     }).then((cleanup) => {
       if (disposed) cleanup();
       else shortcutCleanup = cleanup;
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      if (!disposed) setPaneAlert({ action: "Shortcut listener", code: parseErrorCode(error) });
+    });
     void onBrowserDownloadRequested((payload) => {
       if (payload.browserId !== tab.browserId) return;
       setDownloadUrl(payload.targetUrl);
       setDownloadStatus(null);
+      // A new download re-reveals the shelf the user dismissed earlier, and refreshes it.
+      setDownloadsShelfOpen(true);
+      setDownloadsRefreshToken((current) => current + 1);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else downloadCleanup = cleanup;
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      if (!disposed) setPaneAlert({ action: "Download listener", code: parseErrorCode(error) });
+    });
 
     return () => {
       disposed = true;
@@ -205,7 +249,19 @@ export function BrowserPane({
     let boundsSeq = 0;
 
     const updateVisibility = (nextVisible: boolean) => {
-      void setBrowserVisible(tab.browserId, nextVisible).catch(() => undefined);
+      void setBrowserVisible(tab.browserId, nextVisible)
+        .then(() => {
+          if (!disposed && nextVisible) {
+            setDisplayError(null);
+          }
+        })
+        .catch((error: unknown) => {
+          if (disposed) return;
+          setDisplayError({
+            operation: "visibility",
+            code: parseErrorCode(error),
+          });
+        });
     };
 
     const updateBounds = () => {
@@ -238,9 +294,16 @@ export function BrowserPane({
           if (disposed || seq !== boundsSeq) return;
           updateVisibility(true);
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          if (disposed || seq !== boundsSeq) return;
+          setDisplayError({
+            operation: "bounds",
+            code: parseErrorCode(error),
+          });
+        });
     };
 
+    updateBoundsRef.current = updateBounds;
     updateBounds();
 
     const resizeObserver = new ResizeObserver(updateBounds);
@@ -250,6 +313,7 @@ export function BrowserPane({
     return () => {
       disposed = true;
       boundsSeq += 1;
+      updateBoundsRef.current = () => undefined;
       resizeObserver.disconnect();
       window.removeEventListener("resize", updateBounds);
       // Native child webviews outlive React DOM nodes; cleanup also covers Fast Refresh remounts.
@@ -257,13 +321,22 @@ export function BrowserPane({
     };
   }, [liveTab.loadError, tab.browserId, maskAwareVisible]);
 
+  const retryBoundsAndVisibility = () => {
+    setDisplayError(null);
+    updateBoundsRef.current();
+  };
+
   const runFind = async (query: string, backwards = false) => {
     const seq = ++findRequestSeqRef.current;
     setFindQuery(query);
     setFindError(null);
     if (!query.trim()) {
       setFindResult({ matchCount: 0, found: false });
-      await clearBrowserFind(tab.browserId).catch(() => undefined);
+      try {
+        await clearBrowserFind(tab.browserId);
+      } catch (error) {
+        if (seq === findRequestSeqRef.current) setFindError(parseErrorCode(error));
+      }
       return;
     }
     try {
@@ -271,7 +344,9 @@ export function BrowserPane({
       if (seq === findRequestSeqRef.current) setFindResult(result);
     } catch (error) {
       if (seq === findRequestSeqRef.current) {
-        setFindError(error instanceof Error ? error.message : "Find failed");
+        // The find bar is the context, so it shows the backend's structured code instead of a
+        // generic fallback that hides which failure occurred.
+        setFindError(parseErrorCode(error));
       }
     }
   };
@@ -283,7 +358,9 @@ export function BrowserPane({
     setFindQuery("");
     setFindResult({ matchCount: 0, found: false });
     setFindError(null);
-    void clearBrowserFind(tab.browserId).catch(() => undefined);
+    void clearBrowserFind(tab.browserId)
+      .then(() => setPaneAlert((current) => (current?.action === "Clear find" ? null : current)))
+      .catch((error: unknown) => setPaneAlert({ action: "Clear find", code: parseErrorCode(error) }));
   };
 
   const saveDownload = async () => {
@@ -292,10 +369,13 @@ export function BrowserPane({
     if (!filePath) return;
     setDownloadStatus("Saving…");
     try {
-      await downloadBrowserUrl(downloadUrl, filePath);
+      await downloadBrowserUrlWithSession(tab.browserId, downloadUrl, filePath);
       setDownloadStatus("Saved");
     } catch (error) {
-      setDownloadStatus(error instanceof Error ? error.message : "Download failed");
+      setDownloadStatus(extractBrowserErrorCode(error));
+    } finally {
+      // The registry only gains a record (completed or failed) once this call settles.
+      setDownloadsRefreshToken((current) => current + 1);
     }
   };
 
@@ -341,6 +421,43 @@ export function BrowserPane({
             <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}
+        {paneAlert ? (
+          <div
+            role="alert"
+            data-testid="browser-pane-alert"
+            className="flex items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
+          >
+            <CircleAlert className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              {paneAlert.action} failed: {paneAlert.code}
+            </span>
+          </div>
+        ) : null}
+        {displayError ? (
+          <div
+            className="flex items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
+            data-testid="browser-pane-error"
+          >
+            <CircleAlert className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              표시 실패: {displayError.code} ({displayError.operation})
+            </span>
+            <button
+              type="button"
+              onClick={retryBoundsAndVisibility}
+              className="flex items-center gap-1 rounded border border-destructive/30 px-2 py-0.5 text-xs hover:bg-destructive/20"
+              data-testid="browser-retry-bounds"
+            >
+              <RefreshCw className="size-3" /> Retry
+            </button>
+          </div>
+        ) : null}
+        {downloadsShelfOpen ? (
+          <BrowserDownloadsShelf
+            onClose={() => setDownloadsShelfOpen(false)}
+            refreshToken={downloadsRefreshToken}
+          />
+        ) : null}
       </div>
       <div
         ref={containerRef}
@@ -364,7 +481,7 @@ export function BrowserPane({
               <div className="text-sm font-semibold">This page could not be loaded</div>
               <div className="mt-2 break-all font-mono text-[11px] text-muted-foreground">{liveTab.url}</div>
               <div className="mt-2 text-xs text-destructive">{liveTab.loadError}</div>
-              <button type="button" onClick={onReload} className="mt-4 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-accent">
+              <button type="button" onClick={() => onReload()} className="mt-4 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-accent">
                 <RefreshCw className="size-3.5" /> Retry
               </button>
             </div>

@@ -1,12 +1,17 @@
+pub mod adoption;
+pub mod chromium_cookie_source;
+pub mod chromium_cookies;
 pub mod cookies;
 pub mod download;
 pub mod find;
 pub mod guest;
+pub mod hard_reload;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod manager;
 pub mod model;
 pub mod picker;
+pub mod popup;
 pub mod remote_bridge_protocol;
 pub mod remote_driver;
 pub mod remote_input;
@@ -18,6 +23,7 @@ pub mod security;
 pub mod snapshot_source;
 #[cfg(test)]
 mod snapshot_source_tests;
+pub mod state_cookies;
 #[cfg(test)]
 pub mod tests;
 
@@ -38,3 +44,4 @@ pub use remote_input::*;
 pub use remote_service::*;
 pub use security::{default_desktop_user_agent, validate_url, BrowserError};
 pub use snapshot_source::*;
+pub use state_cookies::PersistedCookie;

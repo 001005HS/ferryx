@@ -58,6 +58,13 @@ describe("MobileChatWorkspace", () => {
         content: "Summary of the work done.",
         timestamp: Date.now(),
         durationLabel: "2m",
+        toolCalls: [
+          {
+            toolName: "bash",
+            command: "git status",
+            status: "success",
+          },
+        ],
       },
     ];
 
@@ -70,10 +77,12 @@ describe("MobileChatWorkspace", () => {
 
     const toggle = screen.getByTestId("worked-for-toggle");
     expect(toggle).toHaveTextContent("Worked for 2m");
-    expect(screen.queryByText("Summary of the work done.")).not.toBeInTheDocument();
+    expect(screen.getByTestId("assistant-message-body")).toHaveTextContent("Summary of the work done.");
+    expect(screen.queryByText("git status")).not.toBeInTheDocument();
 
     fireEvent.click(toggle);
-    expect(screen.getByText("Summary of the work done.")).toBeInTheDocument();
+    expect(screen.getByText("git status")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-message-body")).toHaveTextContent("Summary of the work done.");
   });
 
   it("4. renders message list history", () => {
@@ -140,14 +149,9 @@ describe("MobileChatWorkspace", () => {
         label: "Git Diff",
         prompt: "Show the current git diff",
       },
-      {
-        id: "run-tests",
-        label: "Run Tests",
-        prompt: "Run all test suites",
-      },
     ];
 
-    const { rerender } = render(
+    render(
       <MobileChatWorkspace
         messages={[]}
         onSendMessage={handleSend}
@@ -156,23 +160,9 @@ describe("MobileChatWorkspace", () => {
       />
     );
 
-    expect(screen.getByText("Git Diff")).toBeInTheDocument();
-    expect(screen.getByText("Run Tests")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("Git Diff"));
-    expect(handleSelectQuickAction).toHaveBeenCalledWith(quickActions[0]);
-
-    rerender(
-      <MobileChatWorkspace
-        messages={[]}
-        onSendMessage={handleSend}
-        quickActions={quickActions}
-      />
-    );
-
-    const textarea = screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement;
-    fireEvent.click(screen.getByText("Run Tests"));
-    expect(textarea.value).toBe("Run all test suites");
+    expect(screen.getByTestId("chat-composer-textarea")).toBeInTheDocument();
+    expect(screen.queryByText("Git Diff")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("mobile-chat-quick-actions")).not.toBeInTheDocument();
   });
 
   it("7. terminal is only mounted when drawer is opened and unmounted when closed", () => {
@@ -268,5 +258,21 @@ describe("MobileChatWorkspace", () => {
     const toggleButton = screen.getByTestId("terminal-toggle-button");
     fireEvent.click(toggleButton);
     expect(screen.getByTestId("mock-remote-terminal")).toBeInTheDocument();
+  });
+
+  it("11. header degrades safely when optional header props are absent", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByTestId("thread-header-back")).toBeNull();
+    expect(screen.queryByTestId("thread-header-action-terminal")).toBeNull();
+    expect(screen.getByText("Agent Workspace")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-chat-header")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-textarea")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
   });
 });

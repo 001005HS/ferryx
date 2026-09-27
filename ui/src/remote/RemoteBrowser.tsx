@@ -9,6 +9,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   buildPointClickParams,
   type BrowserCaptureRect,
+  type BrowserErrorDetails,
   type BrowserFrame,
   type BrowserFrameMetadata,
   type BrowserStateMessage,
@@ -34,6 +35,37 @@ export interface RemoteBrowserPointClickEvent {
   geometrySource?: "wkSnapshot";
   x?: number;
   y?: number;
+}
+
+export interface RemoteInputRefusal {
+  code: string;
+  reason: string;
+  inputClass: "point" | "key" | "fill" | "eval" | "unsupported";
+  target?: string;
+  remediation?: string;
+}
+
+/**
+ * Builds the refusal banner payload from a rejected point-click command.
+ *
+ * When the transport carried a structured `details` payload the banner shows the server's
+ * own reason / input class / remediation. Without one it keeps the transport code and
+ * message and leaves the remediation unset — the component never infers a cause from the
+ * message text.
+ */
+export function buildRemoteInputRefusal(err: unknown): RemoteInputRefusal {
+  const reason = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code || "UNSUPPORTED";
+  const details = (err as { details?: BrowserErrorDetails })?.details;
+  if (!details) {
+    return { code, reason, inputClass: "point" };
+  }
+  return {
+    code: details.code || code,
+    reason: details.reason || reason,
+    inputClass: (details.inputClass as RemoteInputRefusal["inputClass"]) || "point",
+    remediation: details.remediation,
+  };
 }
 
 export function resolveViewportClickParams(
@@ -108,7 +140,10 @@ export interface RemoteBrowserProps {
   onFrame?: (frame: BrowserFrame) => void;
   onStateChange?: (state: BrowserStateMessage) => void;
   onStatusChange?: (status: RemoteBrowserStatus) => void;
-  onPointClick?: (point: RemoteBrowserPointClickEvent) => void;
+  onPointClick?: (point: RemoteBrowserPointClickEvent) => Promise<unknown> | void;
+  refusal?: RemoteInputRefusal | null;
+  onRefusal?: (refusal: RemoteInputRefusal) => void;
+  onClearRefusal?: () => void;
 }
 
 export const RemoteBrowser: React.FC<RemoteBrowserProps> = (props) => {
@@ -137,6 +172,9 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   onStateChange,
   onStatusChange,
   onPointClick,
+  refusal: propRefusal,
+  onRefusal,
+  onClearRefusal,
 }) => {
   const {
     status,
@@ -150,6 +188,8 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   } = session;
 
   const [displayedFrame, setDisplayedFrame] = useState<DecodedBrowserFrame | null>(null);
+  const [localRefusal, setLocalRefusal] = useState<RemoteInputRefusal | null>(null);
+  const activeRefusal = propRefusal ?? localRefusal;
   const viewportRef = useRef<HTMLDivElement>(null);
   const displayedFrameRef = useRef<DecodedBrowserFrame | null>(null);
   displayedFrameRef.current = displayedFrame;
@@ -229,7 +269,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
 
   const handleViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
     // Strictly use displayedFrame - only clicks on committed, rendered frames are valid!
-    if (!displayedFrame || !imageUrl || !viewportRef.current || !onPointClick) {
+    if (!displayedFrame || !imageUrl || !viewportRef.current) {
       return;
     }
 
@@ -247,9 +287,37 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
       displayedFrame,
       displayedFrame.seq,
     );
-    if (!point) return;
+    if (!point) {
+      // Discard clicks in letterbox margins (§4.5), but explain why no action was taken
+      const refusal: RemoteInputRefusal = {
+        code: "LETTERBOX_MARGIN",
+        reason: "Click was outside active browser viewport (in letterbox margin)",
+        inputClass: "point",
+        remediation: "Click within the active webpage stream area.",
+      };
+      setLocalRefusal(refusal);
+      onRefusal?.(refusal);
+      return;
+    }
 
-    onPointClick(point);
+    if (!onPointClick) {
+      return;
+    }
+
+    try {
+      const res = onPointClick(point);
+      if (res && typeof (res as Promise<unknown>).catch === "function") {
+        (res as Promise<unknown>).catch((err: unknown) => {
+          const refusal = buildRemoteInputRefusal(err);
+          setLocalRefusal(refusal);
+          onRefusal?.(refusal);
+        });
+      }
+    } catch (err: unknown) {
+      const refusal = buildRemoteInputRefusal(err);
+      setLocalRefusal(refusal);
+      onRefusal?.(refusal);
+    }
   };
 
   const handleImageLoad = (boundUrl: string, boundFrame: DecodedBrowserFrame | null) => {
@@ -280,12 +348,58 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
 
   return (
     <div
-      className={`relative flex flex-col w-full h-full bg-neutral-950 text-white overflow-hidden select-none ${className}`}
+      className={`relative flex flex-col w-full h-full bg-[#0a0a0a] text-[#f5f5f5] overflow-hidden select-none ${className}`}
     >
       {/* Controls slot for Phase 6 composition */}
       {controls && (
         <div data-testid="remote-browser-controls-slot" className="shrink-0 z-10">
           {controls}
+        </div>
+      )}
+
+      {/* Refused Input Explanation Banner (T22, GAP-7) */}
+      {activeRefusal && (
+        <div
+          data-testid="remote-browser-refusal-banner"
+          role="alert"
+          className="absolute top-2 left-4 right-4 z-30 max-w-xl mx-auto flex items-center justify-between gap-3 px-3 py-2 bg-[#ff6467]/15 border border-[#ff6467]/40 rounded backdrop-blur-sm text-xs text-[#ff6467] shadow-lg animate-in fade-in slide-in-from-top-2 duration-150"
+        >
+          <div className="flex items-start gap-2 flex-1 min-w-0">
+            <span
+              data-testid="remote-browser-refusal-code"
+              className="shrink-0 px-1.5 py-0.5 rounded bg-[#ff6467]/20 border border-[#ff6467]/30 text-[10px] font-semibold uppercase tracking-wider"
+            >
+              {activeRefusal.code || "REFUSED"}
+            </span>
+            <div className="flex flex-col flex-1 min-w-0">
+              <span
+                data-testid="remote-browser-refusal-reason"
+                className="font-medium text-[#f5f5f5] break-words"
+              >
+                {activeRefusal.reason}
+              </span>
+              {activeRefusal.remediation && (
+                <span
+                  data-testid="remote-browser-refusal-remediation"
+                  className="text-[11px] text-[#ff6467]/80 mt-0.5"
+                >
+                  {activeRefusal.remediation}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="remote-browser-refusal-dismiss"
+            onClick={() => {
+              setLocalRefusal(null);
+              onClearRefusal?.();
+            }}
+            className="shrink-0 text-[#838383] hover:text-[#f5f5f5] text-sm leading-none p-1 rounded hover:bg-[#ff6467]/10 transition"
+            aria-label="Dismiss refusal notice"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -306,7 +420,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             onLoad={() => handleImageLoad(imageUrl, frame)}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center text-neutral-500 text-sm">
+          <div className="flex flex-col items-center justify-center text-[#818181] text-sm">
             {status === "opening" && <span>Connecting to remote browser...</span>}
             {status === "ready" && <span>Waiting for screencast stream...</span>}
             {status === "paused" && (
@@ -322,27 +436,27 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
         {status === "paused" && imageUrl && (
           <div
             data-testid="remote-browser-paused-badge"
-            className="absolute top-2 right-2 px-2 py-1 bg-amber-900/80 text-amber-200 text-xs rounded font-medium pointer-events-none"
+            className="absolute top-2 right-2 px-2 py-1 bg-[#ffb900]/15 text-[#ffb900] border border-[#ffb900]/30 text-xs rounded font-medium pointer-events-none"
           >
             Paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
           </div>
         )}
 
         {status === "opening" && imageUrl && (
-          <div className="absolute top-2 right-2 px-2 py-1 bg-blue-900/80 text-blue-200 text-xs rounded font-medium pointer-events-none">
+          <div className="absolute top-2 right-2 px-2 py-1 bg-[#346bf1]/15 text-[#346bf1] border border-[#346bf1]/30 text-xs rounded font-medium pointer-events-none">
             Reconnecting...
           </div>
         )}
 
         {status === "closed" && (
           <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center p-4 z-20">
-            <p className="text-neutral-300 mb-2">
+            <p className="text-[#f5f5f5] mb-2">
               {error ? error.message : "Connection closed"}
             </p>
             <button
               type="button"
               onClick={reconnect}
-              className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-sm font-medium transition"
+              className="px-3 py-1.5 bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] rounded text-sm font-medium transition"
             >
               Reconnect
             </button>

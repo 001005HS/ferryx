@@ -11,6 +11,7 @@ const browserNative = vi.hoisted(() => ({
   goBackBrowser: vi.fn(),
   goForwardBrowser: vi.fn(),
   navigateBrowser: vi.fn(),
+  onBrowserShortcutRequested: vi.fn(),
 }));
 
 vi.mock(import("../lib/browserTauri"), async (importOriginal) => {
@@ -24,6 +25,19 @@ vi.mock(import("../lib/browserTauri"), async (importOriginal) => {
     goBackBrowser: browserNative.goBackBrowser,
     goForwardBrowser: browserNative.goForwardBrowser,
     navigateBrowser: browserNative.navigateBrowser,
+    onBrowserShortcutRequested: browserNative.onBrowserShortcutRequested,
+  };
+});
+
+const platformMocks = vi.hoisted(() => ({
+  isHardReloadSupportedPlatform: vi.fn(() => true),
+}));
+
+vi.mock(import("../lib/shortcuts"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    isHardReloadSupportedPlatform: platformMocks.isHardReloadSupportedPlatform,
   };
 });
 
@@ -55,6 +69,10 @@ beforeEach(() => {
   browserNative.goForwardBrowser.mockResolvedValue(undefined);
   browserNative.navigateBrowser.mockReset();
   browserNative.navigateBrowser.mockResolvedValue(undefined);
+  browserNative.onBrowserShortcutRequested.mockReset();
+  browserNative.onBrowserShortcutRequested.mockResolvedValue(() => undefined);
+  platformMocks.isHardReloadSupportedPlatform.mockReset();
+  platformMocks.isHardReloadSupportedPlatform.mockReturnValue(true);
 });
 
 describe("BrowserToolbar", () => {
@@ -127,6 +145,53 @@ describe("BrowserToolbar", () => {
     const reloadBtn = screen.getByLabelText("Reload");
     fireEvent.click(reloadBtn);
     expect(onReload).toHaveBeenCalled();
+  });
+
+  it("asks for a cache-bypassing reload on Shift+Click and a plain reload otherwise", () => {
+    const onReload = vi.fn();
+    render(
+      <BrowserToolbar
+        tab={mockTab}
+        onNavigate={vi.fn()}
+        onReload={onReload}
+      />
+    );
+
+    const reloadBtn = screen.getByLabelText("Reload");
+    expect(reloadBtn.getAttribute("title")).toBe("Reload (Shift+Click bypasses the cache)");
+
+    fireEvent.click(reloadBtn);
+    expect(onReload).toHaveBeenLastCalledWith();
+
+    fireEvent.click(reloadBtn, { shiftKey: true });
+    expect(onReload).toHaveBeenLastCalledWith({ ignoreCache: true });
+  });
+
+  it("keeps Shift+Click a plain reload where the platform cannot bypass the cache", () => {
+    platformMocks.isHardReloadSupportedPlatform.mockReturnValue(false);
+    const onReload = vi.fn();
+    render(
+      <BrowserToolbar
+        tab={mockTab}
+        onNavigate={vi.fn()}
+        onReload={onReload}
+      />
+    );
+
+    const reloadBtn = screen.getByLabelText("Reload");
+    expect(reloadBtn.getAttribute("title")).toBe("Reload");
+
+    fireEvent.click(reloadBtn, { shiftKey: true });
+    expect(onReload).toHaveBeenLastCalledWith();
+  });
+
+  it("routes the hard-reload shortcut to a cache-bypassing reload", async () => {
+    const reload = vi.fn();
+    await act(async () => { render(<BrowserToolbar tab={mockTab} onNavigate={vi.fn()} onReload={reload} />); });
+    await act(async () => {
+      fireEvent(window, new CustomEvent("ferryx:browser-shortcut", { detail: { browserId: "b-1", action: "reload-hard" } }));
+    });
+    expect(reload).toHaveBeenCalledWith({ ignoreCache: true });
   });
 
   it("wires Back and Forward to the native browser session", async () => {
@@ -257,5 +322,68 @@ describe("BrowserToolbar", () => {
     await waitFor(() => {
       expect(browserNative.getBrowserState).toHaveBeenCalledWith("b-1");
     });
+  });
+
+  it("surfaces a rejected zoom with its structured code and restores the previous zoom", async () => {
+    browserNative.setBrowserZoom.mockRejectedValueOnce({
+      code: "BROWSER_ZOOM_FAILED",
+      message: "failed to set browser webview zoom",
+    });
+    render(
+      <BrowserToolbar
+        tab={mockTab}
+        onNavigate={vi.fn()}
+        onReload={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Zoom failed: BROWSER_ZOOM_FAILED");
+    // The optimistic 110% must not survive the rejected IPC.
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    // The next successful action clears the alert.
+    fireEvent.click(screen.getByLabelText("Back"));
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+  });
+
+  it("surfaces a rejected back navigation with its structured code", async () => {
+    browserNative.goBackBrowser.mockRejectedValueOnce({
+      code: "BROWSER_NOT_FOUND",
+      message: "browser session is gone",
+    });
+    render(
+      <BrowserToolbar
+        tab={mockTab}
+        onNavigate={vi.fn()}
+        onReload={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByLabelText("Back"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Back failed: BROWSER_NOT_FOUND");
+  });
+
+  it("surfaces a failed shortcut listener registration instead of discarding it", async () => {
+    browserNative.onBrowserShortcutRequested.mockRejectedValueOnce({
+      code: "EVENT_LISTEN_FAILED",
+      message: "event system unavailable",
+    });
+    render(
+      <BrowserToolbar
+        tab={mockTab}
+        onNavigate={vi.fn()}
+        onReload={vi.fn()}
+      />
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Shortcut listener failed: EVENT_LISTEN_FAILED");
   });
 });

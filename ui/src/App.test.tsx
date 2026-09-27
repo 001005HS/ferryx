@@ -126,6 +126,7 @@ const workspace = {
   syncWorktrees: vi.fn(),
   restoreWorkspace: vi.fn(),
   createBrowserTab: vi.fn().mockResolvedValue("browser-tab-1"),
+  adoptBrowserSession: vi.fn().mockReturnValue("adopted-tab-1"),
   dispatchWorkspaceAction: vi.fn(),
   reportRuntimeError: vi.fn(),
   storeState: {
@@ -459,6 +460,7 @@ describe("App project workspace flow", () => {
       syncWorktrees: workspace.syncWorktrees,
       restoreWorkspace: workspace.restoreWorkspace,
       createBrowserTab: workspace.createBrowserTab,
+      adoptBrowserSession: workspace.adoptBrowserSession,
       dispatchWorkspaceAction: workspace.dispatchWorkspaceAction,
       subscribeTerminalBell: () => () => undefined,
       subscribeActivityNotification: () => () => undefined,
@@ -559,6 +561,8 @@ describe("App project workspace flow", () => {
     workspace.restoreWorkspace.mockResolvedValue(undefined);
     workspace.createBrowserTab.mockReset();
     workspace.createBrowserTab.mockResolvedValue("browser-tab-1");
+    workspace.adoptBrowserSession.mockReset();
+    workspace.adoptBrowserSession.mockReturnValue("adopted-tab-1");
     native.detectAgents.mockReset();
     native.detectAgents.mockResolvedValue([]);
     native.writeTerminal.mockReset();
@@ -4375,6 +4379,371 @@ describe("App project workspace flow", () => {
 
       // Must degrade silently: no reportRuntimeError calls from auto-resume failure
       expect(workspace.reportRuntimeError).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("T2 onBrowserSessionCreated skipped adoption notifications", () => {
+    const samplePayload = {
+      browser: {
+        browserId: "browser-session-1",
+        webviewLabel: "browser-view-1",
+        workspaceId: "orca-lite",
+        worktreePath: "/repo/main",
+        profileId: "default",
+        generation: 1,
+        url: "https://example.com",
+        title: "Example",
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+        zoomFactor: 1,
+        loadError: null,
+        visible: true,
+      },
+      workspaceId: "orca-lite",
+    };
+
+    function makeHost(overrides: Partial<import("./state/remoteHostStore").HostEndpoint> = {}): import("./state/remoteHostStore").HostEndpoint {
+      return {
+        hostId: "host-1",
+        name: "Studio Mac",
+        address: "100.64.0.12",
+        transport: "tailscale",
+        authStatus: "paired",
+        online: true,
+        ...overrides,
+      };
+    }
+
+    it("(1) when a remote host is active, calls toast.warning exactly once and adoptBrowserSession zero times", async () => {
+      const browser = await import("./lib/browserTauri");
+      const { toast } = await import("./components/ui/sonner");
+      const { remoteHostStore, selectActiveHost } = await import("./state/remoteHostStore");
+
+      let sessionCreatedListener!: (payload: typeof samplePayload) => void;
+      const onCreatedSpy = vi.spyOn(browser, "onBrowserSessionCreated").mockImplementation(async (listener) => {
+        sessionCreatedListener = listener;
+        return () => undefined;
+      });
+      const toastWarningSpy = vi.spyOn(toast, "warning").mockImplementation(() => "toast-id" as any);
+
+      remoteHostStore.setHosts([makeHost({ hostId: "t2-remote-host-1", name: "Remote One" })]);
+      remoteHostStore.setActiveHost("t2-remote-host-1");
+      expect(selectActiveHost(remoteHostStore.getState())).not.toBeNull();
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener(samplePayload);
+        });
+
+        expect(toastWarningSpy).toHaveBeenCalledTimes(1);
+        expect(toastWarningSpy).toHaveBeenCalledWith("Browser tab was not shown because a remote host is active.");
+        expect(workspace.adoptBrowserSession).not.toHaveBeenCalled();
+      } finally {
+        remoteHostStore.reset();
+        toastWarningSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+
+    it("(2) when no remote host is active and adoptBrowserSession returns null, calls the second toast warning exactly once", async () => {
+      const browser = await import("./lib/browserTauri");
+      const { toast } = await import("./components/ui/sonner");
+      const { remoteHostStore, selectActiveHost } = await import("./state/remoteHostStore");
+
+      let sessionCreatedListener!: (payload: typeof samplePayload) => void;
+      const onCreatedSpy = vi.spyOn(browser, "onBrowserSessionCreated").mockImplementation(async (listener) => {
+        sessionCreatedListener = listener;
+        return () => undefined;
+      });
+      const toastWarningSpy = vi.spyOn(toast, "warning").mockImplementation(() => "toast-id" as any);
+
+      remoteHostStore.reset();
+      expect(selectActiveHost(remoteHostStore.getState())).toBeNull();
+      workspace.adoptBrowserSession.mockReturnValue(null);
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener(samplePayload);
+        });
+
+        expect(workspace.adoptBrowserSession).toHaveBeenCalledTimes(1);
+        expect(workspace.adoptBrowserSession).toHaveBeenCalledWith(samplePayload.browser, "orca-lite");
+        expect(toastWarningSpy).toHaveBeenCalledTimes(1);
+        expect(toastWarningSpy).toHaveBeenCalledWith("Browser tab was not shown: session could not be adopted.");
+      } finally {
+        remoteHostStore.reset();
+        toastWarningSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+
+    it("(3) when no remote host is active and adoptBrowserSession returns a tab id, no toast warning fires", async () => {
+      const browser = await import("./lib/browserTauri");
+      const { toast } = await import("./components/ui/sonner");
+      const { remoteHostStore, selectActiveHost } = await import("./state/remoteHostStore");
+
+      let sessionCreatedListener!: (payload: typeof samplePayload) => void;
+      const onCreatedSpy = vi.spyOn(browser, "onBrowserSessionCreated").mockImplementation(async (listener) => {
+        sessionCreatedListener = listener;
+        return () => undefined;
+      });
+      const toastWarningSpy = vi.spyOn(toast, "warning").mockImplementation(() => "toast-id" as any);
+
+      remoteHostStore.reset();
+      expect(selectActiveHost(remoteHostStore.getState())).toBeNull();
+      workspace.adoptBrowserSession.mockReturnValue("tab-browser-adopted");
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener(samplePayload);
+        });
+
+        expect(workspace.adoptBrowserSession).toHaveBeenCalledTimes(1);
+        expect(workspace.adoptBrowserSession).toHaveBeenCalledWith(samplePayload.browser, "orca-lite");
+        expect(toastWarningSpy).not.toHaveBeenCalled();
+      } finally {
+        remoteHostStore.reset();
+        toastWarningSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("T2 clause (a) adoption reporting reaches the CLI", () => {
+    const samplePayload = {
+      browser: {
+        browserId: "browser-session-1",
+        webviewLabel: "browser-view-1",
+        workspaceId: "orca-lite",
+        worktreePath: "/repo/main",
+        profileId: "default",
+        generation: 1,
+        url: "https://example.com",
+        title: "Example",
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+        zoomFactor: 1,
+        loadError: null,
+        visible: true,
+      },
+      workspaceId: "orca-lite",
+    };
+
+    function makeHost(): import("./state/remoteHostStore").HostEndpoint {
+      return {
+        hostId: "t2-adoption-host",
+        name: "Studio Mac",
+        address: "100.64.0.12",
+        transport: "tailscale",
+        authStatus: "paired",
+        online: true,
+      };
+    }
+
+    async function mountAdoptionListener() {
+      const browser = await import("./lib/browserTauri");
+      let sessionCreatedListener!: (payload: typeof samplePayload) => void;
+      const onCreatedSpy = vi.spyOn(browser, "onBrowserSessionCreated").mockImplementation(async (listener) => {
+        sessionCreatedListener = listener as typeof sessionCreatedListener;
+        return () => undefined;
+      });
+      const reportSpy = vi.spyOn(browser, "reportBrowserAdoption").mockResolvedValue(true);
+      return { sessionCreatedListener: () => sessionCreatedListener, onCreatedSpy, reportSpy };
+    }
+
+    it("reports adopted=false with remote-host-active when a remote host owns the window", async () => {
+      const { remoteHostStore } = await import("./state/remoteHostStore");
+      const { sessionCreatedListener, onCreatedSpy, reportSpy } = await mountAdoptionListener();
+
+      remoteHostStore.setHosts([makeHost()]);
+      remoteHostStore.setActiveHost("t2-adoption-host");
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener()(samplePayload);
+        });
+
+        await waitFor(() =>
+          expect(reportSpy).toHaveBeenCalledWith("browser-session-1", false, "remote-host-active"),
+        );
+        expect(workspace.adoptBrowserSession).not.toHaveBeenCalled();
+      } finally {
+        remoteHostStore.reset();
+        reportSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+
+    it("reports adopted=false with adopt-failed when the session could not be adopted", async () => {
+      const { remoteHostStore } = await import("./state/remoteHostStore");
+      const { sessionCreatedListener, onCreatedSpy, reportSpy } = await mountAdoptionListener();
+
+      remoteHostStore.reset();
+      workspace.adoptBrowserSession.mockReturnValue(null);
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener()(samplePayload);
+        });
+
+        await waitFor(() =>
+          expect(reportSpy).toHaveBeenCalledWith("browser-session-1", false, "adopt-failed"),
+        );
+      } finally {
+        remoteHostStore.reset();
+        reportSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+
+    it("reports adopted=true when the tab was shown", async () => {
+      const { remoteHostStore } = await import("./state/remoteHostStore");
+      const { sessionCreatedListener, onCreatedSpy, reportSpy } = await mountAdoptionListener();
+
+      remoteHostStore.reset();
+      workspace.adoptBrowserSession.mockReturnValue("tab-browser-adopted");
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onCreatedSpy).toHaveBeenCalled());
+
+        act(() => {
+          sessionCreatedListener()(samplePayload);
+        });
+
+        await waitFor(() => expect(reportSpy).toHaveBeenCalledWith("browser-session-1", true));
+      } finally {
+        remoteHostStore.reset();
+        reportSpy.mockRestore();
+        onCreatedSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("T9 browser_tab_switch activates the owning layout tab", () => {
+    type TabSwitchPayload = { browserId: string; index: number };
+
+    async function mountTabSwitchListener() {
+      const browser = await import("./lib/browserTauri");
+      let tabSwitchListener!: (payload: TabSwitchPayload) => void;
+      const onTabSwitchSpy = vi.spyOn(browser, "onBrowserTabSwitch").mockImplementation(async (listener) => {
+        tabSwitchListener = listener as typeof tabSwitchListener;
+        return () => undefined;
+      });
+      return { listener: () => tabSwitchListener, onTabSwitchSpy };
+    }
+
+    it("activates the tab owning the browserId, not the tab at the CLI index", async () => {
+      workspace.storeState.layout = {
+        ...workspace.storeState.layout,
+        activeTabId: "tab-1",
+        tabs: [
+          { id: "tab-1", label: "main", sessionId: "sess-1" },
+          { id: "tab-browser-second", kind: "browser", label: "Second", browserId: "browser-second", url: "https://second.test" },
+          { id: "tab-browser-third", kind: "browser", label: "Third", browserId: "browser-third", url: "https://third.test" },
+        ],
+      } as any;
+      const { listener, onTabSwitchSpy } = await mountTabSwitchListener();
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onTabSwitchSpy).toHaveBeenCalled());
+        workspace.activateTab.mockClear();
+
+        act(() => {
+          listener()({ browserId: "browser-third", index: 0 });
+        });
+
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-browser-third");
+        expect(workspace.activateTab).not.toHaveBeenCalledWith("tab-1");
+      } finally {
+        onTabSwitchSpy.mockRestore();
+      }
+    });
+
+    it("activates the terminal tab that hosts the browser in a pane", async () => {
+      workspace.storeState.layout = {
+        ...workspace.storeState.layout,
+        activeTabId: "tab-2",
+        tabs: [
+          { id: "tab-1", label: "main", sessionId: "sess-1" },
+          { id: "tab-2", kind: "browser", label: "Second", browserId: "browser-second", url: "https://second.test" },
+        ],
+        layoutsByTabId: {
+          ...workspace.storeState.layout.layoutsByTabId,
+          "tab-1": {
+            root: { type: "leaf", leafId: "leaf-1" },
+            activeLeafId: "leaf-1",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-1": "sess-1" },
+            contentsByLeafId: {
+              "leaf-1": { kind: "browser", browser: { browserId: "browser-in-pane", url: "https://pane.test" } },
+            },
+          },
+        },
+      } as any;
+      const { listener, onTabSwitchSpy } = await mountTabSwitchListener();
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onTabSwitchSpy).toHaveBeenCalled());
+        workspace.activateTab.mockClear();
+
+        act(() => {
+          listener()({ browserId: "browser-in-pane", index: 1 });
+        });
+
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-1");
+        expect(workspace.activateTab).not.toHaveBeenCalledWith("tab-2");
+      } finally {
+        onTabSwitchSpy.mockRestore();
+      }
+    });
+
+    it("warns instead of staying silent when no tab owns the browserId", async () => {
+      const { toast } = await import("./components/ui/sonner");
+      workspace.storeState.layout = {
+        ...workspace.storeState.layout,
+        activeTabId: "tab-1",
+        tabs: [{ id: "tab-1", label: "main", sessionId: "sess-1" }],
+      } as any;
+      const { listener, onTabSwitchSpy } = await mountTabSwitchListener();
+      const toastWarningSpy = vi.spyOn(toast, "warning").mockImplementation(() => "toast-id" as any);
+
+      try {
+        render(<App />);
+        await waitFor(() => expect(onTabSwitchSpy).toHaveBeenCalled());
+        workspace.activateTab.mockClear();
+
+        act(() => {
+          listener()({ browserId: "browser-absent", index: 0 });
+        });
+
+        expect(toastWarningSpy).toHaveBeenCalledWith(
+          expect.stringContaining("browser-absent"),
+        );
+        expect(workspace.activateTab).not.toHaveBeenCalled();
+      } finally {
+        toastWarningSpy.mockRestore();
+        onTabSwitchSpy.mockRestore();
+      }
     });
   });
 });

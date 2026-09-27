@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { LayoutState, TerminalSession } from "../lib/types";
+import type { LayoutState, SystemPermissionsStatus, TerminalSession } from "../lib/types";
 import { resetNotificationSettings } from "../lib/notificationSettings";
 import { TerminalSplitView } from "./TerminalSplitView";
 
@@ -42,6 +42,31 @@ vi.mock("./TerminalPane", () => ({
   ),
 }));
 
+const mockTauri = vi.hoisted(() => ({
+  getSystemPermissionsStatus: vi.fn(),
+}));
+
+vi.mock("../lib/tauri", async () => {
+  const actual = await vi.importActual<typeof import("../lib/tauri")>("../lib/tauri");
+  return {
+    ...actual,
+    getSystemPermissionsStatus: () => mockTauri.getSystemPermissionsStatus(),
+  };
+});
+
+/**
+ * Reports `platform` as the HOST platform and resolves once TabBar has actually asked for
+ * it, so tests await the exact IPC request instead of a fixed delay.
+ */
+function stubHostPlatform(platform: string) {
+  return new Promise<void>((resolve) => {
+    mockTauri.getSystemPermissionsStatus.mockImplementation(() => {
+      resolve();
+      return Promise.resolve({ platform } as SystemPermissionsStatus);
+    });
+  });
+}
+
 function findMenuEntryRecursively(
   entries: Array<Record<string, unknown>>,
   predicate: (entry: Record<string, unknown>) => boolean,
@@ -65,9 +90,11 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
 
   beforeEach(() => {
     resetNotificationSettings();
-    Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+    // The browser OS is deliberately the opposite of the host: the shell profile menu must
+    // follow the HOST platform the backend reports, never navigator.
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
     Object.defineProperty(navigator, "userAgent", {
-      value: "Windows NT 10.0; Win64; x64",
+      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
       configurable: true,
     });
   });
@@ -114,8 +141,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
     },
   };
 
-  it("forwards cmd shell selection from TabBar through TabGroupView to onAddTab on Windows", () => {
+  it("forwards cmd shell selection from TabBar through TabGroupView to onAddTab on Windows", async () => {
     const onAddTab = vi.fn();
+    const ready = stubHostPlatform("windows");
     render(
       <TerminalSplitView
         layout={singleTabLayout()}
@@ -123,6 +151,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         onAddTab={onAddTab}
       />,
     );
+    await act(async () => {
+      await ready;
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     expect(nativeMenu.lastCall).not.toBeNull();
@@ -139,7 +170,7 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
     expect(onAddTab).toHaveBeenCalledWith("cmd");
   });
 
-  it("forwards pwsh, powershell, and wsl shells from TabBar through TabGroupView to onAddTab on Windows", () => {
+  it("forwards pwsh, powershell, and wsl shells from TabBar through TabGroupView to onAddTab on Windows", async () => {
     const expectedShells = [
       { id: "new-terminal:pwsh", shell: "pwsh", label: "PowerShell" },
       { id: "new-terminal:powershell", shell: "powershell", label: "Windows PowerShell" },
@@ -148,6 +179,7 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
 
     for (const target of expectedShells) {
       const onAddTab = vi.fn();
+      const ready = stubHostPlatform("windows");
       const { unmount } = render(
         <TerminalSplitView
           layout={singleTabLayout()}
@@ -155,6 +187,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
           onAddTab={onAddTab}
         />,
       );
+      await act(async () => {
+        await ready;
+      });
 
       fireEvent.click(screen.getByRole("button", { name: "New tab" }));
       expect(nativeMenu.lastCall).not.toBeNull();
@@ -172,8 +207,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
     }
   });
 
-  it("forwards generic default New Terminal action without shell to onAddTab", () => {
+  it("forwards generic default New Terminal action without shell to onAddTab", async () => {
     const onAddTab = vi.fn();
+    const ready = stubHostPlatform("windows");
     render(
       <TerminalSplitView
         layout={singleTabLayout()}
@@ -181,6 +217,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         onAddTab={onAddTab}
       />,
     );
+    await act(async () => {
+      await ready;
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     expect(nativeMenu.lastCall).not.toBeNull();
@@ -195,10 +234,11 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
     expect(onAddTab).toHaveBeenCalledWith();
   });
 
-  it("forwards shell selection to onAddTab when all tabs are closed (empty layout fallback)", () => {
+  it("forwards shell selection to onAddTab when all tabs are closed (empty layout fallback)", async () => {
     const onAddTab = vi.fn();
     const emptyLayout: LayoutState = { tabs: [], activeTabId: null, layoutsByTabId: {} };
 
+    const ready = stubHostPlatform("windows");
     render(
       <TerminalSplitView
         layout={emptyLayout}
@@ -206,6 +246,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         onAddTab={onAddTab}
       />,
     );
+    await act(async () => {
+      await ready;
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     expect(nativeMenu.lastCall).not.toBeNull();

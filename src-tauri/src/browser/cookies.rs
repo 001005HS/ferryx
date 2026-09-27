@@ -1,6 +1,6 @@
 use crate::browser::BrowserError;
 use cookie::{Cookie, SameSite};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,4 +202,177 @@ pub fn cookie_from_imported(cookie: ImportedCookie) -> Result<Cookie<'static>, B
     }
 
     Ok(builder.build())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstalledBrowserKind {
+    Chrome,
+    Edge,
+}
+
+pub fn is_google_cookie(domain: Option<&str>, _name: &str) -> bool {
+    let Some(domain) = domain else {
+        return false;
+    };
+    let clean = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    clean == "google.com"
+        || clean.ends_with(".google.com")
+        || clean == "googleusercontent.com"
+        || clean.ends_with(".googleusercontent.com")
+        || clean == "gstatic.com"
+        || clean.ends_with(".gstatic.com")
+        || clean == "youtube.com"
+        || clean.ends_with(".youtube.com")
+        || clean == "doubleclick.net"
+        || clean.ends_with(".doubleclick.net")
+        || clean.starts_with("google.")
+        || clean.contains(".google.")
+}
+
+pub fn filter_google_cookies(cookies: Vec<ImportedCookie>) -> Vec<ImportedCookie> {
+    cookies
+        .into_iter()
+        .filter(|c| !is_google_cookie(c.domain.as_deref(), &c.name))
+        .collect()
+}
+
+pub fn resolve_installed_browser_profile_dir(
+    kind: InstalledBrowserKind,
+    profile_name: Option<&str>,
+    home_dir: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let profile = profile_name.unwrap_or("Default");
+    let mut base = match home_dir {
+        Some(path) => path.to_path_buf(),
+        None => std::path::PathBuf::from("~"),
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        base.push("Library");
+        base.push("Application Support");
+        match kind {
+            InstalledBrowserKind::Chrome => {
+                base.push("Google");
+                base.push("Chrome");
+            }
+            InstalledBrowserKind::Edge => {
+                base.push("Microsoft Edge");
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        base.push("AppData");
+        base.push("Local");
+        match kind {
+            InstalledBrowserKind::Chrome => {
+                base.push("Google");
+                base.push("Chrome");
+                base.push("User Data");
+            }
+            InstalledBrowserKind::Edge => {
+                base.push("Microsoft");
+                base.push("Edge");
+                base.push("User Data");
+            }
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        base.push(".config");
+        match kind {
+            InstalledBrowserKind::Chrome => {
+                base.push("google-chrome");
+            }
+            InstalledBrowserKind::Edge => {
+                base.push("microsoft-edge");
+            }
+        }
+    }
+
+    base.push(profile);
+    base
+}
+
+pub fn parse_installed_profile_cookie_content(
+    input: &str,
+) -> Result<Vec<ImportedCookie>, BrowserError> {
+    let all_cookies = parse_cookie_file(input)?;
+    let filtered: Vec<ImportedCookie> = filter_google_cookies(all_cookies);
+    if filtered.is_empty() {
+        return Err(BrowserError::CookieImport(
+            "no valid non-Google cookies found in profile".into(),
+        ));
+    }
+    Ok(filtered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_google_cookie_exclusion() {
+        assert!(is_google_cookie(Some(".google.com"), "SID"));
+        assert!(is_google_cookie(Some("accounts.google.com"), "SSID"));
+        assert!(is_google_cookie(Some(".youtube.com"), "LOGIN_INFO"));
+        assert!(is_google_cookie(Some("google.co.kr"), "NID"));
+        assert!(is_google_cookie(Some(".gstatic.com"), "1P_JAR"));
+        assert!(!is_google_cookie(Some(".github.com"), "user_session"));
+        assert!(!is_google_cookie(Some("example.org"), "session"));
+        assert!(!is_google_cookie(None, "session"));
+    }
+
+    #[test]
+    fn test_filter_google_cookies() {
+        let list = vec![
+            ImportedCookie {
+                name: "sid".into(),
+                value: "123".into(),
+                domain: Some(".google.com".into()),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires_unix: None,
+                same_site: None,
+            },
+            ImportedCookie {
+                name: "gh_session".into(),
+                value: "abc".into(),
+                domain: Some(".github.com".into()),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires_unix: None,
+                same_site: None,
+            },
+        ];
+        let filtered = filter_google_cookies(list);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gh_session");
+    }
+
+    #[test]
+    fn test_parse_installed_profile_cookie_content_excludes_google() {
+        let json = r##"[
+            {"name": "token", "value": "val1", "domain": "app.internal.test"},
+            {"name": "google_auth", "value": "val2", "domain": "accounts.google.com"}
+        ]"##;
+        let cookies = parse_installed_profile_cookie_content(json).expect("should succeed");
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "token");
+    }
+
+    #[test]
+    fn test_parse_installed_profile_cookie_content_rejects_only_google() {
+        let json = r##"[
+            {"name": "google_auth", "value": "val2", "domain": "accounts.google.com"}
+        ]"##;
+        let err = parse_installed_profile_cookie_content(json).expect_err("should reject");
+        assert!(matches!(err, BrowserError::CookieImport(_)));
+    }
 }

@@ -8,6 +8,7 @@ let shortcutRegistration = 0;
 export type ShortcutActionId =
   | "tab.newTerminal"
   | "tab.newBrowser"
+  | "tab.reopenClosed"
   | "tab.close"
   | "tab.next"
   | "tab.previous"
@@ -31,6 +32,7 @@ export type ShortcutActionId =
   | "workspace.select9"
   | "browser.focusAddress"
   | "browser.reload"
+  | "browser.hardReload"
   | "browser.back"
   | "browser.forward"
   | "browser.find"
@@ -83,6 +85,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     source: "original",
   },
   {
+    id: "tab.reopenClosed",
+    title: "Reopen closed tab",
+    group: "Tabs",
+    binding: { key: "t", mod: true, shift: true },
+    source: "ferryx",
+  },
+  {
     id: "tab.close",
     title: "Close active tab",
     group: "Tabs",
@@ -101,6 +110,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Reload browser tab",
     group: "Tabs",
     binding: { key: "r", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.hardReload",
+    title: "Reload browser tab bypassing the cache",
+    group: "Tabs",
+    binding: { key: "r", mod: true, shift: true },
     source: "ferryx",
   },
   {
@@ -482,6 +498,17 @@ export function useShortcuts(
 
 export function isMacShortcutPlatform() {
   return detectMacPlatform();
+}
+
+/** Whether this platform's webview exposes a native cache-bypassing reload: macOS WKWebView
+ * `reloadFromOrigin` and Linux WebKitGTK `reload_bypass_cache`. This build carries no WebView2
+ * binding, so Windows keeps the hard-reload affordance hidden instead of failing the request. */
+export function isHardReloadSupportedPlatform() {
+  if (typeof process !== "undefined" && typeof process.platform === "string") {
+    return process.platform === "darwin" || process.platform === "linux";
+  }
+  if (typeof navigator === "undefined") return false;
+  return /Mac|iPhone|iPad|iPod|Linux|Android|X11/.test(`${navigator.userAgent ?? ""} ${navigator.platform ?? ""}`);
 }
 
 export /**

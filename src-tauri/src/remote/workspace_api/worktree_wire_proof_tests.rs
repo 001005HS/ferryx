@@ -253,7 +253,7 @@ async fn wires(root: &Path) {
         .clone();
     let local = DaemonClient::new_with_socket(socket.clone());
     let outcome = std::panic::AssertUnwindSafe(async {
-        let handshake = tokio::time::timeout(LIMIT, local.send_request(DaemonRequest::Handshake { version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION })).await.unwrap().unwrap();
+        let handshake = tokio::time::timeout(LIMIT, local.send_request(DaemonRequest::Handshake { version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION, token: None })).await.unwrap().unwrap();
         assert!(matches!(handshake, DaemonResponse::HandshakeOk { pid, .. } if pid == std::process::id()));
         eprintln!("A08_WIRE_HANDSHAKE owner_pid={} exact=true socket={} http={address}", std::process::id(), socket.display());
         let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(LIMIT).build().unwrap();

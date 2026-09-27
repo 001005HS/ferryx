@@ -42,6 +42,13 @@ pub enum IpcErrorCode {
     BrowserHistoryFailed,
     BrowserCookieImportFailed,
     BrowserCloseFailed,
+    BrowserStaleRef,
+    BrowserInvalidReference,
+    BrowserNoTab,
+    BrowserTabNotFound,
+    BrowserHostUnavailable,
+    BrowserDialogNotFound,
+    BrowserDownloadCancelled,
     BrowserAutomationSnapshotStale,
     BrowserAutomationTargetNotFound,
     BrowserAutomationFailed,
@@ -172,6 +179,29 @@ impl IpcErrorCode {
             "PARSE_ERROR" => Self::ParseError,
             "GIT_ERROR" => Self::GitError,
             "SCAN_CANCELLED" => Self::ScanCancelled,
+            "BROWSER_STALE_REF" => Self::BrowserStaleRef,
+            "BROWSER_INVALID_REFERENCE" => Self::BrowserInvalidReference,
+            "BROWSER_NO_TAB" => Self::BrowserNoTab,
+            "BROWSER_TAB_NOT_FOUND" => Self::BrowserTabNotFound,
+            "BROWSER_HOST_UNAVAILABLE" => Self::BrowserHostUnavailable,
+            "BROWSER_DIALOG_NOT_FOUND" => Self::BrowserDialogNotFound,
+            "BROWSER_DOWNLOAD_CANCELLED" => Self::BrowserDownloadCancelled,
+            "BROWSER_AUTOMATION_SNAPSHOT_STALE" => Self::BrowserStaleRef,
+            "BROWSER_AUTOMATION_TARGET_NOT_FOUND" => Self::BrowserInvalidReference,
+            "BROWSER_NOT_FOUND" => Self::BrowserNotFound,
+            "WEBVIEW_NOT_FOUND" => Self::WebviewNotFound,
+            "BROWSER_URL_INVALID" => Self::BrowserUrlInvalid,
+            "BROWSER_URL_SCHEME_DENIED" => Self::BrowserUrlSchemeDenied,
+            "BROWSER_FIND_FAILED" => Self::BrowserFindFailed,
+            "BROWSER_DOWNLOAD_FAILED" => Self::BrowserDownloadFailed,
+            "BROWSER_BOUNDS_INVALID" => Self::BrowserBoundsInvalid,
+            "BROWSER_CREATE_FAILED" => Self::BrowserCreateFailed,
+            "BROWSER_NAVIGATION_FAILED" => Self::BrowserNavigationFailed,
+            "BROWSER_HISTORY_FAILED" => Self::BrowserHistoryFailed,
+            "BROWSER_COOKIE_IMPORT_FAILED" => Self::BrowserCookieImportFailed,
+            "BROWSER_CLOSE_FAILED" => Self::BrowserCloseFailed,
+            "BROWSER_AUTOMATION_FAILED" => Self::BrowserAutomationFailed,
+            "BROWSER_CLI_UNAVAILABLE" => Self::BrowserCliUnavailable,
             "BROWSER_WAIT_TIMEOUT" => Self::BrowserWaitTimeout,
             "BROWSER_SCREENSHOT_FAILED" => Self::BrowserScreenshotFailed,
             other => Self::Custom(other.to_string()),
@@ -398,10 +428,10 @@ impl From<crate::browser::BrowserError> for IpcError {
             }
             crate::browser::BrowserError::CloseFailed(_) => IpcErrorCode::BrowserCloseFailed,
             crate::browser::BrowserError::AutomationSnapshotStale => {
-                IpcErrorCode::BrowserAutomationSnapshotStale
+                IpcErrorCode::BrowserStaleRef
             }
             crate::browser::BrowserError::AutomationTargetNotFound(_) => {
-                IpcErrorCode::BrowserAutomationTargetNotFound
+                IpcErrorCode::BrowserInvalidReference
             }
             crate::browser::BrowserError::AutomationFailed(_) => {
                 IpcErrorCode::BrowserAutomationFailed
@@ -482,5 +512,51 @@ mod tests {
             from_str,
             IpcErrorCode::Custom("CUSTOM_CODE_123".to_string())
         );
+    }
+
+    #[test]
+    fn test_browser_structured_recovery_error_codes() {
+        let cases = vec![
+            (IpcErrorCode::BrowserStaleRef, "\"BROWSER_STALE_REF\"", "BROWSER_STALE_REF"),
+            (IpcErrorCode::BrowserInvalidReference, "\"BROWSER_INVALID_REFERENCE\"", "BROWSER_INVALID_REFERENCE"),
+            (IpcErrorCode::BrowserNoTab, "\"BROWSER_NO_TAB\"", "BROWSER_NO_TAB"),
+            (IpcErrorCode::BrowserTabNotFound, "\"BROWSER_TAB_NOT_FOUND\"", "BROWSER_TAB_NOT_FOUND"),
+            (IpcErrorCode::BrowserHostUnavailable, "\"BROWSER_HOST_UNAVAILABLE\"", "BROWSER_HOST_UNAVAILABLE"),
+            (IpcErrorCode::BrowserDialogNotFound, "\"BROWSER_DIALOG_NOT_FOUND\"", "BROWSER_DIALOG_NOT_FOUND"),
+            (IpcErrorCode::BrowserDownloadCancelled, "\"BROWSER_DOWNLOAD_CANCELLED\"", "BROWSER_DOWNLOAD_CANCELLED"),
+        ];
+
+        for (code, expected_json, code_str) in cases {
+            let json = serde_json::to_string(&code).unwrap();
+            assert_eq!(json, expected_json);
+            let parsed = IpcErrorCode::from_code_str(code_str);
+            assert_eq!(parsed, code);
+        }
+
+        // Aliased backwards compatibility: legacy strings map to structured recovery codes
+        assert_eq!(
+            IpcErrorCode::from_code_str("BROWSER_AUTOMATION_SNAPSHOT_STALE"),
+            IpcErrorCode::BrowserStaleRef
+        );
+        assert_eq!(
+            IpcErrorCode::from_code_str("BROWSER_AUTOMATION_TARGET_NOT_FOUND"),
+            IpcErrorCode::BrowserInvalidReference
+        );
+    }
+
+    #[test]
+    fn test_browser_error_conversion_maps_to_recovery_codes() {
+        use crate::browser::BrowserError;
+
+        let stale_err = IpcError::from(BrowserError::AutomationSnapshotStale);
+        assert_eq!(stale_err.code, IpcErrorCode::BrowserStaleRef);
+        assert_eq!(serde_json::to_string(&stale_err.code).unwrap(), "\"BROWSER_STALE_REF\"");
+
+        let not_found_ref = IpcError::from(BrowserError::AutomationTargetNotFound("e-1".into()));
+        assert_eq!(not_found_ref.code, IpcErrorCode::BrowserInvalidReference);
+        assert_eq!(serde_json::to_string(&not_found_ref.code).unwrap(), "\"BROWSER_INVALID_REFERENCE\"");
+
+        let not_found_browser = IpcError::from(BrowserError::NotFound("b-1".into()));
+        assert_eq!(not_found_browser.code, IpcErrorCode::BrowserNotFound);
     }
 }

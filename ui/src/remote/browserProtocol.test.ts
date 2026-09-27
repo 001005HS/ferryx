@@ -524,6 +524,55 @@ describe("browserProtocol - JSON messages and schema validation", () => {
     expect(parsed).toEqual(validErr);
   });
 
+  // RED mutation: make the browserError parser ignore `details` (or accept any shape) ->
+  // the accept/reject assertions below fail.
+  describe("browserError structured details (T27)", () => {
+    const baseError = {
+      type: "browserError",
+      requestId: "req-refused",
+      code: "UNSUPPORTED",
+      message: "unsupported operation: point input on iframes is unsupported in v1",
+      retryable: false,
+    };
+
+    it("accepts a refusal frame carrying the four explanation fields", () => {
+      const details = {
+        code: "UNSUPPORTED",
+        reason: "point input on iframes is unsupported in v1; use reference-based interaction instead",
+        inputClass: "iframe_point",
+        remediation:
+          "Point clicks on iframes are unsupported in v1; use reference-based interaction instead.",
+      };
+      const parsed = parseServerMessage(JSON.stringify({ ...baseError, details })) as BrowserErrorMessage;
+      expect(parsed.details).toEqual(details);
+    });
+
+    it("accepts a frame with no details at all (older server)", () => {
+      const parsed = parseServerMessage(JSON.stringify(baseError)) as BrowserErrorMessage;
+      expect(parsed.details).toBeUndefined();
+      expect(parsed.code).toBe("UNSUPPORTED");
+      expect(parsed.message).toBe(baseError.message);
+    });
+
+    it("rejects malformed details payloads", () => {
+      const cases: unknown[] = [
+        "iframe",
+        42,
+        [],
+        { code: "UNSUPPORTED", reason: "r", inputClass: "iframe_point" },
+        { code: "UNSUPPORTED", reason: "r", inputClass: "iframe_point", remediation: 7 },
+        { code: "UNSUPPORTED", reason: "r", inputClass: "iframe_point", remediation: "x", extra: "y" },
+        { code: 1, reason: "r", inputClass: "iframe_point", remediation: "x" },
+      ];
+      for (const details of cases) {
+        expect(
+          () => parseServerMessage(JSON.stringify({ ...baseError, details })),
+          `details ${JSON.stringify(details)} must be rejected`,
+        ).toThrow(/details/i);
+      }
+    });
+  });
+
   it("serializes valid client messages and validates camelCase and denied unknown fields", () => {
     const commandMsg: BrowserCommandMessage = {
       type: "browserCommand",

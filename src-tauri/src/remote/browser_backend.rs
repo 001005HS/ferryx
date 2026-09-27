@@ -76,6 +76,10 @@ pub enum RemoteBrowserError {
     WaitTimeout,
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
+    /// Remote input was refused for a typed reason (iframe / canvas / dialog point input).
+    /// The explanation travels to the client as the `details` field of the BrowserError frame.
+    #[error("Input refused: {0}")]
+    InputRefused(crate::browser::remote_input::RefusedInputExplanation),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -530,6 +530,13 @@ export interface BrowserResultMessage {
   result?: unknown;
 }
 
+export interface BrowserErrorDetails {
+  code: string;
+  reason: string;
+  inputClass: string;
+  remediation: string;
+}
+
 export interface BrowserErrorMessage {
   type: "browserError";
   requestId?: string;
@@ -537,6 +544,9 @@ export interface BrowserErrorMessage {
   message: string;
   retryable: boolean;
   retryAfterMs?: number;
+  /** Structured payload for the error; a typed remote-input refusal carries the
+   *  RefusedInputExplanation fields here instead of leaving the client to guess. */
+  details?: BrowserErrorDetails;
 }
 
 export interface BrowserStateMessage {
@@ -653,7 +663,7 @@ const SERVER_MESSAGE_ALLOWED_KEYS: Record<string, Set<string>> = {
   browserDriverReleased: new Set(["type", "requestId", "leaseEpoch"]),
   browserDriverRevoked: new Set(["type", "reason", "leaseEpoch"]),
   browserResult: new Set(["type", "requestId", "result"]),
-  browserError: new Set(["type", "requestId", "code", "message", "retryable", "retryAfterMs"]),
+  browserError: new Set(["type", "requestId", "code", "message", "retryable", "retryAfterMs", "details"]),
   browserState: new Set([
     "type",
     "browserId",
@@ -703,6 +713,31 @@ function validateOptions(options: unknown): BrowserSubscribeOptions {
     throw new Error("Subscribe option maxEdge must be a positive finite number");
   }
   return obj as unknown as BrowserSubscribeOptions;
+}
+
+const BROWSER_ERROR_DETAILS_ALLOWED_KEYS = new Set(["code", "reason", "inputClass", "remediation"]);
+
+/**
+ * Validates the optional structured `details` payload of a browserError frame.
+ * An absent payload is valid (older servers); a present one must be an object whose
+ * four fields are all strings. Anything else is rejected rather than rendered.
+ */
+export function validateBrowserErrorDetails(details: unknown): BrowserErrorDetails {
+  if (!details || typeof details !== "object" || Array.isArray(details)) {
+    throw new Error("browserError: details must be an object");
+  }
+  const obj = details as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!BROWSER_ERROR_DETAILS_ALLOWED_KEYS.has(key)) {
+      throw new Error(`browserError: details contains unknown field: ${key}`);
+    }
+  }
+  for (const key of BROWSER_ERROR_DETAILS_ALLOWED_KEYS) {
+    if (typeof obj[key] !== "string") {
+      throw new Error(`browserError: details.${key} must be a string`);
+    }
+  }
+  return obj as unknown as BrowserErrorDetails;
 }
 
 export function parseServerMessage(jsonString: string): ServerMessage {
@@ -815,6 +850,9 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       if (typeof obj.code !== "string") throw new Error("browserError: code must be a string");
       if (typeof obj.message !== "string") throw new Error("browserError: message must be a string");
       if (typeof obj.retryable !== "boolean") throw new Error("browserError: retryable must be a boolean");
+      if (obj.details !== undefined) {
+        validateBrowserErrorDetails(obj.details);
+      }
       return obj as unknown as BrowserErrorMessage;
     }
     case "browserState": {

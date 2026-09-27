@@ -1,6 +1,6 @@
 [package]
 name = "ferryx"
-version = "2026.925.3"
+version = "2026.925.4"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license = "SUL-1.0"
@@ -115,12 +115,19 @@ rodio = { version = "0.22", default-features = false, features = [
     "mp4",
 ] }
 notify = "8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
+cbc = { version = "0.1.2", features = ["block-padding"] }
+aes = "0.8.4"
+sha1 = "0.10.7"
+tempfile = "3.17"
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFString", "CFURL", "CFBase", "CFAttributedString", "CFDictionary"] }
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits", "CTLine", "CTStringAttributes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGGeometry"] }

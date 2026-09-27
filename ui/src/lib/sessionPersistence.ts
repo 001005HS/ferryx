@@ -3,7 +3,14 @@ import { createLayoutState, normalizeLayout } from "../state/layout";
 import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
-import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
+import {
+  isNavigableBrowserUrl,
+  loadBrowserSettings,
+  PRIVATE_BROWSER_PROFILE,
+  resolveSupportedBrowserProfileId,
+  supportedBrowserProfiles,
+} from "./browserSettings";
+import { getBrowserScroll, type BrowserScrollPosition } from "./browserHistory";
 import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
 import { isAbsoluteTerminalCwd } from "./terminalCwd";
 import { getSessionProcessState, getSessionRecentScrollback, restoreSessionRecentScrollback } from "./sessionLifecycle";
@@ -32,6 +39,19 @@ import {
 } from "./types";
 
 export const WORKSPACE_SESSION_VERSION = 3;
+
+declare module "./types" {
+  interface PersistedBrowserTabState {
+    scrollX?: number;
+    scrollY?: number;
+    scrollPosition?: BrowserScrollPosition;
+  }
+}
+
+export function isPrivateBrowserProfileId(profileId: string | null | undefined): boolean {
+  const trimmed = profileId?.trim();
+  return trimmed === PRIVATE_BROWSER_PROFILE.id || trimmed === "private" || trimmed === "remote";
+}
 
 /**
  * Identity of everything about the live sessions that has to reach disk. Saves are scheduled off
@@ -66,16 +86,29 @@ export function serializeWorkspaceState(
     isLocked: Boolean(wt.locked),
   }));
 
-  function serializeLayout(layoutState: LayoutState): PersistedLayout {
+  function serializeLayout(layoutState: LayoutState, layoutWorktreePath?: string | null): PersistedLayout {
     const normalizedLayout = normalizeLayout(layoutState);
     const persistedTabs: PersistedTab[] = [];
     for (const tab of normalizedLayout.tabs) {
       if (tab.kind === "browser") {
-        if (!restoreBrowserTabs) continue;
+        if (!restoreBrowserTabs || isPrivateBrowserProfileId(tab.profileId)) continue;
+        const worktreePath = tab.worktreePath || layoutWorktreePath || undefined;
+        const rawScrollPos = (tab as any).scrollPosition ?? (
+          typeof (tab as any).scrollX === "number" || typeof (tab as any).scrollY === "number"
+            ? { x: (tab as any).scrollX ?? 0, y: (tab as any).scrollY ?? 0 }
+            : getBrowserScroll(tab.browserId, tab.url)
+        );
+        const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
+          ? {
+              x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
+              y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
+            }
+          : undefined;
         persistedTabs.push({
           id: tab.id,
           kind: "browser",
           label: tab.label,
+          worktreePath,
           pinned: Boolean(tab.pinned),
           browser: {
             browserId: tab.browserId,
@@ -86,8 +119,11 @@ export function serializeWorkspaceState(
             canGoForward: tab.canGoForward,
             zoomFactor: tab.zoomFactor,
             profileId: tab.profileId,
-            worktreePath: tab.worktreePath,
+            worktreePath,
             worktreeLabel: tab.worktreeLabel,
+            scrollPosition,
+            scrollX: scrollPosition?.x,
+            scrollY: scrollPosition?.y,
           },
         });
         continue;
@@ -115,15 +151,18 @@ export function serializeWorkspaceState(
       let effectiveRoot: PaneNode | null = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
       let effectiveContents = tabLayout?.contentsByLeafId;
 
-      if (!restoreBrowserTabs && tabLayout && effectiveContents) {
+      if (tabLayout && effectiveContents) {
         for (const [leafId, content] of Object.entries(effectiveContents)) {
           if (content.kind === "browser") {
-            const nextRoot = removeLeaf(effectiveRoot, leafId);
-            if (!nextRoot) {
-              effectiveRoot = null;
-              break;
+            const rawBrowser = content.browser ?? content;
+            if (!restoreBrowserTabs || isPrivateBrowserProfileId(rawBrowser.profileId)) {
+              const nextRoot = removeLeaf(effectiveRoot, leafId);
+              if (!nextRoot) {
+                effectiveRoot = null;
+                break;
+              }
+              effectiveRoot = nextRoot;
             }
-            effectiveRoot = nextRoot;
           }
         }
         if (!effectiveRoot) continue;
@@ -138,6 +177,18 @@ export function serializeWorkspaceState(
         if (content) {
           if (content.kind === "browser") {
             const rawBrowser = content.browser ?? content;
+            const worktreePath = rawBrowser.worktreePath || layoutWorktreePath || undefined;
+            const rawScrollPos = (rawBrowser as any).scrollPosition ?? (
+              typeof (rawBrowser as any).scrollX === "number" || typeof (rawBrowser as any).scrollY === "number"
+                ? { x: (rawBrowser as any).scrollX ?? 0, y: (rawBrowser as any).scrollY ?? 0 }
+                : getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "")
+            );
+            const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
+              ? {
+                  x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
+                  y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
+                }
+              : undefined;
             contentsByLeafId[leafId] = createBrowserPaneContent({
               browserId: rawBrowser.browserId ?? "",
               url: rawBrowser.url ?? "",
@@ -147,9 +198,10 @@ export function serializeWorkspaceState(
               canGoForward: rawBrowser.canGoForward ?? false,
               zoomFactor: rawBrowser.zoomFactor,
               profileId: rawBrowser.profileId,
-              worktreePath: rawBrowser.worktreePath,
+              worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
-            });
+              ...(scrollPosition ? { scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } : {}),
+            } as any);
             sessionIdsByLeafId[leafId] = "";
           } else if (content.kind === "dag") {
             const rawDag = content.dag ?? content;
@@ -222,11 +274,11 @@ export function serializeWorkspaceState(
     };
   }
 
-  const persistedLayout = serializeLayout(state.layout);
+  const persistedLayout = serializeLayout(state.layout, state.activeWorktreePath);
   const persistedWorktreeLayouts: Record<string, PersistedLayout> = {};
   for (const [wtPath, layout] of Object.entries(state.worktreeLayouts ?? {})) {
     if (layout) {
-      persistedWorktreeLayouts[wtPath] = serializeLayout(layout);
+      persistedWorktreeLayouts[wtPath] = serializeLayout(layout, wtPath);
     }
   }
 
@@ -410,6 +462,7 @@ export function deserializeWorkspaceState(
     locked: wt.isLocked ? "locked" : null,
     prunable: null,
   }));
+  const knownWorktreePaths = new Set(worktrees.map((wt) => wt.path));
 
   const sessions: Record<string, TerminalSession> = {};
   for (const [mapKey, sess] of Object.entries(ws.terminalSessions || {})) {
@@ -527,7 +580,10 @@ export function deserializeWorkspaceState(
     };
   }
 
-  function deserializeLayout(persistedLayout: PersistedLayout | undefined): LayoutState {
+  function deserializeLayout(
+    persistedLayout: PersistedLayout | undefined,
+    targetWorktreePath?: string | null,
+  ): LayoutState {
     if (!persistedLayout) return createLayoutState();
 
     const tabs: WorkspaceTab[] = [];
@@ -536,13 +592,43 @@ export function deserializeWorkspaceState(
         if (!restoreBrowser) continue;
         const browser = persistedTab.browser;
         const rawProfileId = browser?.profileId;
+        // Private-profile tabs must be excluded from restore (privacy policy)
+        if (isPrivateBrowserProfileId(rawProfileId)) continue;
+
+        const url = browser?.url ?? "about:blank";
+        // Stale state check: skip invalid URLs without breaking the rest of restore
+        if (!isNavigableBrowserUrl(url)) continue;
+
+        const tabExplicitWorktree = browser?.worktreePath ?? persistedTab.worktreePath ?? undefined;
+        // Stale state check: skip tab if its worktree no longer exists
+        if (tabExplicitWorktree && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(tabExplicitWorktree)) {
+          continue;
+        }
+        // Worktree partition: tab belongs to its worktree, not mixed into another
+        if (tabExplicitWorktree && tabExplicitWorktree !== (targetWorktreePath || undefined)) {
+          continue;
+        }
+        const tabWorktreePath = tabExplicitWorktree ?? (targetWorktreePath || undefined);
+
         const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+
+        // Backward-compatible scroll tolerance: missing/NaN/null positions default gracefully to { x: 0, y: 0 }
+        const rawScrollX = (browser as any)?.scrollX ?? (browser as any)?.scrollPosition?.x;
+        const rawScrollY = (browser as any)?.scrollY ?? (browser as any)?.scrollPosition?.y;
+        const historyScroll = rawScrollX === undefined && rawScrollY === undefined
+          ? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
+          : null;
+        const scrollPosition: BrowserScrollPosition = historyScroll ?? {
+          x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
+          y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
+        };
+
         const tab: BrowserTab = {
           id: persistedTab.id,
           kind: "browser",
           label: persistedTab.label,
           browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
-          url: browser?.url ?? "about:blank",
+          url,
           title: browser?.title ?? persistedTab.label,
           canGoBack: browser?.canGoBack ?? false,
           canGoForward: browser?.canGoForward ?? false,
@@ -550,8 +636,9 @@ export function deserializeWorkspaceState(
           loading: browser?.loading ?? false,
           pinned: Boolean(persistedTab.pinned),
           profileId,
-          worktreePath: browser?.worktreePath ?? persistedTab.worktreePath,
+          worktreePath: tabWorktreePath,
           worktreeLabel: browser?.worktreeLabel,
+          ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
         };
         tabs.push(tab);
         continue;
@@ -592,19 +679,39 @@ export function deserializeWorkspaceState(
         if (!restoreBrowser) continue;
         const browser = persistedTab.browser;
         const rawProfileId = browser?.profileId;
+        if (isPrivateBrowserProfileId(rawProfileId)) continue;
+        const url = browser?.url ?? "about:blank";
+        if (!isNavigableBrowserUrl(url)) continue;
+
+        const tabExplicitWorktree = browser?.worktreePath ?? persistedTab.worktreePath ?? undefined;
+        if (tabExplicitWorktree && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(tabExplicitWorktree)) continue;
+        if (tabExplicitWorktree && tabExplicitWorktree !== (targetWorktreePath || undefined)) continue;
+        const tabWorktreePath = tabExplicitWorktree ?? (targetWorktreePath || undefined);
+
         const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
         const leafId = `leaf-browser:${persistedTab.id}`;
+        const rawScrollX = (browser as any)?.scrollX ?? (browser as any)?.scrollPosition?.x;
+        const rawScrollY = (browser as any)?.scrollY ?? (browser as any)?.scrollPosition?.y;
+        const historyScroll = rawScrollX === undefined && rawScrollY === undefined
+          ? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
+          : null;
+        const scrollPosition: BrowserScrollPosition = historyScroll ?? {
+          x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
+          y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
+        };
+
         const browserState: BrowserPaneState = {
           browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
-          url: browser?.url ?? "about:blank",
+          url,
           title: browser?.title ?? persistedTab.label,
           canGoBack: browser?.canGoBack ?? false,
           canGoForward: browser?.canGoForward ?? false,
           zoomFactor: browser?.zoomFactor,
           loading: browser?.loading ?? false,
           profileId,
-          worktreePath: browser?.worktreePath ?? persistedTab.worktreePath,
+          worktreePath: tabWorktreePath,
           worktreeLabel: browser?.worktreeLabel,
+          ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
         };
         layoutsByTabId[persistedTab.id] = {
           root: createLeafNode(leafId),
@@ -649,15 +756,28 @@ export function deserializeWorkspaceState(
       const persistedMapping =
         terminal?.sessionIdsByLeafId ?? persistedTab.sessionIdsByLeafId ?? legacyTabLayout?.sessionIdsByLeafId;
 
-      if (!restoreBrowser && persistedContents) {
+      if (persistedContents) {
         for (const [leafId, content] of Object.entries(persistedContents)) {
           if (content && content.kind === "browser") {
-            const nextRoot = removeLeaf(root, leafId);
-            if (!nextRoot) {
-              root = null;
-              break;
+            const rawBrowser = content.browser ?? content;
+            const paneExplicitWt = rawBrowser.worktreePath;
+            const paneWtPath = paneExplicitWt ?? (targetWorktreePath || undefined);
+            const isStaleWt = Boolean(paneWtPath && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(paneWtPath));
+            const isOtherWt = Boolean(paneExplicitWt && paneExplicitWt !== (targetWorktreePath || undefined));
+            if (
+              !restoreBrowser ||
+              isPrivateBrowserProfileId(rawBrowser.profileId) ||
+              !isNavigableBrowserUrl(rawBrowser.url ?? "about:blank") ||
+              isStaleWt ||
+              isOtherWt
+            ) {
+              const nextRoot = removeLeaf(root, leafId);
+              if (!nextRoot) {
+                root = null;
+                break;
+              }
+              root = nextRoot;
             }
-            root = nextRoot;
           }
         }
         if (!root) continue;
@@ -673,7 +793,32 @@ export function deserializeWorkspaceState(
           if (rawContent.kind === "browser") {
             const rawBrowser = rawContent.browser ?? rawContent;
             const rawProfileId = rawBrowser.profileId;
+            if (
+              isPrivateBrowserProfileId(rawProfileId) ||
+              !isNavigableBrowserUrl(rawBrowser.url ?? "about:blank")
+            ) {
+              continue;
+            }
+            const paneExplicitWt = rawBrowser.worktreePath;
+            if (paneExplicitWt && paneExplicitWt !== (targetWorktreePath || undefined)) {
+              continue;
+            }
+            const paneWtPath = paneExplicitWt ?? (targetWorktreePath || undefined);
+            if (paneWtPath && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(paneWtPath)) {
+              continue;
+            }
+
             const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+            const rawScrollX = (rawBrowser as any)?.scrollX ?? (rawBrowser as any)?.scrollPosition?.x;
+            const rawScrollY = (rawBrowser as any)?.scrollY ?? (rawBrowser as any)?.scrollPosition?.y;
+            const historyScroll = rawScrollX === undefined && rawScrollY === undefined
+              ? getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "")
+              : null;
+            const scrollPosition: BrowserScrollPosition = historyScroll ?? {
+              x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
+              y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
+            };
+
             contentsByLeafId[leafId] = createBrowserPaneContent({
               browserId: rawBrowser.browserId || `restored-browser:${persistedTab.id}:${leafId}`,
               url: rawBrowser.url || "about:blank",
@@ -683,8 +828,9 @@ export function deserializeWorkspaceState(
               canGoForward: Boolean(rawBrowser.canGoForward),
               zoomFactor: typeof rawBrowser.zoomFactor === "number" ? rawBrowser.zoomFactor : undefined,
               profileId,
-              worktreePath: rawBrowser.worktreePath,
+              worktreePath: paneWtPath,
               worktreeLabel: rawBrowser.worktreeLabel,
+              ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
             });
             sessionIdsByLeafId[leafId] = "";
           } else if (rawContent.kind === "dag") {
@@ -745,12 +891,16 @@ export function deserializeWorkspaceState(
     });
   }
 
-  const activeLayout = deserializeLayout(ws.layout);
+  const activeLayout = deserializeLayout(ws.layout, ws.activeWorktreePath);
   const worktreeLayouts: Record<string, LayoutState> = {};
   if (ws.worktreeLayouts) {
     for (const [wtPath, persistedWtLayout] of Object.entries(ws.worktreeLayouts)) {
       if (persistedWtLayout) {
-        worktreeLayouts[wtPath] = deserializeLayout(persistedWtLayout);
+        if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(wtPath)) {
+          // Stale worktree: skip layout belonging to deleted worktree
+          continue;
+        }
+        worktreeLayouts[wtPath] = deserializeLayout(persistedWtLayout, wtPath);
       }
     }
   }

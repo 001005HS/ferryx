@@ -16,11 +16,15 @@ import {
 } from "../../lib/browserSettings";
 import { clearBrowserHistory } from "../../lib/browserHistory";
 import {
+  extractBrowserErrorCode,
   focusBrowser,
+  formatBrowserCookieImportError,
   importBrowserCookies,
+  importInstalledBrowserCookies,
   listBrowsers,
   setBrowserZoom,
 } from "../../lib/browserTauri";
+import { isInstalledBrowserCookieImportSupported, isMacHost } from "../../lib/platform";
 import type { BrowserSessionSummary } from "../../lib/types";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -42,13 +46,21 @@ export function BrowserSection() {
   const [profileDraft, setProfileDraft] = useState("");
   const [importStatus, setImportStatus] = useState<Record<string, string>>({});
   const [activeBrowsers, setActiveBrowsers] = useState<BrowserSessionSummary[]>([]);
+  // Section-level failures (listing tabs, applying the default zoom) have no field of their own, so
+  // they surface once at the top of the section; per-row actions (Focus) report inside their row.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [focusErrors, setFocusErrors] = useState<Record<string, string>>({});
   const namedProfilesSupported = browserNamedProfilesSupported();
   const visibleProfiles = supportedBrowserProfiles(settings);
 
   useEffect(() => setHomeDraft(settings.homePage), [settings.homePage]);
 
   useEffect(() => {
-    void listBrowsers().then(setActiveBrowsers, () => setActiveBrowsers([]));
+    void listBrowsers().then(setActiveBrowsers, (error: unknown) => {
+      // An empty list asserts "no browser tabs are open"; a failed probe is not that claim.
+      setActiveBrowsers([]);
+      setActionError(`List browser tabs failed: ${extractBrowserErrorCode(error)}`);
+    });
   }, []);
 
   const update = async (patch: Partial<BrowserSettingsState>) => {
@@ -58,8 +70,10 @@ export function BrowserSection() {
         const list = await listBrowsers();
         setActiveBrowsers(list);
         await Promise.all(list.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100)));
-      } catch {
-        // Native browser state can disappear while a tab is closing.
+      } catch (error) {
+        // Native browser state can disappear while a tab is closing, but a partially applied zoom
+        // must be visible instead of assumed.
+        setActionError(`Apply default zoom failed: ${extractBrowserErrorCode(error)}`);
       }
     }
     return next;
@@ -72,7 +86,7 @@ export function BrowserSection() {
       setHomeError(null);
       void update({ homePage });
     } catch (error) {
-      setHomeError(error instanceof Error ? error.message : "Invalid home page URL.");
+      setHomeError(extractBrowserErrorCode(error));
     }
   };
 
@@ -120,10 +134,33 @@ export function BrowserSection() {
     } catch (error) {
       setImportStatus((prev) => ({
         ...prev,
-        [profileId]: error instanceof Error ? error.message : "Cookie import failed",
+        [profileId]: `Cookie import failed: ${formatBrowserCookieImportError(error)}`,
       }));
     }
   };
+
+  const importInstalledCookies = async (profileId: string, source: "chrome" | "edge") => {
+    try {
+      setImportStatus((prev) => ({
+        ...prev,
+        [profileId]: `Importing from ${source === "chrome" ? "Chrome" : "Edge"}…`,
+      }));
+      const { importedCount, skippedCount } = await importInstalledBrowserCookies(profileId, source);
+      const skippedText = skippedCount > 0 ? ` (${skippedCount} skipped)` : "";
+      setImportStatus((prev) => ({
+        ...prev,
+        [profileId]: `Imported ${importedCount} cookies${skippedText}`,
+      }));
+    } catch (error) {
+      setImportStatus((prev) => ({
+        ...prev,
+        [profileId]: `Cookie import failed: ${formatBrowserCookieImportError(error)}`,
+      }));
+    }
+  };
+
+  const installedImportSupported = isInstalledBrowserCookieImportSupported();
+  const isMac = isMacHost();
 
   return (
     <section aria-labelledby="settings-browser-heading">
@@ -133,6 +170,15 @@ export function BrowserSection() {
         description="Configure navigation, link routing, browser sessions, and cookies."
       />
       <h2 id="settings-browser-heading" className="sr-only">Browser</h2>
+      {actionError ? (
+        <div
+          role="alert"
+          data-testid="browser-settings-error"
+          className="mb-4 rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"
+        >
+          {actionError}
+        </div>
+      ) : null}
       <SettingsGroup
         title="Web & Navigation"
         action={
@@ -144,7 +190,9 @@ export function BrowserSection() {
               const next = resetSettings();
               setHomeDraft(next.homePage);
               setHomeError(null);
-              void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100))).catch(() => undefined);
+              void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100)))
+                .then(() => setActionError(null))
+                .catch((error: unknown) => setActionError(`Reset browser zoom failed: ${extractBrowserErrorCode(error)}`));
             }}
             className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
           >
@@ -387,6 +435,39 @@ export function BrowserSection() {
               >
                 <FolderOpen className="size-3" /> Import Cookies
               </Button>
+              {installedImportSupported ? (
+                <div className="flex flex-col items-end gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void importInstalledCookies(profile.id, "chrome")}
+                      className="h-7 px-2 text-[11px]"
+                    >
+                      Import from Chrome
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void importInstalledCookies(profile.id, "edge")}
+                      className="h-7 px-2 text-[11px]"
+                    >
+                      Import from Edge
+                    </Button>
+                  </div>
+                  {isMac ? (
+                    <span className="text-[11px] text-muted-foreground">
+                      macOS will ask for Keychain access
+                    </span>
+                  ) : null}
+                </div>
+              ) : (
+                <span className="text-[11px] text-muted-foreground">
+                  Installed browser cookie import is unavailable on Windows (Chromium app-bound encryption)
+                </span>
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -415,6 +496,11 @@ export function BrowserSection() {
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[13px] font-medium">{browser.title || browser.url || browser.browserId}</div>
                   <div className="truncate font-mono text-[11px] text-muted-foreground">{browser.url} · profile:{browser.profileId}</div>
+                  {focusErrors[browser.browserId] ? (
+                    <div role="alert" className="mt-0.5 truncate text-[11px] text-destructive">
+                      {focusErrors[browser.browserId]}
+                    </div>
+                  ) : null}
                 </div>
                 <Button
                   type="button"
@@ -422,9 +508,19 @@ export function BrowserSection() {
                   size="sm"
                   aria-label={`Focus browser tab ${browser.title || browser.browserId}`}
                   onClick={() => {
-                    // cmd_browser_focus now reports a missing webview instead of succeeding
-                    // silently, and this list can outlive a browser that is closing.
-                    void focusBrowser(browser.browserId).catch(() => undefined);
+                    // cmd_browser_focus reports a missing webview instead of succeeding silently,
+                    // and this list can outlive a browser that is closing.
+                    void focusBrowser(browser.browserId)
+                      .then(() => setFocusErrors((prev) => {
+                        if (!(browser.browserId in prev)) return prev;
+                        const remaining = { ...prev };
+                        delete remaining[browser.browserId];
+                        return remaining;
+                      }))
+                      .catch((error: unknown) => setFocusErrors((prev) => ({
+                        ...prev,
+                        [browser.browserId]: `Focus failed: ${extractBrowserErrorCode(error)}`,
+                      })));
                   }}
                   className="h-7 px-2 text-[11px]"
                 >

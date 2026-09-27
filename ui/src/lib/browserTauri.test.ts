@@ -7,10 +7,15 @@ import {
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
+  extractBrowserCookieImportReason,
+  formatBrowserCookieImportError,
+  getBrowserCookieImportActionableMessage,
   goBackBrowser,
   goForwardBrowser,
   openExternalUrl,
+  importInstalledBrowserCookies,
   isBrowserTabShortcutAction,
+  reloadBrowser,
   setBrowserBounds,
   setBrowserVisible,
 } from "./browserTauri";
@@ -179,6 +184,22 @@ describe("browser OS and engine IPC", () => {
     ]);
   });
 
+  it("carries the cache-bypass request on the reload command", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await reloadBrowser("browser-focused", { ignoreCache: true });
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["cmd_browser_reload", { browserId: "browser-focused", ignoreCache: true }],
+    ]);
+  });
+
+  it("asks for a soft reload when the caller requests no cache bypass", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await reloadBrowser("browser-focused");
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["cmd_browser_reload", { browserId: "browser-focused", ignoreCache: false }],
+    ]);
+  });
+
   it("propagates typed unsupported input instead of reporting keypress success", async () => {
     vi.mocked(invoke).mockRejectedValue({ code: "UNSUPPORTED", message: "native input unavailable" });
     await expect(browserAutomationAct({ browserId: "browser-focused", generation: 1,
@@ -272,5 +293,125 @@ describe("browser automation ipc", () => {
 
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledWith("cmd_browser_automation_act", { request });
+  });
+
+  it("invokes cmd_browser_import_installed_cookies with source and profile", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ importedCount: 42, skippedCount: 5 });
+
+    const result = await importInstalledBrowserCookies("default", "chrome", "Profile 1");
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_import_installed_cookies", {
+      request: {
+        profileId: "default",
+        source: "chrome",
+        sourceProfile: "Profile 1",
+      },
+    });
+    expect(result).toEqual({ importedCount: 42, skippedCount: 5 });
+  });
+});
+
+describe("browser cookie import error formatting and reasoning", () => {
+  it("formats realistic keychain-denied IPC payload with actionable guidance", () => {
+    const error = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      message: "keychain-denied: Keychain access for Chrome Safe Storage failed",
+      details: { reason: "keychain-denied" },
+    };
+
+    expect(extractBrowserCookieImportReason(error)).toBe("keychain-denied");
+    expect(formatBrowserCookieImportError(error)).toBe(
+      "keychain-denied: Allow Keychain access in the macOS prompt to import cookies.",
+    );
+  });
+
+  it("formats realistic no-tab IPC payload with actionable guidance", () => {
+    const error = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      message: "open a browser tab using the default profile before importing cookies",
+      details: { reason: "no-tab" },
+    };
+
+    expect(extractBrowserCookieImportReason(error)).toBe("no-tab");
+    expect(formatBrowserCookieImportError(error)).toBe(
+      "no-tab: Open a browser tab using this profile before importing cookies.",
+    );
+  });
+
+  it("formats no-profile IPC payload with actionable message", () => {
+    const error = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      message: "no-profile: directory missing",
+      details: { reason: "no-profile" },
+    };
+
+    expect(extractBrowserCookieImportReason(error)).toBe("no-profile");
+    expect(formatBrowserCookieImportError(error)).toBe(
+      "no-profile: Browser profile directory or cookie database was not found.",
+    );
+  });
+
+  it("formats no-cookies and unsupported-platform payloads with actionable messages", () => {
+    const noCookiesError = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      details: { reason: "no-cookies" },
+    };
+    expect(formatBrowserCookieImportError(noCookiesError)).toBe(
+      "no-cookies: No importable cookies found in the selected profile.",
+    );
+
+    const unsupportedPlatformError = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      details: { reason: "unsupported-platform" },
+    };
+    expect(formatBrowserCookieImportError(unsupportedPlatformError)).toBe(
+      "unsupported-platform: Installed browser cookie import is not supported on this platform.",
+    );
+
+    const genericFailedError = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      details: { reason: "cookie-import-failed" },
+    };
+    expect(formatBrowserCookieImportError(genericFailedError)).toBe(
+      "cookie-import-failed: Failed to import cookies from browser profile.",
+    );
+  });
+
+  it("formats custom reason without actionable mapping as reason alone", () => {
+    const customError = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      details: { reason: "custom-source-failure" },
+    };
+
+    expect(extractBrowserCookieImportReason(customError)).toBe("custom-source-failure");
+    expect(formatBrowserCookieImportError(customError)).toBe("custom-source-failure");
+  });
+
+  it("preserves raw error code semantics when details reason is missing", () => {
+    const failedCodeOnly = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      message: "Cookie import failed",
+    };
+
+    expect(extractBrowserCookieImportReason(failedCodeOnly)).toBeNull();
+    expect(formatBrowserCookieImportError(failedCodeOnly)).toBe("BROWSER_COOKIE_IMPORT_FAILED");
+  });
+
+  it("preserves Error message and string errors when code and reason are absent", () => {
+    expect(formatBrowserCookieImportError(new Error("Disk read error"))).toBe("Disk read error");
+    expect(formatBrowserCookieImportError("Plain string failure")).toBe("Plain string failure");
+    expect(formatBrowserCookieImportError({ message: "Only message provided" })).toBe("Only message provided");
+  });
+
+  it("falls back to UNKNOWN_ERROR for null, undefined, or empty payload", () => {
+    expect(formatBrowserCookieImportError(null)).toBe("UNKNOWN_ERROR");
+    expect(formatBrowserCookieImportError(undefined)).toBe("UNKNOWN_ERROR");
+    expect(formatBrowserCookieImportError({})).toBe("UNKNOWN_ERROR");
+    expect(formatBrowserCookieImportError("   ")).toBe("UNKNOWN_ERROR");
+  });
+
+  it("getBrowserCookieImportActionableMessage returns null for unrecognized reasons", () => {
+    expect(getBrowserCookieImportActionableMessage("unknown-reason")).toBeNull();
   });
 });

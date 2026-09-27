@@ -159,6 +159,7 @@ fn presented_terminal_yields_cross_thread_pointer_hit_testing_to_input() {
         y: 0.0,
         width: 100.0,
         height: 100.0,
+        scale_factor: 1.0,
     }));
     target.reveal();
 

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
@@ -60,7 +60,7 @@ describe("TerminalSplitView legacy HTML5 tab drop", () => {
       },
     };
     const onSplitPane = vi.fn();
-    render(
+    const { container } = render(
       <TerminalSplitView
         layout={layout}
         sessions={{
@@ -72,7 +72,8 @@ describe("TerminalSplitView legacy HTML5 tab drop", () => {
       />,
     );
 
-    const pane = screen.getByTestId("pane-leaf");
+    const activeContainer = container.querySelector<HTMLElement>('[data-tab-pane-active="true"]')!;
+    const pane = within(activeContainer).getByTestId("pane-leaf");
     const transfer = plainTextOnlyTransfer("tab-source");
     fireEvent.dragOver(pane, { clientX: 195, clientY: 50, dataTransfer: transfer });
     fireEvent.drop(pane, { clientX: 195, clientY: 50, dataTransfer: transfer });

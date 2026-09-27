@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
@@ -136,7 +136,7 @@ function layoutWithTargetSplit(): LayoutState {
 
 describe("TerminalSplitView pane-targeted tab drop", () => {
   it("registers four edge drop zones inside every rendered terminal pane instead of only around the group/window", () => {
-    render(
+    const { container } = render(
       <TerminalSplitView
         layout={layoutWithTargetSplit()}
         sessions={{
@@ -147,7 +147,8 @@ describe("TerminalSplitView pane-targeted tab drop", () => {
       />,
     );
 
-    const panes = screen.getAllByTestId("pane-leaf");
+    const activeContainer = container.querySelector<HTMLElement>('[data-tab-pane-active="true"]')!;
+    const panes = within(activeContainer).getAllByTestId("pane-leaf");
     expect(panes).toHaveLength(2);
     for (const pane of panes) {
       const leafId = pane.getAttribute("data-leaf-id");
@@ -159,7 +160,7 @@ describe("TerminalSplitView pane-targeted tab drop", () => {
       for (const zone of paneZones) expect(zone.getAttribute("data-leaf-id")).toBe(leafId);
     }
 
-    expect(screen.getAllByTestId("pane-edge-drop-zone")).toHaveLength(8);
+    expect(within(activeContainer).getAllByTestId("pane-edge-drop-zone")).toHaveLength(8);
   });
 
   it("always resolves the hovered pane edge ahead of the overlapping group edge, including the active tab top edge", () => {

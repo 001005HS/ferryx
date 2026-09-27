@@ -81,7 +81,7 @@ describe("browser navigation inside mixed panes", () => {
       await result.current.reloadBrowserTab("owner", "browser-child");
     });
 
-    expect(browserTauri.reloadBrowser).toHaveBeenCalledExactlyOnceWith("browser-child");
+    expect(browserTauri.reloadBrowser).toHaveBeenCalledExactlyOnceWith("browser-child", undefined);
   });
 
   it("keeps standalone tab navigation working without an explicit browser id", async () => {

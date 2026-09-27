@@ -105,6 +105,7 @@ impl DaemonSessionService {
         let mut reader = BufReader::new(read);
         let mut handshake = serde_json::to_vec(&DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: crate::daemon::client::read_transport_token(),
         })
         .map_err(|_| "INVALID_METADATA")?;
         handshake.push(b'\n');

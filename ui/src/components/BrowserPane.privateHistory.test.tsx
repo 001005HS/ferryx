@@ -41,6 +41,8 @@ const browserMocks = vi.hoisted(() => ({
   setBrowserVisible: vi.fn(async () => undefined),
   onBrowserShortcutRequested: vi.fn(async () => () => undefined),
   onBrowserDownloadRequested: vi.fn(async () => () => undefined),
+  onBrowserDownloadUpdated: vi.fn(async () => () => undefined),
+  extractBrowserErrorCode: vi.fn((err: unknown) => String((err as { code?: unknown })?.code ?? "UNKNOWN_ERROR")),
   findBrowser: vi.fn(),
   clearBrowserFind: vi.fn(),
   downloadBrowserUrl: vi.fn(),

@@ -1246,6 +1246,84 @@ describe("RemoteBrowser component", () => {
     expect(handlePointClick.mock.calls[0][0].browserInstanceId).toBe("bi-1");
   });
 
+  // RED mutation: restore `reason.toLowerCase().includes("iframe")` in `buildRemoteInputRefusal`
+  // (i.e. derive the remediation from the message text) -> the second test below fails because
+  // a detail-less error would still show a remediation.
+  describe("RemoteInputRefusal from structured details (T27)", () => {
+    async function clickOnce(handler: (point: unknown) => Promise<unknown>) {
+      render(
+        <RemoteBrowser
+          baseUrl="http://localhost:8080"
+          browserId="b1"
+          deviceToken="tok-1"
+          onPointClick={handler as never}
+        />,
+      );
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+      const viewport = screen.getByTestId("remote-browser-viewport");
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 640,
+        bottom: 400,
+        width: 640,
+        height: 400,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      });
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1, 640, 400)).buffer });
+      });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+      });
+    }
+
+    it("renders the server's own remediation when the rejection carries details", async () => {
+      const details = {
+        code: "UNSUPPORTED",
+        reason:
+          "point input on iframes is unsupported in v1; use reference-based interaction instead",
+        inputClass: "iframe_point",
+        remediation: "Use the DOM snapshot reference instead of a coordinate click.",
+      };
+      const rejection = Object.assign(new Error(details.reason), {
+        code: "UNSUPPORTED",
+        details,
+      });
+
+      await clickOnce(() => Promise.reject(rejection));
+
+      expect(screen.getByTestId("remote-browser-refusal-banner")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-refusal-code").textContent).toBe("UNSUPPORTED");
+      expect(screen.getByTestId("remote-browser-refusal-reason").textContent).toBe(details.reason);
+      expect(screen.getByTestId("remote-browser-refusal-remediation").textContent).toBe(
+        details.remediation,
+      );
+    });
+
+    it("shows no remediation when the rejection carries no details", async () => {
+      // The message mentions an iframe, so a text-matching heuristic would fabricate a
+      // remediation here; the structured path must not.
+      const rejection = Object.assign(
+        new Error("unsupported operation: point input on iframes is unsupported in v1"),
+        { code: "UNSUPPORTED" },
+      );
+
+      await clickOnce(() => Promise.reject(rejection));
+
+      expect(screen.getByTestId("remote-browser-refusal-banner")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-refusal-code").textContent).toBe("UNSUPPORTED");
+      expect(screen.getByTestId("remote-browser-refusal-reason").textContent).toBe(rejection.message);
+      expect(screen.queryByTestId("remote-browser-refusal-remediation")).toBeNull();
+    });
+  });
+
   it("carries snapshotId and mapRevision on fill and click (R9)", async () => {
     const mockClient = {
       sendCommand: vi.fn().mockResolvedValue({ ok: true }),

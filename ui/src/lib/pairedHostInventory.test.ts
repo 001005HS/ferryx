@@ -2,9 +2,11 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createRemoteHostStore, remoteHostKey, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
+import { bootTrace } from "./tauri";
 import { createPairedHostInventory, nativePairedHostCommands, normalizeRelayOrigin, parsePairingInvite, type HostView, type PairedHostCommands } from "./pairedHostInventory";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("./tauri", () => ({ bootTrace: vi.fn().mockResolvedValue(undefined) }));
 const hostId = remoteHostKey("https://relay.example", "fixture");
 const view: HostView = { hostId, relayOrigin: "https://relay.example", machineId: "fixture", displayLabel: "Fixture", generation: "9", grantScope: "machine", authStatus: "paired", online: true };
 const token = "private-fixture-bearer";
@@ -112,6 +114,94 @@ it("refresh failure retains offline rows and unknown local capabilities disable 
   expect(store.getState().hosts[hostId].online).toBe(false);
   expect(store.getState().machineFeaturesEnabled).toBe(false);
   expect(store.getState().nativeStatus).toBe("unavailable");
+});
+it("records only the failing inventory command and sanitized code when refresh fails", async () => {
+  const { inventory, commands } = fixture();
+  vi.mocked(commands.capabilities).mockRejectedValueOnce(Object.assign(new Error("secret-token"), { code: "DAEMON_UNAVAILABLE" }));
+
+  await inventory.refresh();
+
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.unavailable", { operation: "capabilities", code: "DAEMON_UNAVAILABLE" });
+  expect(JSON.stringify(vi.mocked(bootTrace).mock.calls)).not.toContain("secret-token");
+});
+it("records list failure operation and sanitized code when list rejects", async () => {
+  const { inventory, commands } = fixture();
+  vi.mocked(commands.list).mockRejectedValueOnce(Object.assign(new Error("leak-token"), { code: "HOST_UNAVAILABLE" }));
+
+  await inventory.refresh();
+
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.unavailable", { operation: "list", code: "HOST_UNAVAILABLE" });
+  expect(JSON.stringify(vi.mocked(bootTrace).mock.calls)).not.toContain("leak-token");
+});
+it("sanitizes unlisted errors to fixed fallback code without leaking secret details or message", async () => {
+  const { inventory, commands } = fixture();
+  vi.mocked(commands.capabilities).mockRejectedValueOnce(new Error("sensitive-raw-secret"));
+
+  await inventory.refresh();
+
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.unavailable", { operation: "capabilities", code: "PAIRED_HOST_UNAVAILABLE" });
+  expect(JSON.stringify(vi.mocked(bootTrace).mock.calls)).not.toContain("sensitive-raw-secret");
+});
+it("records malformed capability parse failure with allowlisted code", async () => {
+  const { inventory, commands } = fixture();
+  vi.mocked(commands.capabilities).mockResolvedValueOnce({ pairedHostInventoryV1: false, pairedDaemonProxyV1: false });
+
+  await inventory.refresh();
+
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.unavailable", { operation: "capabilities", code: "INVENTORY_UNAVAILABLE" });
+});
+it("records list failure and INVALID_HOST_VIEW when views contains malformed generation", async () => {
+  const { inventory, commands } = fixture();
+  vi.mocked(commands.list).mockResolvedValueOnce([{ ...view, generation: "invalid-gen" }]);
+
+  await inventory.refresh();
+
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.unavailable", { operation: "list", code: "INVALID_HOST_VIEW" });
+});
+it("does not emit false failure bootTrace when refresh is superseded/stale", async () => {
+  const { inventory, commands } = fixture();
+  let rejectFirstCap!: (err: unknown) => void;
+  const pendingCap = new Promise<{ pairedHostInventoryV1: boolean; pairedDaemonProxyV1: boolean }>((_, rej) => {
+    rejectFirstCap = rej;
+  });
+  vi.mocked(commands.capabilities).mockReturnValueOnce(pendingCap);
+
+  const staleRefresh = inventory.refresh();
+  // Start second refresh which resolves successfully
+  await inventory.refresh();
+  vi.mocked(bootTrace).mockClear();
+
+  // Reject the pending first refresh
+  rejectFirstCap(Object.assign(new Error("stale-secret"), { code: "DAEMON_UNAVAILABLE" }));
+  await staleRefresh.catch(() => {});
+
+  expect(bootTrace).not.toHaveBeenCalled();
+});
+it("recovers paired machine features on window focus after startup missed the daemon", async () => {
+  const { inventory, store, commands } = fixture();
+  vi.mocked(listen).mockResolvedValueOnce(() => {});
+  vi.mocked(commands.capabilities).mockRejectedValueOnce(new Error("daemon unavailable"));
+  const unsubscribe = await inventory.subscribeAppWide();
+  await inventory.refresh();
+  expect(store.getState().nativeStatus).toBe("unavailable");
+  const ready = new Promise<void>((resolve) => {
+    const stop = store.subscribe((state) => {
+      if (state.nativeStatus === "ready") { stop(); resolve(); }
+    });
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  window.dispatchEvent(new Event("focus"));
+  try {
+    await Promise.race([
+      ready,
+      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("inventory did not recover on focus")), 1_000); }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+  expect(store.getState().machineFeaturesEnabled).toBe(true);
+  expect(store.getState().hosts[hostId].online).toBe(true);
+  unsubscribe();
 });
 it("out-of-order refresh cannot replace a newer response", async () => {
   const { inventory, store, commands } = fixture(); const old = deferred<HostView[]>();

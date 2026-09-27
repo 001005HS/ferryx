@@ -1,11 +1,24 @@
+use crate::browser::BrowserError;
+use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::remote::design_mode::{DesignModeSnapshot, DomElementBox};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ElementRect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHighlightResult {
+    pub selector: String,
+    pub tag_name: String,
+    pub rect: ElementRect,
 }
 
 pub struct ElementPick {
@@ -171,6 +184,175 @@ pub fn element_pick_report(json: &str, full_png: &[u8]) -> Result<DesignModeSnap
     Ok(element_pick_to_design_snapshot(&pick, &bytes))
 }
 
+pub fn browser_highlight_script(selector: &str, duration_ms: u64) -> Result<String, BrowserError> {
+    let selector_json = serde_json::to_string(selector).map_err(|error| {
+        BrowserError::AutomationFailed(format!("failed to encode selector: {error}"))
+    })?;
+    Ok(format!(
+        r#"(() => {{
+  const selector = {selector_json};
+  if (!selector || typeof selector !== 'string' || !selector.trim()) {{
+    return JSON.stringify({{ ok: false, error: 'invalid_selector', message: 'selector cannot be empty' }});
+  }}
+
+  let element;
+  try {{
+    element = document.querySelector(selector);
+  }} catch (e) {{
+    return JSON.stringify({{ ok: false, error: 'invalid_selector', message: e && e.message ? e.message : 'invalid selector syntax' }});
+  }}
+
+  if (!element) {{
+    return JSON.stringify({{ ok: false, error: 'not_found', message: 'no element matched selector' }});
+  }}
+
+  if (typeof element.scrollIntoView === 'function') {{
+    element.scrollIntoView({{ block: 'nearest', inline: 'nearest' }});
+  }}
+
+  const prev = window.__ferryxHighlight;
+  if (prev) {{
+    if (prev.timer) clearTimeout(prev.timer);
+    if (prev.overlay && prev.overlay.parentNode) {{
+      prev.overlay.parentNode.removeChild(prev.overlay);
+    }}
+    if (prev.outlinedEl) {{
+      prev.outlinedEl.style.outline = prev.prevOutline;
+    }}
+    window.__ferryxHighlight = null;
+  }}
+
+  const rect = element.getBoundingClientRect();
+  const prevOutline = element.style.outline || '';
+  element.style.outline = '2px solid #ff9800';
+
+  const overlay = document.createElement('div');
+  overlay.id = '__ferryx_highlight_overlay';
+  overlay.style.position = 'fixed';
+  overlay.style.left = (rect.left - 2) + 'px';
+  overlay.style.top = (rect.top - 2) + 'px';
+  overlay.style.width = (rect.width + 4) + 'px';
+  overlay.style.height = (rect.height + 4) + 'px';
+  overlay.style.border = '2px solid #ff9800';
+  overlay.style.backgroundColor = 'rgba(255, 152, 0, 0.2)';
+  overlay.style.pointerEvents = 'none';
+  overlay.style.zIndex = '2147483647';
+  overlay.style.boxSizing = 'border-box';
+  overlay.style.transition = 'opacity 0.2s ease-out';
+  (document.body || document.documentElement).appendChild(overlay);
+
+  const cleanup = () => {{
+    if (overlay.parentNode) {{
+      overlay.parentNode.removeChild(overlay);
+    }}
+    if (element) {{
+      element.style.outline = prevOutline;
+    }}
+    if (window.__ferryxHighlight && window.__ferryxHighlight.overlay === overlay) {{
+      window.__ferryxHighlight = null;
+    }}
+  }};
+
+  const timer = setTimeout(cleanup, {duration_ms});
+
+  window.__ferryxHighlight = {{
+    overlay,
+    timer,
+    outlinedEl: element,
+    prevOutline,
+    cleanup,
+  }};
+
+  return JSON.stringify({{
+    ok: true,
+    selector,
+    tagName: element.tagName.toLowerCase(),
+    rect: {{
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height
+    }}
+  }});
+}})()"#,
+        duration_ms = duration_ms.max(100)
+    ))
+}
+
+pub const BROWSER_CLEAR_HIGHLIGHT_SCRIPT: &str = r#"(() => {
+  const prev = window.__ferryxHighlight;
+  if (!prev) return false;
+  if (prev.timer) clearTimeout(prev.timer);
+  if (prev.overlay && prev.overlay.parentNode) {
+    prev.overlay.parentNode.removeChild(prev.overlay);
+  }
+  if (prev.outlinedEl) {
+    prev.outlinedEl.style.outline = prev.prevOutline;
+  }
+  window.__ferryxHighlight = null;
+  return true;
+})()"#;
+
+#[derive(Deserialize)]
+struct RawHighlightCallback {
+    ok: bool,
+    error: Option<String>,
+    message: Option<String>,
+    selector: Option<String>,
+    #[serde(rename = "tagName")]
+    tag_name: Option<String>,
+    rect: Option<ElementRect>,
+}
+
+pub fn parse_browser_highlight_callback(
+    raw: &str,
+    requested_selector: &str,
+) -> Result<BrowserHighlightResult, IpcError> {
+    let unwrapped = unwrap_eval_json(raw);
+    let callback: RawHighlightCallback = serde_json::from_str(&unwrapped).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::ParseError,
+            format!("failed to parse highlight callback JSON: {e}"),
+        )
+    })?;
+
+    if !callback.ok {
+        let err_kind = callback.error.as_deref().unwrap_or("unknown");
+        let msg = callback
+            .message
+            .unwrap_or_else(|| "highlight failed".to_string());
+        return match err_kind {
+            "not_found" => Err(IpcError::new(
+                IpcErrorCode::BrowserAutomationTargetNotFound,
+                format!("no element matched selector '{requested_selector}'"),
+            )),
+            "invalid_selector" => Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                format!("invalid selector '{requested_selector}': {msg}"),
+            )),
+            _ => Err(IpcError::new(
+                IpcErrorCode::BrowserAutomationFailed,
+                format!("highlight failed for '{requested_selector}': {msg}"),
+            )),
+        };
+    }
+
+    let rect = callback.rect.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::ParseError,
+            "highlight callback missing rect",
+        )
+    })?;
+
+    Ok(BrowserHighlightResult {
+        selector: callback
+            .selector
+            .unwrap_or_else(|| requested_selector.to_string()),
+        tag_name: callback.tag_name.unwrap_or_default(),
+        rect,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +476,68 @@ mod tests {
                 text: None,
             }]
         );
+    }
+
+    #[test]
+    fn test_browser_highlight_script_encodes_selector_and_duration() {
+        let selector = "button.btn[data-id='submit']";
+        let script = browser_highlight_script(selector, 1500).unwrap();
+        assert!(script.contains(&serde_json::to_string(selector).unwrap()));
+        assert!(script.contains("document.querySelector(selector)"));
+        assert!(script.contains("element.scrollIntoView"));
+        assert!(script.contains("__ferryx_highlight_overlay"));
+        assert!(script.contains("1500"));
+    }
+
+    #[test]
+    fn test_browser_highlight_script_has_safe_error_reporting() {
+        let script = browser_highlight_script("#main", 2000).unwrap();
+        assert!(script.contains("invalid_selector"));
+        assert!(script.contains("not_found"));
+        assert!(script.contains("__ferryxHighlight"));
+        assert!(script.contains("clearTimeout"));
+        assert!(script.contains("removeChild"));
+    }
+
+    #[test]
+    fn test_clear_highlight_script_contract() {
+        assert!(BROWSER_CLEAR_HIGHLIGHT_SCRIPT.contains("__ferryxHighlight"));
+        assert!(BROWSER_CLEAR_HIGHLIGHT_SCRIPT.contains("clearTimeout"));
+        assert!(BROWSER_CLEAR_HIGHLIGHT_SCRIPT.contains("removeChild"));
+    }
+
+    #[test]
+    fn test_parse_browser_highlight_callback_success() {
+        let raw = r#"{"ok":true,"selector":"button.submit","tagName":"button","rect":{"x":10.0,"y":20.0,"width":100.0,"height":30.0}}"#;
+        let res = parse_browser_highlight_callback(raw, "button.submit").unwrap();
+        assert_eq!(res.selector, "button.submit");
+        assert_eq!(res.tag_name, "button");
+        assert_eq!(res.rect.x, 10.0);
+        assert_eq!(res.rect.width, 100.0);
+    }
+
+    #[test]
+    fn test_parse_browser_highlight_callback_unwraps_quoted_json() {
+        let raw = r##""{\"ok\":true,\"selector\":\"#header\",\"tagName\":\"div\",\"rect\":{\"x\":0.0,\"y\":0.0,\"width\":800.0,\"height\":60.0}}""##;
+        let res = parse_browser_highlight_callback(raw, "#header").unwrap();
+        assert_eq!(res.selector, "#header");
+        assert_eq!(res.tag_name, "div");
+        assert_eq!(res.rect.width, 800.0);
+    }
+
+    #[test]
+    fn test_parse_browser_highlight_callback_not_found() {
+        let raw = r#"{"ok":false,"error":"not_found","message":"no element matched selector"}"#;
+        let err = parse_browser_highlight_callback(raw, ".nonexistent").unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::BrowserAutomationTargetNotFound);
+        assert!(err.message.contains(".nonexistent"));
+    }
+
+    #[test]
+    fn test_parse_browser_highlight_callback_invalid_selector() {
+        let raw = r#"{"ok":false,"error":"invalid_selector","message":"SyntaxError: Failed to execute 'querySelector'"}"#;
+        let err = parse_browser_highlight_callback(raw, ":::bad").unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+        assert!(err.message.contains(":::bad"));
     }
 }

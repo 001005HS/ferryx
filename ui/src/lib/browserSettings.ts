@@ -290,6 +290,13 @@ export function searchUrlFor(engine: BrowserSearchEngine, query: string): string
   }
 }
 
+const HTML_FILE_EXTENSIONS = [".html", ".htm", ".xhtml"];
+
+function hasHtmlFileExtension(rawPath: string): boolean {
+  const clean = rawPath.replace(/[?#].*$/, "").toLowerCase();
+  return HTML_FILE_EXTENSIONS.some((ext) => clean.endsWith(ext));
+}
+
 export function normalizeBrowserAddress(
   input: string,
   settings: BrowserSettingsState = loadBrowserSettings(),
@@ -297,9 +304,43 @@ export function normalizeBrowserAddress(
   const trimmed = input.trim();
   if (!trimmed) return "about:blank";
   if (trimmed === "about:blank" || trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
-  if (trimmed.startsWith("localhost") || trimmed.startsWith("127.0.0.1")) return `http://${trimmed}`;
 
-  const looksLikeHost = trimmed.includes(".") && !/\s/.test(trimmed);
+  // Block dangerous execution schemes from turning into navigations.
+  if (/^(javascript|data|vbscript|blob):/i.test(trimmed)) {
+    return searchUrlFor(settings.searchEngine, trimmed);
+  }
+
+  // Already a file URL: normalize whitespace to standard percent-encoding.
+  if (trimmed.startsWith("file://")) {
+    return trimmed.replace(/\s+/g, "%20");
+  }
+  if (trimmed.startsWith("file:/")) {
+    const stripped = trimmed.slice("file:/".length).replace(/^\/+/, "");
+    return `file:///${stripped}`.replace(/\s+/g, "%20");
+  }
+
+  // Local filesystem path: Unix (/...), home (~/...), or Windows (C:\... or C:/...).
+  const isUnixPath = trimmed.startsWith("/") || trimmed.startsWith("~/");
+  const isWindowsPath = /^[a-zA-Z]:[\\/]/.test(trimmed);
+  if (isUnixPath || isWindowsPath) {
+    if (hasHtmlFileExtension(trimmed)) {
+      if (isWindowsPath) {
+        const normalized = trimmed.replace(/\\/g, "/");
+        return `file:///${encodeURI(normalized).replace(/^\/+/, "")}`;
+      }
+      return `file://${encodeURI(trimmed)}`;
+    }
+    // Non-HTML path or command-like input (e.g. /search query): treat as genuine search.
+    return searchUrlFor(settings.searchEngine, trimmed);
+  }
+
+  if (trimmed.startsWith("localhost") || trimmed.startsWith("127.0.0.1")) return `http://${trimmed}`;
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?(\/.*)?$/.test(trimmed)) return `http://${trimmed}`;
+
+  const looksLikeHost =
+    !trimmed.startsWith("/") &&
+    !trimmed.startsWith("\\") &&
+    /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/.*)?$/.test(trimmed);
   if (looksLikeHost) return `https://${trimmed}`;
   return searchUrlFor(settings.searchEngine, trimmed);
 }
@@ -310,6 +351,15 @@ export function newBrowserTabUrl(settings: BrowserSettingsState = loadBrowserSet
 
 export function isHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url.trim());
+}
+
+export function isFileUrl(url: string): boolean {
+  return /^file:\/\//i.test(url.trim());
+}
+
+export function isNavigableBrowserUrl(url: string): boolean {
+  const trimmed = url.trim();
+  return isHttpUrl(trimmed) || isFileUrl(trimmed) || trimmed === "about:blank";
 }
 
 export function isLocalhostUrl(url: string): boolean {

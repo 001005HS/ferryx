@@ -33,6 +33,15 @@ const browserMocks = vi.hoisted(() => ({
   findBrowser: vi.fn(async () => ({ matchCount: 2, found: true })),
   clearBrowserFind: vi.fn(async () => undefined),
   downloadBrowserUrl: vi.fn(async () => undefined),
+  downloadBrowserUrlWithSession: vi.fn(async () => ({
+    id: "dl-1",
+    url: "https://example.com/files/example.zip",
+    filePath: "/tmp/example.zip",
+    status: "completed" as const,
+    receivedBytes: 1024,
+    createdAtMs: 1000,
+    updatedAtMs: 1000,
+  })),
   openExternalUrl: vi.fn(async () => undefined),
 }));
 
@@ -65,6 +74,7 @@ beforeEach(() => {
   browserMocks.findBrowser.mockClear();
   browserMocks.clearBrowserFind.mockClear();
   browserMocks.downloadBrowserUrl.mockClear();
+  browserMocks.downloadBrowserUrlWithSession.mockClear();
   browserMocks.openExternalUrl.mockClear();
   browserMocks.setBrowserBounds.mockClear();
   browserMocks.setBrowserVisible.mockClear();
@@ -101,6 +111,21 @@ describe("BrowserPane parity affordances", () => {
     expect(onReload).toHaveBeenCalledOnce();
   });
 
+  it("forwards the cache-bypass request from the hard-reload shortcut to onReload", () => {
+    const onReload = vi.fn();
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={onReload} />);
+
+    fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+      detail: { browserId: baseTab.browserId, action: "reload-hard" },
+    }));
+    expect(onReload).toHaveBeenCalledWith({ ignoreCache: true });
+
+    fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+      detail: { browserId: baseTab.browserId, action: "reload" },
+    }));
+    expect(onReload).toHaveBeenLastCalledWith();
+  });
+
   it("navigates an HTTP URL dropped as text/uri-list", () => {
     const onNavigate = vi.fn();
     render(<BrowserPane tab={baseTab} onNavigate={onNavigate} onReload={vi.fn()} />);
@@ -126,7 +151,8 @@ describe("BrowserPane parity affordances", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
     await waitFor(() => {
       expect(dialogMocks.save).toHaveBeenCalled();
-      expect(browserMocks.downloadBrowserUrl).toHaveBeenCalledWith(
+      expect(browserMocks.downloadBrowserUrlWithSession).toHaveBeenCalledWith(
+        "browser-1",
         "https://example.com/files/example.zip",
         "/tmp/example.zip",
       );

@@ -420,16 +420,6 @@ impl MacosCompositorTarget {
         self.layer_ptr.as_ptr()
     }
 
-    pub fn window_backing_scale_factor(&self) -> f64 {
-        if let Some(mtm) = MainThreadMarker::new() {
-            let _ = mtm;
-            let view = unsafe { &*(self.view_ptr.as_ptr() as *const FerryxNativeTerminalView) };
-            view.window_backing_scale_factor()
-        } else {
-            1.0
-        }
-    }
-
     /// Returns the target descriptor for this platform compositor target.
     pub fn descriptor(&self) -> PlatformCompositorDescriptor {
         PlatformCompositorDescriptor {

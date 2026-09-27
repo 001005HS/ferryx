@@ -471,6 +471,20 @@ describe("Remote UI Components", () => {
     expect(screen.getByRole("button", { name: "New terminal tab" })).toBeEnabled();
   });
 
+  it("keeps the hook order stable when a session token is cleared", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", EventWebSocket);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
+    await act(async () => { render(<RemoteApp />); });
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
+    // Disconnect drops the session token, so the same mount renders the login
+    // screen; a hook declared below that early return changes the hook count.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Disconnect" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
+    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal")).toBeNull();
+  });
+
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
     render(<PairingPage onPaired={vi.fn()} />);
 

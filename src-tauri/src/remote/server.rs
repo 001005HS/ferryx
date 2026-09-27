@@ -1,7 +1,7 @@
 #[path = "machine_owner_socket.rs"]
 mod machine_owner_socket;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
-use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
+use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
 use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
 use crate::remote::browser_protocol::ServerMessage;
@@ -896,6 +896,18 @@ async fn get_workspace_state(
             terminal_tabs: Vec::new(),
         });
 
+    if let Some(services) = state.machine_services.as_ref() {
+        for tab in active_context.terminal_tabs.iter_mut() {
+            if tab.activity_state.is_none() {
+                if let Some(session_id) = tab.session_id.as_deref() {
+                    if !session_id.starts_with("standby:") {
+                        tab.activity_state = services.sessions.session_activity_state(session_id);
+                    }
+                }
+            }
+        }
+    }
+
     if state.active_selection.read().is_none() {
         let backend_sessions = state.session_backend.list_sessions().await;
         let mut live_session_id = None;
@@ -933,10 +945,15 @@ async fn get_workspace_state(
         if let Some(session_id) = live_session_id {
             if active_context.session_id.is_none() {
                 active_context.session_id = Some(session_id.clone());
+                let activity_state = state
+                    .machine_services
+                    .as_ref()
+                    .and_then(|ms| ms.sessions.session_activity_state(&session_id));
                 active_context.terminal_tabs = vec![RemoteTerminalTabInfo {
                     id: session_id.clone(),
                     label: "Terminal".to_string(),
                     session_id: Some(session_id),
+                    activity_state,
                     ..Default::default()
                 }];
             }
@@ -946,10 +963,15 @@ async fn get_workspace_state(
                     "Auto-spawned default shell session {session_id} for headless remote gateway"
                 );
                 active_context.session_id = Some(session_id.clone());
+                let activity_state = state
+                    .machine_services
+                    .as_ref()
+                    .and_then(|ms| ms.sessions.session_activity_state(&session_id));
                 active_context.terminal_tabs = vec![RemoteTerminalTabInfo {
                     id: session_id,
                     label: "Terminal".to_string(),
                     session_id: active_context.session_id.clone(),
+                    activity_state,
                     ..Default::default()
                 }];
             }
@@ -994,6 +1016,234 @@ async fn get_workspace_state(
         worktrees,
         sessions,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHistoryQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHistoryResponse {
+    pub session_id: String,
+    pub items: Vec<crate::agent_transcript::ConversationMessage>,
+    pub next_cursor: Option<usize>,
+    pub partial: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Reads a paired host's transcript for a remote session.
+///
+/// Returns `(messages, malformed, truncated)`. `truncated` is true when the host sent only a bounded
+/// tail, which means the returned ordinals are window-relative and the conversation is longer than
+/// what was delivered - the caller must surface that rather than imply the window is the whole
+/// history.
+///
+/// The session's own store entry carries its host, remote home and project path, so no path is ever
+/// taken from the client. Local sessions never reach here: the caller falls through only when the
+/// local lookup found no transcript. Windows hosts return not-found rather than a guessed slug.
+async fn read_remote_conversation(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> {
+    let not_found = || "TRANSCRIPT_NOT_FOUND".to_string();
+    let Some(services) = state.machine_services.clone() else {
+        return Err(not_found());
+    };
+    let store = services.sessions.remote_sessions_store_path().to_path_buf();
+    let raw = crate::ipc::run_blocking(move || {
+        std::fs::read_to_string(store).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+    })
+    .await
+    .map_err(|_| not_found())?;
+    let target = crate::agent_transcript::remote_target_from_store(&raw, session_id).ok_or_else(not_found)?;
+    let host: crate::ssh::SshHost = serde_json::from_value(target.host).map_err(|_| not_found())?;
+    let dir = target.dir;
+
+    // The transcript is megabytes (a real one measured 11 MB over 3730 lines), and the client polls
+    // every few seconds, so the wire must not carry the whole file. `limit` messages at roughly 4 KiB
+    // each is a generous ceiling; the remote side reports the file's true size on the first line and
+    // then sends only the tail, dropping the partial first line so the parser never sees a truncated
+    // record. The reported size is what lets the caller say honestly whether history was cut.
+    let budget = limit.saturating_mul(4096).clamp(64 * 1024, 4 * 1024 * 1024);
+    let script = format!(
+        "d={dir}; f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -n 1); \
+         if [ -n \"$f\" ]; then \
+           n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
+           if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
+         fi",
+        dir = crate::ssh::direct::quote_posix(&dir),
+        budget = budget,
+    );
+    let command = format!("sh -c {}", crate::ssh::direct::quote_posix(&script));
+    let plan = crate::ssh::direct::ssh_plan(&host, command, false).map_err(|_| not_found())?;
+    let bytes = crate::ssh::direct::bounded_output_with_limit(
+        &plan,
+        std::time::Duration::from_secs(15),
+        budget + 4096,
+    )
+    .await
+    .map_err(|_| not_found())?;
+    if bytes.is_empty() {
+        return Err(not_found());
+    }
+
+    let (true_bytes, body) = crate::agent_transcript::split_remote_size_line(&bytes)
+        .ok_or_else(not_found)?;
+    let truncated = true_bytes > budget;
+    if body.is_empty() {
+        return Err(not_found());
+    }
+    let (items, malformed) = crate::agent_transcript::read_conversation_from_bytes(body, limit, before);
+    Ok((items, malformed, truncated))
+}
+
+async fn get_agent_history(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<AgentHistoryQuery>,
+    headers: HeaderMap,
+) -> Result<Json<AgentHistoryResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let token = extract_token(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "UNAUTHORIZED" })),
+        )
+    })?;
+    let _device = state.auth_manager.validate_token(&token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "UNAUTHORIZED" })),
+        )
+    })?;
+
+    if !crate::agent_transcript::is_valid_session_id(&session_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "INVALID_SESSION_ID" })),
+        ));
+    }
+
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let before = query.cursor;
+
+    let target_session_id = session_id.clone();
+    let remote_session_id = session_id.clone();
+    let remote_state = Arc::clone(&state);
+    let cwd = state
+        .session_backend
+        .describe_session(&target_session_id)
+        .await
+        .ok()
+        .and_then(|details| details.worktree_path.map(|p| p.to_string_lossy().into_owned()));
+    let provider_session = state
+        .machine_services
+        .as_ref()
+        .and_then(|ms| ms.sessions.session_provider_session(&target_session_id));
+    let local: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize), String> =
+        crate::ipc::run_blocking(move || {
+            #[cfg(test)]
+            let home_override = state.agent_history_home.read().clone();
+            #[cfg(not(test))]
+            let home_override: Option<PathBuf> = None;
+            let outcome = match home_override.or_else(|| {
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(PathBuf::from)
+            }) {
+                Some(home) => {
+                    let preferred = provider_session.as_ref().and_then(|provider| {
+                        if let Some(path) = provider.transcript_path.as_deref() {
+                            let candidate = std::path::PathBuf::from(path);
+                            if candidate.is_file() {
+                                return Some(candidate);
+                            }
+                        }
+                        crate::agent_transcript::transcript_path_for_session(&home, &provider.id)
+                    });
+                    let transcript = match preferred.or_else(|| {
+                        crate::agent_transcript::transcript_path_for_session(
+                            &home,
+                            &target_session_id,
+                        )
+                    }) {
+                        Some(transcript_path) => Some(transcript_path),
+                        None => cwd.and_then(|cwd_value| {
+                            crate::agent_transcript::latest_transcript_for_cwd(
+                                &home,
+                                &cwd_value,
+                                Some(&target_session_id),
+                            )
+                        }),
+                    };
+                    match transcript {
+                        Some(transcript_path) => {
+                            crate::agent_transcript::read_conversation(&transcript_path, limit, before)
+                        }
+                        None => Err("TRANSCRIPT_NOT_FOUND".to_string()),
+                    }
+                }
+                None => Err("HOME_UNAVAILABLE".to_string()),
+            };
+            Ok(outcome)
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
+            )
+        })?;
+
+    let result: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> =
+        match local {
+            Ok(found) => Ok((found.0, found.1, false)),
+            Err(code) if code == "TRANSCRIPT_NOT_FOUND" => {
+                read_remote_conversation(&remote_state, &remote_session_id, limit, before).await
+            }
+            Err(other) => Err(other),
+        };
+
+    match result {
+        Ok((items, malformed_count, remote_truncated)) => {
+            let mut warnings = Vec::new();
+            if malformed_count > 0 {
+                warnings.push(format!("skipped {malformed_count} malformed lines"));
+            }
+            if remote_truncated {
+                warnings.push(
+                    "older history is not available for paired-host sessions; showing the most recent \
+                     messages"
+                        .to_string(),
+                );
+            }
+            let next_cursor = items
+                .first()
+                .map(|message| message.ordinal)
+                .filter(|ordinal| *ordinal > 0);
+            let partial = next_cursor.is_some();
+            Ok(Json(AgentHistoryResponse {
+                session_id,
+                items,
+                next_cursor,
+                partial,
+                warnings,
+            }))
+        }
+        Err(err_code) if err_code == "TRANSCRIPT_NOT_FOUND" => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "TRANSCRIPT_NOT_FOUND" })),
+        )),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
+        )),
+    }
 }
 
 async fn select_workspace(
@@ -3480,6 +3730,11 @@ fn browser_http_error(err: RemoteBrowserError) -> (StatusCode, String) {
             StatusCode::BAD_REQUEST,
             format!("BROWSER_INVALID_REQUEST: {}", sanitize_public_string(&msg)),
         ),
+        // A typed input refusal is a client-side capability limit, never a server fault.
+        RemoteBrowserError::InputRefused(explanation) => (
+            StatusCode::BAD_REQUEST,
+            format!("UNSUPPORTED: {}", sanitize_public_string(&explanation.reason)),
+        ),
         other => (
             StatusCode::INTERNAL_SERVER_ERROR,
             sanitize_public_string(&other.to_string()),
@@ -3948,6 +4203,7 @@ async fn run_browser_ws_session(
                                 message: sanitize_public_string(&err),
                                 retryable: false,
                                 retry_after_ms: None,
+                                details: None,
                             };
                             let _ = server_msg_tx.send(err_reply).await;
                         }
@@ -3963,6 +4219,7 @@ async fn run_browser_ws_session(
                                 message: sanitize_public_string(&e),
                                 retryable: false,
                                 retry_after_ms: None,
+                                details: None,
                             };
                             let _ = server_msg_tx.send(err_reply).await;
                         }
@@ -4039,7 +4296,14 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                     super::machine_protocol::MACHINE_JSON_MAX_BYTES,
                 )),
         )
-        .route("/api/v1/workspace/state", get(get_workspace_state))
+        .route(
+            "/api/v1/workspace/state",
+            get(get_workspace_state),
+        )
+        .route(
+            "/api/v1/agent-history/{sessionId}",
+            get(get_agent_history),
+        )
         .route(
             "/api/v1/workspace/projects",
             get(super::workspace_api::list)
@@ -6686,5 +6950,471 @@ mod tests {
         let _ = socket.close(None).await;
 
         fixture.cleanup().await;
+    }
+
+    #[test]
+    fn test_a_stored_host_record_deserializes_into_ssh_host() {
+        // The real store writes the host with camelCase enum values (`source: "config"`,
+        // `authMethod: "agent"`). If those stopped matching SshHost's serde names, the remote
+        // branch would fail closed and every remote session would silently 404, so the
+        // conversion is pinned here against the exact shape the store holds.
+        let host_json = serde_json::json!({
+            "authMethod": "agent",
+            "hostname": "100.91.254.71",
+            "id": "ssh-omarchy",
+            "label": "omarchy",
+            "source": "config",
+            "username": "indo"
+        });
+        let host: crate::ssh::SshHost =
+            serde_json::from_value(host_json).expect("stored host must deserialize");
+        assert_eq!(host.hostname, "100.91.254.71");
+        assert_eq!(host.username.as_deref(), Some("indo"));
+        assert_eq!(host.id, "ssh-omarchy");
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_falls_through_to_the_remote_branch_and_degrades_quietly() {
+        // A session the daemon knows, whose cwd has no local transcript, is the case the remote
+        // branch exists for. Without machine services there is no paired-host store to consult, so
+        // the route must answer a quiet 404 rather than a 500: the client renders its empty state,
+        // and a deployment that cannot reach a host must not look like a broken gateway.
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-remote-miss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(home.join(".omo").join("agent").join("sessions"))
+            .expect("create sessions root");
+
+        let ferryx_session_id = "b6a4d1c9-2e77-4f3a-9c58-0d5a7e91b204";
+        let backend = Arc::new(CwdStubBackend {
+            session_id: ferryx_session_id.to_string(),
+            cwd: std::path::PathBuf::from("/nonexistent/paired/host/project"),
+        });
+        let state = Arc::new(RemoteGatewayState::new_with_backend(
+            backend,
+            WorkspaceRegistry::new(),
+        ));
+        *state.agent_history_home.write() = Some(home.clone());
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "agent-remote-miss-device")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!(
+                "http://{addr}/api/v1/agent-history/{ferryx_session_id}?limit=50"
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("request must complete");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "a missing remote transcript is a quiet not-found, never a 500"
+        );
+        let body: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(body["error"].as_str(), Some("TRANSCRIPT_NOT_FOUND"));
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_route_serves_the_conversation_from_a_transcript() {
+        use std::io::Write;
+
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-history-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions = home.join(".omo").join("agent").join("sessions").join("--proj--");
+        std::fs::create_dir_all(&sessions).expect("create sessions dir");
+        let session_id = "01a0d650-db7a-7817-a21b-7be552a81e89";
+        let transcript = sessions.join(format!("2026-09-25T00-00-00-000Z_{session_id}.jsonl"));
+        let mut file = std::fs::File::create(&transcript).expect("create transcript");
+        writeln!(file, r#"{{"type":"session","id":"{session_id}","cwd":"/proj"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","id":"u1","message":{{"role":"user","content":[{{"type":"text","text":"what changed in the parser?"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"custom_message","customType":"x","content":"HIDDEN_DIRECTIVE","display":false}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","id":"a1","message":{{"role":"assistant","content":[{{"type":"text","text":"It now streams line by line."}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(file, "not json at all").unwrap();
+        drop(file);
+
+        let terminal_service = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+        *state.agent_history_home.write() = Some(home.clone());
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "agent-history-device")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ok = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("agent-history request");
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body: serde_json::Value = ok.json().await.expect("json body");
+        let items = body["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 2, "only the two message records are the conversation");
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["text"], "what changed in the parser?");
+        assert_eq!(items[1]["role"], "assistant");
+        assert_eq!(items[1]["text"], "It now streams line by line.");
+        let serialized = body.to_string();
+        assert!(
+            !serialized.contains("HIDDEN_DIRECTIVE"),
+            "display:false records must never reach the client"
+        );
+
+        let traversal = client
+            .get(format!("http://{addr}/api/v1/agent-history/..%2F..%2Fetc"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("traversal request");
+        assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+
+        let missing = client
+            .get(format!("http://{addr}/api/v1/agent-history/00000000-0000-0000-0000-000000000000"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("missing request");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    struct CwdStubBackend {
+        session_id: String,
+        cwd: std::path::PathBuf,
+    }
+
+    impl crate::remote::backend::RemoteSessionBackend for CwdStubBackend {
+        fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+            Box::pin(async move { vec![self.session_id.clone()] })
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            let matches = session_id == self.session_id;
+            let cwd = self.cwd.clone();
+            let id = self.session_id.clone();
+            Box::pin(async move {
+                if !matches {
+                    return Err("unknown session".to_string());
+                }
+                Ok(RemoteSessionDetails {
+                    session_id: id,
+                    workspace_id: Some("ferryx".to_string()),
+                    worktree_label: Some("main".to_string()),
+                    worktree_path: Some(cwd),
+                    running: true,
+                    cols: 80,
+                    rows: 24,
+                })
+            })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _after_sequence: Option<u64>,
+        ) -> futures_util::future::BoxFuture<'a, Result<SessionAttachment, String>> {
+            Box::pin(async { Err("attach unsupported".into()) })
+        }
+        fn write_input<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _data: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn resize<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _cols: u16,
+            _rows: u16,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn signal<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _signal: TerminalSignal,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_resolves_the_transcript_by_session_cwd() {
+        use std::io::Write;
+
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let cwd = "/Volumes/T9-Mac/project/ferryx";
+        let slug = "--Volumes-T9-Mac-project-ferryx--";
+        let dir = home.join(".omo").join("agent").join("sessions").join(slug);
+        std::fs::create_dir_all(&dir).expect("create sessions dir");
+
+        let agent_session_id = "01a0d650-db7a-7817-a21b-7be552a81e89";
+        let path = dir.join(format!("2026-09-25T00-00-00-000Z_{agent_session_id}.jsonl"));
+        let mut file = std::fs::File::create(&path).expect("create transcript");
+        writeln!(file, r#"{{"type":"message","id":"u1","message":{{"role":"user","content":[{{"type":"text","text":"first real prompt"}}]}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"message","id":"a1","message":{{"role":"assistant","content":[{{"type":"text","text":"first real answer"}}]}}}}"#).unwrap();
+        drop(file);
+
+        let ferryx_session_id = "458d2968-1dfc-4ded-bf05-ed0daa652e5d";
+        let backend = Arc::new(CwdStubBackend {
+            session_id: ferryx_session_id.to_string(),
+            cwd: std::path::PathBuf::from(cwd),
+        });
+        let state = Arc::new(RemoteGatewayState::new_with_backend(
+            backend,
+            WorkspaceRegistry::new(),
+        ));
+        *state.agent_history_home.write() = Some(home.clone());
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "agent-cwd-device")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let probed = state
+            .session_backend
+            .describe_session(ferryx_session_id)
+            .await
+            .expect("stub describe_session must succeed");
+        assert_eq!(
+            probed.worktree_path.as_deref(),
+            Some(std::path::Path::new(cwd)),
+            "stub backend must report the session cwd"
+        );
+        let direct = crate::agent_transcript::latest_transcript_for_cwd(
+            &std::path::PathBuf::from(&home),
+            cwd,
+            Some(ferryx_session_id),
+        );
+        assert!(
+            direct.is_some(),
+            "cwd-scoped lookup must find the fixture under {:?}",
+            home
+        );
+
+        let response = client
+            .get(format!("http://{addr}/api/v1/agent-history/{ferryx_session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("agent-history request");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the ferryx session id must resolve through the session cwd"
+        );
+        let body: serde_json::Value = response.json().await.expect("json body");
+        let items = body["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["text"], "first real prompt");
+        assert_eq!(items[1]["role"], "assistant");
+        assert_eq!(items[1]["text"], "first real answer");
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_reports_continuation_pagination() {
+        use std::io::Write;
+
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-pager-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions = home.join(".omo").join("agent").join("sessions").join("--proj--");
+        std::fs::create_dir_all(&sessions).expect("create sessions dir");
+        let session_id = "01a0d650-db7a-7817-a21b-7be552a81e89";
+        let transcript = sessions.join(format!("2026-09-25T00-00-00-000Z_{session_id}.jsonl"));
+        let mut file = std::fs::File::create(&transcript).expect("create transcript");
+        for i in 0..5 {
+            writeln!(
+                file,
+                r#"{{"type":"message","id":"m{i}","message":{{"role":"user","content":[{{"type":"text","text":"message {i}"}}]}}}}"#
+            )
+            .unwrap();
+        }
+        drop(file);
+
+        let terminal_service = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+        *state.agent_history_home.write() = Some(home.clone());
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "agent-pager-device")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let first_body: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("limit", "2")])
+            .send()
+            .await
+            .expect("first agent-history request")
+            .json()
+            .await
+            .expect("first json body");
+        let first_items = first_body["items"].as_array().expect("items array");
+        assert_eq!(first_items.len(), 2, "limit=2 must return the newest two messages");
+        assert_eq!(first_items[0]["ordinal"].as_u64(), Some(3 as u64), "ordinal 3 expected");
+        assert_eq!(first_items[1]["ordinal"].as_u64(), Some(4 as u64), "ordinal 4 expected");
+        assert!(first_body["partial"].as_bool() == Some(true), "older history remains");
+        assert!(
+            first_body["nextCursor"].as_u64() == Some(3 as u64),
+            "nextCursor is the oldest returned ordinal"
+        );
+
+        let second_body: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("limit", "2"), ("cursor", "3")])
+            .send()
+            .await
+            .expect("second agent-history request")
+            .json()
+            .await
+            .expect("second json body");
+        let second_items = second_body["items"].as_array().expect("items array");
+        assert_eq!(second_items.len(), 2, "cursor=3 must return the two older messages");
+        assert_eq!(second_items[0]["ordinal"].as_u64(), Some(1 as u64), "ordinal 1 expected");
+        assert_eq!(second_items[1]["ordinal"].as_u64(), Some(2 as u64), "ordinal 2 expected");
+        assert!(second_body["partial"].as_bool() == Some(true), "older history remains");
+        assert!(
+            second_body["nextCursor"].as_u64() == Some(1 as u64),
+            "nextCursor is the oldest returned ordinal"
+        );
+
+        let final_body: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("limit", "2"), ("cursor", "1")])
+            .send()
+            .await
+            .expect("final agent-history request")
+            .json()
+            .await
+            .expect("final json body");
+        let final_items = final_body["items"].as_array().expect("items array");
+        assert_eq!(final_items.len(), 1, "cursor=1 must return only the oldest message");
+        assert_eq!(final_items[0]["ordinal"].as_u64(), Some(0 as u64), "ordinal 0 expected");
+        assert!(final_body["partial"].as_bool() == Some(false), "oldest message included");
+        assert!(final_body["nextCursor"].is_null(), "no older history means no cursor");
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
