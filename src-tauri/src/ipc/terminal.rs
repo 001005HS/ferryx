@@ -2956,6 +2956,7 @@ mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn p11_reap_keeps_unresolved_cleanup_in_authoritative_and_persisted_state() {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
