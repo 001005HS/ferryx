@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
 import {
+  EmptyWorktreesHint,
   WorktreeList,
   isPrimaryWorktree,
   isSameWorktreePath,
@@ -210,6 +211,25 @@ describe("WorktreeList actions", () => {
 
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByText(/No Git worktrees/i)).toBeNull();
+  });
+
+  it("says so and offers to add one when an empty list is given an empty state", () => {
+    const onCreateWorktree = vi.fn();
+    render(
+      <WorktreeList
+        worktrees={[]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        emptyState={<EmptyWorktreesHint onCreateWorktree={onCreateWorktree} />}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("No worktrees listed yet.");
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree" }));
+    expect(onCreateWorktree).toHaveBeenCalledTimes(1);
   });
 
   it("normalizes ferryx and rorca branch names to main (F11)", () => {

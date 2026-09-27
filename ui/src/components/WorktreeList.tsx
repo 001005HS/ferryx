@@ -1,6 +1,6 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { LockKeyhole, Plus, Trash2 } from "lucide-react";
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
@@ -28,6 +28,8 @@ type WorktreeListProps = {
   readonly onResetAgentState?: (worktree: Worktree) => void;
   readonly sortableWorkspaceId?: string;
   readonly label?: string;
+  /** Rendered when the list is empty. The sidebar passes a hint; other callers keep an empty list silent. */
+  readonly emptyState?: ReactNode;
 };
 
 export type WorktreeRowProps = {
@@ -354,6 +356,7 @@ export function WorktreeList({
   onResetAgentState,
   sortableWorkspaceId,
   label = "Worktrees",
+  emptyState,
 }: WorktreeListProps) {
   const agentsByPath = useMemo(() => {
     const map = new Map<string, ActiveAgent>();
@@ -363,7 +366,13 @@ export function WorktreeList({
     return map;
   }, [agents]);
 
-  if (worktrees.length === 0) return null;
+  if (worktrees.length === 0) {
+    return emptyState ? (
+      <div role="status" className="px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        {emptyState}
+      </div>
+    ) : null;
+  }
 
   return (
     <div role="list" aria-label={label} className="m-0 p-0">
@@ -405,6 +414,24 @@ export function WorktreeList({
         );
       })}
     </div>
+  );
+}
+
+/** Default empty-state hint for a project section: says what is going on and offers the one action. */
+export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWorktree?: () => void }) {
+  return (
+    <span className="flex items-center justify-between gap-2">
+      <span>No worktrees listed yet.</span>
+      {onCreateWorktree ? (
+        <button
+          type="button"
+          onClick={onCreateWorktree}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-foreground hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          Add worktree
+        </button>
+      ) : null}
+    </span>
   );
 }
 
