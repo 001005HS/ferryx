@@ -1706,6 +1706,22 @@ pub(crate) fn handover_restorable_unexported(
     count
 }
 
+/// `owned` as the verdict should see it. An older predecessor counts SSH/remote sessions in
+/// `owned` although only local PTYs travel; those that the successor restores from the durable
+/// snapshot are not casualties. A newer predecessor already reports local PTYs only, so nothing
+/// is credited, and crediting it anyway would zero `owned` and disable the owned check.
+pub(crate) fn handover_effective_owned(
+    owned: usize,
+    listed_unique: usize,
+    restorable: usize,
+) -> usize {
+    if owned >= listed_unique && listed_unique > 0 {
+        owned.saturating_sub(restorable)
+    } else {
+        owned
+    }
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -2495,7 +2511,12 @@ impl DaemonServer {
                     });
                     let restorable =
                         handover_restorable_unexported(&listed, &exported, &durable);
-                    let effective_owned = owned.saturating_sub(restorable);
+                    let listed_unique = listed
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
+                    let effective_owned =
+                        handover_effective_owned(owned, listed_unique, restorable);
                     // A predecessor that reports more than it delivered is the shape of a lossy
                     // handover: the sessions missing from `accepted` are the ones that lose their
                     // PTY owner when the predecessor retires. `owned` is what the predecessor
@@ -2503,6 +2524,7 @@ impl DaemonServer {
                     // checking `accepted` against `offered` alone cannot see those casualties.
                     tracing::info!(
                         owned,
+                        listed_unique,
                         offered,
                         accepted,
                         restorable,
@@ -4822,6 +4844,36 @@ mod tests {
         assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(3), 24, 24).is_ok());
         // 27 owned, 2 restorable => effective_owned = 25 > 24 accepted => abort.
         assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(2), 24, 24).is_err());
+    }
+
+    #[test]
+    fn handover_effective_owned_credits_only_an_old_predecessor() {
+        // Old predecessor: owned=28, listed_unique=28, restorable=3 gives 25,
+        // and handover_delivery_verdict_owned(25, 25, 25).is_ok().
+        let effective_old = super::handover_effective_owned(28, 28, 3);
+        assert_eq!(effective_old, 25);
+        assert!(super::handover_delivery_verdict_owned(effective_old, 25, 25).is_ok());
+
+        // New predecessor: owned=28, listed_unique=60, restorable=32 gives 28.
+        let effective_new = super::handover_effective_owned(28, 60, 32);
+        assert_eq!(effective_new, 28);
+
+        // New predecessor losing a PTY:
+        // handover_delivery_verdict_owned(handover_effective_owned(28, 60, 32), 27, 27).is_err().
+        // This is the production bug. It must be err.
+        assert!(super::handover_delivery_verdict_owned(effective_new, 27, 27).is_err());
+
+        // Old predecessor losing a PTY as well as the SSH sessions:
+        // handover_delivery_verdict_owned(handover_effective_owned(28, 28, 3), 24, 24).is_err().
+        assert!(super::handover_delivery_verdict_owned(
+            super::handover_effective_owned(28, 28, 3),
+            24,
+            24
+        )
+        .is_err());
+
+        // Empty case: owned=0, listed_unique=0, restorable=0 gives 0.
+        assert_eq!(super::handover_effective_owned(0, 0, 0), 0);
     }
 
     use super::*;
