@@ -628,11 +628,11 @@ describe("remoteAppChatFrames", () => {
     expect(userBubbles).toHaveLength(1);
     expect(userBubbles[0].textContent).toContain("what is the diff?");
 
-    // 2. Assistant message bodies count equals the number of assistant PROSE records (2), NOT 7 (which includes 5 toolResults)
+    // 2. Assistant message bodies count equals 1 (the final assistant prose record), earlier prose moves inside the fold
     const assistantBodies = await screen.findAllByTestId("assistant-message-body");
-    expect(assistantBodies).toHaveLength(2);
-    expect(assistantBodies[0].textContent).toContain("Here is the summary of changes.");
-    expect(assistantBodies[1].textContent).toContain("Everything builds cleanly.");
+    expect(assistantBodies).toHaveLength(1);
+    expect(assistantBodies[0].textContent).toContain("Everything builds cleanly.");
+    expect(assistantBodies[0].textContent).not.toContain("Here is the summary of changes.");
 
     // 3. Composition check: none of the 5 toolResult strings appear inside assistant message bodies
     const toolTexts = [
@@ -653,13 +653,22 @@ describe("remoteAppChatFrames", () => {
     expect(toggle).toBeInTheDocument();
     expect(toggle.textContent).toMatch(/Worked for/);
 
-    // 5. Tool text is NOT visible in the DOM before expanding the disclosure
+    // 5. Tool text and folded earlier prose are NOT visible in the DOM before expanding the disclosure
     for (const toolText of toolTexts) {
       expect(screen.queryByText(toolText)).not.toBeInTheDocument();
     }
+    expect(screen.queryByText("Here is the summary of changes.")).not.toBeInTheDocument();
 
-    // 6. Tool text IS retrievable after expanding the disclosure
+    // 6. Tool text and folded earlier prose ARE retrievable after expanding the disclosure
     fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByText("Here is the summary of changes.")).toBeInTheDocument();
+    const workRows = await screen.findAllByTestId("work-row");
+    for (const row of workRows) {
+      if (row.tagName === "BUTTON" && row.getAttribute("aria-expanded") === "false") {
+        fireEvent.click(row);
+      }
+    }
     for (const toolText of toolTexts) {
       expect(await screen.findByText(toolText)).toBeInTheDocument();
     }

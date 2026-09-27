@@ -1,6 +1,14 @@
 import { remoteApiUrl } from "./remoteClient";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
-import type { ToolCallCardProps, ToolStatus } from "./chat/MobileChatComponents";
+import type { ChatWorkItem, ToolCallCardProps, ToolStatus } from "./chat/MobileChatComponents";
+
+/** A tool call made by an assistant record; its result arrives as a later `toolResult` record. */
+export interface ConversationToolCall {
+  id?: string | null;
+  name: string;
+  summary?: string | null;
+  input?: string | null;
+}
 
 export interface ConversationMessage {
   ordinal: number;
@@ -12,6 +20,63 @@ export interface ConversationMessage {
   command?: string | null;
   status?: string | null;
   durationMs?: number | null;
+  thinking?: string | null;
+  toolCalls?: ConversationToolCall[];
+  toolCallId?: string | null;
+  isError?: boolean | null;
+}
+
+function isToolCard(item: ChatWorkItem): item is ToolCallCardProps {
+  return item.kind !== "thinking";
+}
+
+export function parseLegacyToolMarkers(rawText: string): { cleanedProse: string; toolNames: string[] } {
+  const normalized = rawText.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  let inFence = false;
+  const keptLines: string[] = [];
+  const toolNames: string[] = [];
+  const markerRegex = /^→ ([A-Za-z0-9_.:-]+)[ \t]*$/;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (trimmed.length > 3 && trimmed.slice(3).includes("```")) {
+        keptLines.push(line);
+        continue;
+      }
+      inFence = !inFence;
+      keptLines.push(line);
+      continue;
+    }
+    if (inFence) {
+      keptLines.push(line);
+      continue;
+    }
+    const match = markerRegex.exec(line);
+    if (match) {
+      toolNames.push(match[1]);
+    } else {
+      keptLines.push(line);
+    }
+  }
+
+  return {
+    cleanedProse: keptLines.join("\n").trim(),
+    toolNames,
+  };
+}
+
+function cleanAssistantProse(item: ConversationMessage): string {
+  return parseLegacyToolMarkers(item.text ?? "").cleanedProse;
+}
+
+function parseToolResultOutput(text: string): string | undefined {
+  // Emitted by the daemon for empty tool output: src-tauri/src/agent_transcript.rs format!("← {tool} result").
+  if (/^←\s+[A-Za-z0-9_.:-]+\s+result$/.test(text.trim())) {
+    return undefined;
+  }
+  return text;
 }
 
 export function formatWorkedDuration(ms: number): string {
@@ -71,9 +136,6 @@ export function mapAgentConversation(
 ): MobileChatMessageProps[] {
   const sorted = [...items].sort((a, b) => a.ordinal - b.ordinal);
   const mapped: MobileChatMessageProps[] = [];
-  let pendingTools: ToolCallCardProps[] = [];
-  let pendingTimestamps: number[] = [];
-  let pendingToolStartOrdinal: number | null = null;
 
   const prevById = new Map<string, MobileChatMessageProps>();
   if (options?.previousMessages) {
@@ -84,130 +146,296 @@ export function mapAgentConversation(
 
   function resolveDuration(
     assistantId: string,
-    toolCalls: ToolCallCardProps[],
+    toolCalls: ChatWorkItem[],
     timestamps: number[],
+    isLastSpan: boolean,
+    promptTimestamp?: number | null,
   ): string {
-    if (options?.turnDurationsMap?.has(assistantId)) {
-      return options.turnDurationsMap.get(assistantId)!;
+    const turnActive = isLastSpan && options?.activeTurnStartedAt != null;
+    if (!turnActive) {
+      if (options?.turnDurationsMap?.has(assistantId)) {
+        return options.turnDurationsMap.get(assistantId)!;
+      }
+      if (!isLastSpan) {
+        const prevMsg = prevById.get(assistantId);
+        if (prevMsg?.durationLabel) {
+          return prevMsg.durationLabel;
+        }
+      }
     }
-    const prevMsg = prevById.get(assistantId);
-    if (prevMsg?.durationLabel) {
-      return prevMsg.durationLabel;
+    if (isLastSpan && options?.activeTurnStartedAt != null) {
+      const promptMs =
+        promptTimestamp !== null && promptTimestamp !== undefined
+          ? promptTimestamp
+          : null;
+      const activeMs =
+        parseTimestamp(options.activeTurnStartedAt) ?? options.activeTurnStartedAt;
+      const startMs = promptMs !== null ? promptMs : activeMs;
+      return formatWorkedDuration(Math.max(0, Date.now() - startMs));
     }
-    const sumMs = toolCalls.reduce((acc, tc) => acc + (tc.durationMs ?? 0), 0);
-    if (sumMs > 0) {
-      const label = formatWorkedDuration(sumMs);
-      options?.turnDurationsMap?.set(assistantId, label);
-      return label;
-    }
+    let label: string;
+    const sumMs = toolCalls.filter(isToolCard).reduce((acc, tc) => acc + (tc.durationMs ?? 0), 0);
     if (timestamps.length >= 2) {
       const min = Math.min(...timestamps);
       const max = Math.max(...timestamps);
       const diff = Math.max(0, max - min);
-      const label = formatWorkedDuration(diff);
+      label = formatWorkedDuration(diff);
+    } else if (sumMs > 0) {
+      label = formatWorkedDuration(sumMs);
+    } else {
+      label = formatWorkedDuration(0);
+    }
+    // Idle last span: honor the label finalize settled, but never cache a computed one (more records may still arrive).
+    if (!isLastSpan) {
       options?.turnDurationsMap?.set(assistantId, label);
-      return label;
     }
-    if (options?.activeTurnStartedAt) {
-      const elapsed = Math.max(0, Date.now() - options.activeTurnStartedAt);
-      return formatWorkedDuration(elapsed);
-    }
-    const label = formatWorkedDuration(0);
-    options?.turnDurationsMap?.set(assistantId, label);
     return label;
   }
 
+  type SpanGroup = {
+    span: ConversationMessage[];
+    isLastSpan: boolean;
+    userItem?: ConversationMessage;
+  };
+
+  const groups: SpanGroup[] = [];
+  let currentSpan: ConversationMessage[] = [];
+
   for (const item of sorted) {
     if (item.role === "user") {
-      if (pendingTools.length > 0) {
-        const fallbackId = `assistant-${pendingToolStartOrdinal ?? (item.ordinal - 1)}`;
-        const durationLabel = resolveDuration(fallbackId, pendingTools, pendingTimestamps);
-        mapped.push({
-          id: fallbackId,
-          role: "assistant",
-          content: "",
-          toolCalls: pendingTools,
-          durationLabel,
-          timestamp: pendingTimestamps[pendingTimestamps.length - 1] ?? Date.now(),
-        });
-        pendingTools = [];
-        pendingTimestamps = [];
-        pendingToolStartOrdinal = null;
+      groups.push({
+        span: currentSpan,
+        isLastSpan: false,
+        userItem: item,
+      });
+      currentSpan = [];
+    } else {
+      currentSpan.push(item);
+    }
+  }
+  groups.push({
+    span: currentSpan,
+    isLastSpan: true,
+  });
+
+  function processSpan(
+    span: ConversationMessage[],
+    isLastSpan: boolean,
+    promptTimestamp?: number | null,
+  ) {
+    if (span.length === 0) return;
+    const turnActive = isLastSpan && options?.activeTurnStartedAt != null;
+
+    const spanTimestamps: number[] = [];
+    if (promptTimestamp !== null && promptTimestamp !== undefined) {
+      spanTimestamps.push(promptTimestamp);
+    }
+    for (const item of span) {
+      const ts = parseTimestamp(item.timestamp);
+      if (ts !== null) spanTimestamps.push(ts);
+    }
+
+    let lastProseIndex = -1;
+    for (let i = span.length - 1; i >= 0; i--) {
+      const item = span[i];
+      if (item.role === "assistant" && cleanAssistantProse(item).length > 0) {
+        lastProseIndex = i;
+        break;
       }
-      mapped.push({
-        id: `user-${item.ordinal}`,
-        role: "user",
-        content: item.text,
-        timestamp: parseTimestamp(item.timestamp) ?? Date.now(),
-      });
-      continue;
     }
 
-    if (isToolRole(item.role)) {
-      pendingTools.push({
-        toolName: item.toolName || extractToolName(item),
-        command: item.command || undefined,
-        output: item.text,
-        status: (item.status as ToolStatus) || "success",
-        durationMs: item.durationMs ?? undefined,
-        initiallyExpanded: true,
-      });
-      const ts = parseTimestamp(item.timestamp);
-      if (ts !== null) pendingTimestamps.push(ts);
-      if (pendingToolStartOrdinal === null) pendingToolStartOrdinal = item.ordinal;
-      continue;
-    }
+    const workList: ChatWorkItem[] = [];
+    const openCalls = new Map<string, ToolCallCardProps>();
+    const openCardsWithoutId: ToolCallCardProps[] = [];
+    const nonTurnItems: { ordinal: number; message: MobileChatMessageProps }[] = [];
 
-    if (item.role === "assistant") {
-      const hasProse = Boolean(item.text && item.text.trim().length > 0);
-      const ts = parseTimestamp(item.timestamp);
-      if (ts !== null) pendingTimestamps.push(ts);
+    for (let i = 0; i < span.length; i++) {
+      const item = span[i];
 
-      if (!hasProse) {
-        // Drop empty/whitespace assistant records from creating bubbles
+      if (item.role !== "assistant" && !isToolRole(item.role)) {
+        nonTurnItems.push({
+          ordinal: item.ordinal,
+          message: {
+            id: `system-${item.ordinal}`,
+            role: "system",
+            content: item.text,
+            timestamp: parseTimestamp(item.timestamp) ?? Date.now(),
+          },
+        });
         continue;
       }
 
-      const msgId = `assistant-${item.ordinal}`;
-      const hasTools = pendingTools.length > 0;
-      const durationLabel = hasTools
-        ? resolveDuration(msgId, pendingTools, pendingTimestamps)
-        : undefined;
+      if (isToolRole(item.role)) {
+        let matched: ToolCallCardProps | undefined;
+        if (item.toolCallId) {
+          if (openCalls.has(item.toolCallId)) {
+            matched = openCalls.get(item.toolCallId);
+            openCalls.delete(item.toolCallId);
+          } else if (openCalls.size > 0) {
+            const firstKey = openCalls.keys().next().value;
+            if (firstKey !== undefined) {
+              matched = openCalls.get(firstKey);
+              openCalls.delete(firstKey);
+            }
+          } else if (openCardsWithoutId.length > 0) {
+            matched = openCardsWithoutId.shift();
+          }
+        } else {
+          if (openCardsWithoutId.length > 0) {
+            matched = openCardsWithoutId.shift();
+          } else if (openCalls.size > 0) {
+            const firstKey = openCalls.keys().next().value;
+            if (firstKey !== undefined) {
+              matched = openCalls.get(firstKey);
+              openCalls.delete(firstKey);
+            }
+          }
+        }
 
-      mapped.push({
-        id: msgId,
-        role: "assistant",
-        content: item.text,
-        ...(hasTools ? { toolCalls: pendingTools, durationLabel } : {}),
-        timestamp: ts ?? Date.now(),
-      });
-      pendingTools = [];
-      pendingTimestamps = [];
-      pendingToolStartOrdinal = null;
-      continue;
+        if (matched) {
+          matched.output = parseToolResultOutput(item.text);
+          matched.status = item.isError ? "error" : ((item.status as ToolStatus) || "success");
+          matched.durationMs = item.durationMs ?? matched.durationMs;
+          continue;
+        }
+
+        workList.push({
+          workKey: `result-${item.ordinal}`,
+          toolName: item.toolName || extractToolName(item),
+          command: item.command || undefined,
+          output: parseToolResultOutput(item.text),
+          status: item.isError ? "error" : (item.status as ToolStatus) || "success",
+          durationMs: item.durationMs ?? undefined,
+        });
+        continue;
+      }
+
+      if (item.role === "assistant") {
+        if (item.thinking && item.thinking.trim().length > 0) {
+          workList.push({ workKey: `thinking-${item.ordinal}`, kind: "thinking", text: item.thinking });
+        }
+
+        const cleanProse = cleanAssistantProse(item);
+        if (i !== lastProseIndex && cleanProse.length > 0) {
+          workList.push({ workKey: `prose-${item.ordinal}`, kind: "thinking", text: cleanProse, source: "prose" });
+        }
+
+        if (!item.toolCalls?.length) {
+          const { toolNames } = parseLegacyToolMarkers(item.text ?? "");
+          for (let k = 0; k < toolNames.length; k++) {
+            const toolName = toolNames[k];
+            const card: ToolCallCardProps = {
+              workKey: `tool-${item.ordinal}-${k}`,
+              toolName,
+              status: "running",
+            };
+            openCardsWithoutId.push(card);
+            workList.push(card);
+          }
+        } else {
+          for (let k = 0; k < item.toolCalls.length; k++) {
+            const call = item.toolCalls[k];
+            const card: ToolCallCardProps = {
+              workKey: call.id ? `tool-${call.id}` : `tool-${item.ordinal}-${k}`,
+              toolName: call.name,
+              summary: call.summary || undefined,
+              command: call.input || undefined,
+              status: "running",
+            };
+            if (call.id) {
+              openCalls.set(call.id, card);
+            } else {
+              openCardsWithoutId.push(card);
+            }
+            workList.push(card);
+          }
+        }
+        continue;
+      }
+
+
     }
 
-    // Any other role (e.g. system)
-    mapped.push({
-      id: `system-${item.ordinal}`,
-      role: "system",
-      content: item.text,
-      timestamp: parseTimestamp(item.timestamp) ?? Date.now(),
-    });
+    if (!turnActive) {
+      for (const card of openCardsWithoutId) {
+        if (card.status === "running") {
+          card.status = "success";
+        }
+      }
+      for (const card of openCalls.values()) {
+        if (card.status === "running") {
+          card.status = "success";
+        }
+      }
+    }
+
+    let turnMessage: MobileChatMessageProps | undefined;
+
+    if (lastProseIndex !== -1) {
+      const proseRecord = span[lastProseIndex];
+      const assistantId = `assistant-${span[0].ordinal}`;
+      const content = cleanAssistantProse(proseRecord);
+      const hasTools = workList.length > 0;
+      const durationLabel = hasTools
+        ? resolveDuration(assistantId, workList, spanTimestamps, isLastSpan, promptTimestamp)
+        : undefined;
+
+      turnMessage = {
+        id: assistantId,
+        role: "assistant",
+        content,
+        ...(hasTools ? { toolCalls: workList, durationLabel } : {}),
+        timestamp: parseTimestamp(proseRecord.timestamp) ?? spanTimestamps[spanTimestamps.length - 1] ?? Date.now(),
+      };
+    } else if (workList.length > 0) {
+      const assistantId = `assistant-${span[0].ordinal}`;
+      const durationLabel = resolveDuration(assistantId, workList, spanTimestamps, isLastSpan, promptTimestamp);
+      turnMessage = {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        toolCalls: workList,
+        durationLabel,
+        timestamp: spanTimestamps[spanTimestamps.length - 1] ?? parseTimestamp(span[0].timestamp) ?? Date.now(),
+      };
+    }
+
+    if (turnMessage) {
+      const turnOrderOrdinal =
+        lastProseIndex !== -1 ? span[lastProseIndex].ordinal : span[0].ordinal;
+      let inserted = false;
+      for (const nonTurn of nonTurnItems) {
+        if (!inserted && nonTurn.ordinal > turnOrderOrdinal) {
+          mapped.push(turnMessage);
+          inserted = true;
+        }
+        mapped.push(nonTurn.message);
+      }
+      if (!inserted) {
+        mapped.push(turnMessage);
+      }
+    } else {
+      for (const nonTurn of nonTurnItems) {
+        mapped.push(nonTurn.message);
+      }
+    }
   }
 
-  if (pendingTools.length > 0) {
-    const lastOrdinal = pendingToolStartOrdinal ?? sorted[sorted.length - 1].ordinal;
-    const fallbackId = `assistant-${lastOrdinal}`;
-    const durationLabel = resolveDuration(fallbackId, pendingTools, pendingTimestamps);
-    mapped.push({
-      id: fallbackId,
-      role: "assistant",
-      content: "",
-      toolCalls: pendingTools,
-      durationLabel,
-      timestamp: pendingTimestamps[pendingTimestamps.length - 1] ?? Date.now(),
-    });
+  for (let g = 0; g < groups.length; g++) {
+    const group = groups[g];
+    const prevUserItem = g > 0 ? groups[g - 1].userItem : undefined;
+    const promptTimestamp = prevUserItem ? parseTimestamp(prevUserItem.timestamp) : null;
+    if (group.span.length > 0) {
+      processSpan(group.span, group.isLastSpan, promptTimestamp);
+    }
+    if (group.userItem) {
+      mapped.push({
+        id: `user-${group.userItem.ordinal}`,
+        role: "user",
+        content: group.userItem.text,
+        timestamp: parseTimestamp(group.userItem.timestamp) ?? Date.now(),
+      });
+    }
   }
 
   return mapped;
@@ -259,6 +487,19 @@ function toMessage(raw: unknown): ConversationMessage {
     ...(typeof entry.command === "string" ? { command: entry.command } : {}),
     ...(typeof entry.status === "string" ? { status: entry.status } : {}),
     ...(typeof entry.durationMs === "number" ? { durationMs: entry.durationMs } : {}),
+    ...(typeof entry.thinking === "string" ? { thinking: entry.thinking } : {}),
+    ...(Array.isArray(entry.toolCalls) ? { toolCalls: entry.toolCalls.filter(isRecord).map(toToolCall) } : {}),
+    ...(typeof entry.toolCallId === "string" ? { toolCallId: entry.toolCallId } : {}),
+    ...(typeof entry.isError === "boolean" ? { isError: entry.isError } : {}),
+  };
+}
+
+function toToolCall(entry: Record<string, unknown>): ConversationToolCall {
+  return {
+    name: typeof entry.name === "string" ? entry.name : "tool",
+    ...(typeof entry.id === "string" ? { id: entry.id } : {}),
+    ...(typeof entry.summary === "string" ? { summary: entry.summary } : {}),
+    ...(typeof entry.input === "string" ? { input: entry.input } : {}),
   };
 }
 

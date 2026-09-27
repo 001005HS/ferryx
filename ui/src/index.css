@@ -234,3 +234,21 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
     animation-duration: 600ms;
   }
 }
+
+@keyframes work-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .work-shimmer-text {
+    background: linear-gradient(90deg, #838383 0%, #f5f5f5 50%, #838383 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: work-shimmer 1.35s infinite linear;
+  }
+}
+

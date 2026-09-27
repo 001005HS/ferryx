@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, ChevronRight, Copy } from "lucide-react";
@@ -10,8 +10,9 @@ import {
   ApprovalActionCardProps,
   AttachmentList,
   ChatAttachment,
+  ChatWorkItem,
+  ThinkingBlock,
   ToolCallCard,
-  ToolCallCardProps,
 } from "./MobileChatComponents";
 
 export interface MobileChatMessageProps {
@@ -22,7 +23,7 @@ export interface MobileChatMessageProps {
   avatarUrl?: string;
   senderName?: string;
   attachments?: ChatAttachment[];
-  toolCalls?: ToolCallCardProps[];
+  toolCalls?: ChatWorkItem[];
   approvalAction?: ApprovalActionCardProps;
   activityState?: ActivityState;
   durationLabel?: string;
@@ -107,6 +108,51 @@ function formatTimestamp(timestamp?: string | number): string | null {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+interface WorkRowsContainerProps {
+  children: React.ReactNode;
+  count: number;
+}
+
+const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children, count }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const checkOverflow = () => {
+      setOverflows(el.scrollHeight > el.clientHeight);
+    };
+    checkOverflow();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(checkOverflow);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+  }, [children, count]);
+
+  const shouldFade = count > 8 || overflows;
+
+  return (
+    <div
+      ref={containerRef}
+      style={
+        shouldFade
+          ? {
+              maskImage:
+                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
+              WebkitMaskImage:
+                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
+            }
+          : undefined
+      }
+      className="flex flex-col gap-px max-h-64 overflow-y-auto w-full my-1 scrollbar-thin"
+    >
+      {children}
+    </div>
+  );
+};
+
 export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   role,
   content,
@@ -122,6 +168,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   const formattedTime = formatTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
   const [workExpanded, setWorkExpanded] = useState(false);
+  const hasProse = Boolean(content && content.trim().length > 0);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
@@ -185,17 +232,35 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         <button
           type="button"
           data-testid="worked-for-toggle"
+          aria-expanded={workExpanded}
           onClick={() => setWorkExpanded((prev) => !prev)}
           className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-[#838383] hover:text-[#f5f5f5]"
         >
           <ChevronRight
-            className={cn("size-3 transition-transform", workExpanded && "rotate-90")}
+            className={cn(
+              "size-3 transition-transform duration-[180ms] ease-out",
+              workExpanded && "rotate-90"
+            )}
           />
           <span>Worked for {durationLabel}</span>
         </button>
       )}
 
-      {content && (
+      {(!durationLabel || workExpanded) &&
+        toolCalls &&
+        toolCalls.length > 0 && (
+          <WorkRowsContainer count={toolCalls.length}>
+            {toolCalls.map((tc, index) =>
+              tc.kind === "thinking" ? (
+                <ThinkingBlock key={tc.workKey ?? `thinking-${index}`} text={tc.text} source={tc.source} />
+              ) : (
+                <ToolCallCard key={tc.workKey ?? `${tc.toolName}-${index}`} {...tc} />
+              ),
+            )}
+          </WorkRowsContainer>
+        )}
+
+      {hasProse && (
         <div
           data-testid="assistant-message-body"
           className="w-full text-[#f5f5f5] leading-relaxed text-base break-words select-text"
@@ -265,31 +330,19 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         </div>
       )}
 
-      {(!durationLabel || workExpanded) && (
-        <>
-          {toolCalls && toolCalls.length > 0 && (
-            <div className="w-full mt-1.5">
-              {toolCalls.map((tc, index) => (
-                <ToolCallCard key={`${tc.toolName}-${index}`} {...tc} />
-              ))}
-            </div>
-          )}
-
-          {approvalAction && (
-            <div className="w-full mt-1.5">
-              <ApprovalActionCard {...approvalAction} />
-            </div>
-          )}
-
-          {activityState && activityState !== "idle" && (
-            <div className="mt-2">
-              <ActivityIndicator state={activityState} />
-            </div>
-          )}
-        </>
+      {approvalAction && (
+        <div className="w-full mt-1.5">
+          <ApprovalActionCard {...approvalAction} />
+        </div>
       )}
 
-      {metaRow}
+      {activityState && activityState !== "idle" && (
+        <div className="mt-2">
+          <ActivityIndicator state={activityState} />
+        </div>
+      )}
+
+      {hasProse && metaRow}
     </div>
   );
 };

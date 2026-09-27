@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   AttachmentList,
   ToolCallCard,
+  ThinkingBlock,
   ApprovalActionCard,
 } from "./MobileChatComponents";
 import { MobileChatMessage } from "./MobileChatMessage";
@@ -37,21 +38,53 @@ describe("MobileChatComponents & MobileChatMessage", () => {
   });
 
   it("renders ToolCallCard with command and status", () => {
-    const { container } = render(
+    const { rerender } = render(
       <ToolCallCard
         toolName="bash"
         command="cargo test"
         output="test passed"
         status="success"
-        durationMs={450}
-        initiallyExpanded={true}
       />
     );
-    expect(container.textContent).toContain("bash");
-    expect(container.textContent).toContain("cargo test");
-    expect(container.textContent).toContain("test passed");
-    expect(container.textContent).toContain("Completed");
-    expect(container.textContent).toContain("450ms");
+    const row = screen.getByTestId("work-row");
+    expect(row).toHaveTextContent("Ran bash cargo test");
+    expect(row.textContent).not.toContain("Failed");
+    expect(screen.queryByTestId("tool-call-input")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-row-output")).not.toBeInTheDocument();
+
+    fireEvent.click(row);
+    expect(screen.getByTestId("tool-call-input")).toHaveTextContent("cargo test");
+    expect(screen.getByTestId("work-row-output")).toHaveTextContent("test passed");
+
+    rerender(
+      <ToolCallCard
+        toolName="bash"
+        command="cargo test"
+        output="test failed"
+        status="error"
+      />
+    );
+    const errorRow = screen.getByTestId("work-row");
+    expect(errorRow.textContent).toContain("Failed");
+  });
+
+  it("renders a work-only assistant message with no message-copy-button", () => {
+    render(
+      <MobileChatMessage
+        id="msg-work-only"
+        role="assistant"
+        content=""
+        toolCalls={[
+          {
+            toolName: "bash",
+            status: "success",
+            command: "git status",
+          },
+        ]}
+      />
+    );
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();
   });
 
   it("renders ApprovalActionCard", () => {
@@ -129,13 +162,34 @@ describe("MobileChatComponents & MobileChatMessage", () => {
 
     const toggle = screen.getByTestId("worked-for-toggle");
     expect(toggle).toHaveTextContent("Worked for 2m");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     const body = screen.getByTestId("assistant-message-body");
     expect(body).toHaveTextContent("Summarized the diff.");
     expect(container.textContent).not.toContain("test_runner");
 
     fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(container.textContent).toContain("test_runner");
     expect(screen.getByTestId("assistant-message-body")).toHaveTextContent("Summarized the diff.");
+
+    const workRow = screen.getByTestId("work-row");
+    expect(workRow.compareDocumentPosition(body)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders thinking collapsed to its first line and expands on click", () => {
+    render(
+      <MobileChatMessage
+        id="msg-think"
+        role="assistant"
+        content="Done."
+        toolCalls={[{ kind: "thinking", text: "First idea\nsecond line" }]}
+      />
+    );
+    const block = screen.getByTestId("thinking-block");
+    expect(block).toHaveTextContent("First idea");
+    expect(block).not.toHaveTextContent("second line");
+    fireEvent.click(screen.getByRole("button", { name: /Thinking/ }));
+    expect(block).toHaveTextContent("second line");
   });
 
   it("renders assistant turn with tool calls and body without durationLabel as always visible", () => {
@@ -215,7 +269,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(codeEl?.className).toContain("text-[#4bb8f0]");
   });
 
-  it("renders the message with empty content without throwing and shows timestamp/copy", () => {
+  it("renders the message with empty content without throwing and shows no copy button for empty assistant turn", () => {
     render(
       <MobileChatMessage
         id="msg-empty"
@@ -226,7 +280,169 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     );
 
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
-    expect(screen.getByTestId("message-copy-button")).toBeInTheDocument();
+    expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();
+  });
+
+  it("renders no prose body for whitespace-only assistant content", () => {
+    render(
+      <MobileChatMessage
+        id="msg-whitespace"
+        role="assistant"
+        content={"   \n"}
+        toolCalls={[
+          {
+            toolName: "bash",
+            status: "success",
+            command: "git status",
+          },
+        ]}
+      />
+    );
+
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+  });
+
+  it("renders a ToolCallCard with no command and no output as a non-interactive work-row without aria-expanded", () => {
+    render(<ToolCallCard toolName="bash" />);
+    const row = screen.getByTestId("work-row");
+    expect(row.tagName).toBe("DIV");
+    expect(row).not.toHaveAttribute("aria-expanded");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("renders a ToolCallCard with output as a button, and clicking it shows the output", () => {
+    render(<ToolCallCard toolName="read" output="file contents here" />);
+    const button = screen.getByRole("button");
+    expect(button).toHaveAttribute("data-testid", "work-row");
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("work-row-output")).not.toBeInTheDocument();
+
+    fireEvent.click(button);
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("work-row-output")).toHaveTextContent("file contents here");
+  });
+
+  it("makes the expanded scroll regions keyboard focusable", () => {
+    render(
+      <ToolCallCard
+        toolName="bash"
+        command="cargo test"
+        output="test passed"
+        status="success"
+      />
+    );
+
+    fireEvent.click(screen.getByTestId("work-row"));
+    expect(screen.getByTestId("tool-call-input")).toHaveAttribute("tabindex", "0");
+    expect(screen.getByTestId("work-row-output")).toHaveAttribute("tabindex", "0");
+  });
+
+  it("renders two running cards with shimmer and sr-only Running text on both", () => {
+    render(
+      <>
+        <ToolCallCard toolName="bash" status="running" />
+        <ToolCallCard toolName="eval" status="running" />
+      </>
+    );
+    const rows = screen.getAllByTestId("work-row");
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.textContent).toContain("Running");
+      expect(row.querySelector(".work-shimmer-text")).toBeInTheDocument();
+    }
+  });
+
+  it("empty thinking text is non-interactive; non-empty text expands", () => {
+    const { rerender } = render(<ThinkingBlock text="" />);
+    const emptyRow = screen.getByTestId("work-row");
+    expect(emptyRow.tagName).toBe("DIV");
+    expect(emptyRow).not.toHaveAttribute("aria-expanded");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+
+    const multilineText = "First line of thought\nSecond line of thought";
+    rerender(<ThinkingBlock text={multilineText} />);
+    const button = screen.getByRole("button", { name: /Thinking/ });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("thinking-block").querySelector("p")).not.toBeInTheDocument();
+
+    fireEvent.click(button);
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    const expandedRegion = screen.getByTestId("thinking-block").querySelector("p");
+    expect(expandedRegion).toBeInTheDocument();
+    expect(expandedRegion).toHaveTextContent("First line of thought");
+    expect(expandedRegion).toHaveTextContent("Second line of thought");
+  });
+
+  it("renders approval card after prose body in document order when work fold is collapsed", () => {
+    render(
+      <MobileChatMessage
+        id="msg-approval-order"
+        role="assistant"
+        content="Please review."
+        durationLabel="1m"
+        toolCalls={[
+          {
+            toolName: "bash",
+            status: "running",
+            command: "rm -rf dist",
+          },
+        ]}
+        approvalAction={{
+          title: "Action Required",
+          description: "Proceed with running rm -rf dist?",
+          onAccept: vi.fn(),
+          onDecline: vi.fn(),
+        }}
+      />
+    );
+
+    expect(screen.queryByTestId("work-row")).not.toBeInTheDocument();
+    expect(screen.getByText("Proceed with running rm -rf dist?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+
+    const body = screen.getByTestId("assistant-message-body");
+    const approval = screen.getByText("Action Required");
+    expect(body.compareDocumentPosition(approval) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders prose thinking item without Thinking prefix and plain thinking item with Thinking", () => {
+    render(
+      <MobileChatMessage
+        id="msg-think-source"
+        role="assistant"
+        content="Done."
+        toolCalls={[
+          {
+            kind: "thinking",
+            text: "Checked the file.\nSecond line",
+            source: "prose",
+          },
+          {
+            kind: "thinking",
+            text: "Plain thinking thought.",
+          },
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId("work-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).not.toContain("Thinking");
+    expect(rows[0].textContent).toContain("Checked the file.");
+    expect(rows[1].textContent).toContain("Thinking");
+  });
+
+  it("prose row exposes its preview text as the accessible name instead of an aria-label", () => {
+    render(
+      <ThinkingBlock
+        text={"First line of prose\nSecond line of prose"}
+        source="prose"
+      />
+    );
+
+    const button = screen.getByRole("button");
+    expect(button).not.toHaveAttribute("aria-label");
+    expect(button).toHaveAccessibleName(/First line of prose/);
   });
 });
 
