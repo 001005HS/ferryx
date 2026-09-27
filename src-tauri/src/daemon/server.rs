@@ -1688,6 +1688,24 @@ pub(crate) fn handover_delivery_verdict_owned(
     ))
 }
 
+/// Sessions the predecessor listed but did not export, whose durable remote snapshot lets the
+/// successor restore them after commit. An older predecessor counts these in `owned` even
+/// though only local PTYs travel over the handover socket.
+pub(crate) fn handover_restorable_unexported(
+    listed: &[String],
+    exported: &std::collections::HashSet<String>,
+    durable: &std::collections::HashSet<String>,
+) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+    for id in listed {
+        if seen.insert(id) && !exported.contains(id) && durable.contains(id) {
+            count += 1;
+        }
+    }
+    count
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -2359,10 +2377,24 @@ impl DaemonServer {
 
             #[cfg(unix)]
             if crate::daemon::handover::is_v5_ownership_transfer_enabled() {
+                let listed = match legacy_peer.list_sessions().await {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Failed to list predecessor sessions before handover transfer"
+                        );
+                        Vec::new()
+                    }
+                };
+
                 let transfer_id = uuid::Uuid::new_v4().to_string();
-                let handover_socket_path = crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
-                let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(&handover_socket_path)
-                    .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
+                let handover_socket_path =
+                    crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
+                let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
+                    &handover_socket_path,
+                )
+                .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
 
                 let accept_handle = tokio::task::spawn_blocking(move || {
                     let (stream, _creds) = listener.accept().map_err(|error| (error, 0usize))?;
@@ -2384,7 +2416,9 @@ impl DaemonServer {
                 let transfer_outcome: Result<usize, String> = async {
                     let transfer_resp = legacy_peer
                         .send_request(&DaemonRequest::TransferSessions {
-                            handover_socket_path: handover_socket_path.to_string_lossy().into_owned(),
+                            handover_socket_path: handover_socket_path
+                                .to_string_lossy()
+                                .into_owned(),
                         })
                         .await
                         .map_err(|e| format!("TransferSessions request failed: {e}"))?;
@@ -2406,16 +2440,81 @@ impl DaemonServer {
                             )
                         })?;
                     let accepted = exports.len();
+                    let exported: std::collections::HashSet<String> =
+                        exports.iter().map(|e| e.session_id.clone()).collect();
+                    let durable_path = self.remote_sessions_path.clone();
+                    let durable = crate::ipc::run_blocking(move || {
+                        if !durable_path.exists() {
+                            return Ok(std::collections::HashSet::new());
+                        }
+                        let raw = match std::fs::read_to_string(&durable_path) {
+                            Ok(r) => r,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    path = %durable_path.display(),
+                                    "Failed to read durable remote sessions snapshot for \
+                                     handover accounting"
+                                );
+                                return Ok(std::collections::HashSet::new());
+                            }
+                        };
+                        let value: serde_json::Value = match serde_json::from_str(&raw) {
+                            Ok(v) => v,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    path = %durable_path.display(),
+                                    "Failed to parse durable remote sessions snapshot for \
+                                     handover accounting"
+                                );
+                                return Ok(std::collections::HashSet::new());
+                            }
+                        };
+                        let set = value["remoteSessions"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|record| {
+                                        record["descriptor"]["backendSessionId"]
+                                            .as_str()
+                                            .map(ToString::to_string)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Ok::<_, crate::ipc::error::IpcError>(set)
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            %error,
+                            "Durable remote snapshot read failed during handover accounting"
+                        );
+                        std::collections::HashSet::new()
+                    });
+                    let restorable =
+                        handover_restorable_unexported(&listed, &exported, &durable);
+                    let effective_owned = owned.saturating_sub(restorable);
                     // A predecessor that reports more than it delivered is the shape of a lossy
                     // handover: the sessions missing from `accepted` are the ones that lose their
                     // PTY owner when the predecessor retires. `owned` is what the predecessor
                     // actually held; `offered` already excludes sessions it failed to export, so
                     // checking `accepted` against `offered` alone cannot see those casualties.
-                    tracing::info!(owned, offered, accepted, "Received session exports over the handover socket");
-                    if let Err(reason) = handover_delivery_verdict_owned(owned, offered, accepted) {
-                        // Do NOT proceed. Committing here retires the predecessor, and every session it
-                        // offered but did not deliver dies with the PTY master fd it still owned.
-                        // Aborting leaves the predecessor serving all of them instead.
+                    tracing::info!(
+                        owned,
+                        offered,
+                        accepted,
+                        restorable,
+                        effective_owned,
+                        "Received session exports over the handover socket"
+                    );
+                    if let Err(reason) =
+                        handover_delivery_verdict_owned(effective_owned, offered, accepted)
+                    {
+                        // Do NOT proceed. Committing here retires the predecessor, and every
+                        // session it offered but did not deliver dies with the PTY master fd it
+                        // still owned. Aborting leaves the predecessor serving all of them instead.
                         return Err(reason);
                     }
 
@@ -4654,6 +4753,75 @@ mod tests {
         // fall back to the delivery check rather than aborting every handover with such a peer.
         assert!(super::handover_delivery_verdict_owned(0, 18, 18).is_ok());
         assert!(super::handover_delivery_verdict_owned(0, 18, 17).is_err());
+    }
+
+    #[test]
+    fn handover_restorable_unexported_credits_only_listed_unexported_durable_ids() {
+        use std::collections::HashSet;
+
+        let listed = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+        ];
+        let exported: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let durable: HashSet<String> = ["s1", "s2", "x"].iter().map(|s| s.to_string()).collect();
+
+        // listed [a,b,c,s1,s2], exported {a,b,c}, durable {s1,s2,x} gives 2.
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable),
+            2
+        );
+
+        // An id that is exported AND durable is not counted.
+        let mut durable_with_a = durable.clone();
+        durable_with_a.insert("a".to_string());
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable_with_a),
+            2
+        );
+
+        // A durable id the predecessor did not list is not counted (x).
+        assert_eq!(
+            super::handover_restorable_unexported(&listed, &exported, &durable),
+            2
+        );
+
+        // A listed, unexported id that is not durable is not counted.
+        let listed_with_unknown = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+            "not_durable".to_string(),
+        ];
+        assert_eq!(
+            super::handover_restorable_unexported(&listed_with_unknown, &exported, &durable),
+            2
+        );
+
+        // A duplicate in listed counts once.
+        let listed_with_dups = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "s1".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+        ];
+        assert_eq!(
+            super::handover_restorable_unexported(&listed_with_dups, &exported, &durable),
+            2
+        );
+
+        // Integration of the numbers:
+        // 27 owned, 3 restorable => effective_owned = 24.
+        assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(3), 24, 24).is_ok());
+        // 27 owned, 2 restorable => effective_owned = 25 > 24 accepted => abort.
+        assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(2), 24, 24).is_err());
     }
 
     use super::*;
