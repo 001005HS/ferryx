@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, ChevronRight, Copy } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, Copy } from "lucide-react";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import {
   ActivityIndicator,
@@ -40,7 +41,7 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
   return (
     <code
       className={cn(
-        "bg-[#1a1b1b] text-[#4bb8f0] px-1.5 py-0.5 rounded font-mono text-xs",
+        "bg-chat-surface-raised text-chat-code px-1.5 py-0.5 rounded font-mono text-xs",
         className
       )}
       {...props}
@@ -52,32 +53,55 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
 
 const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const match = /language-(\w+)/.exec(className || "");
   const language = match ? match[1] : "";
   const codeText = String(children).replace(/\n$/, "");
 
-  const handleCopy = (e: React.MouseEvent) => {
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(codeText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    const ok = await copyTextToClipboard(codeText);
+    setCopied(ok);
+    if (!ok) setCopyFailed(true);
+    timerRef.current = setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 2000);
   };
 
   return (
-    <div className="relative group my-2.5 rounded-xl border border-[#191919] bg-[#0a0a0a]/90 overflow-hidden shadow-xs">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#111111]/60 border-b border-[#191919] text-[11px] font-mono text-[#838383]">
-        <span className="uppercase text-[10px] tracking-wider text-[#818181] font-semibold">
+    <div className="relative group my-2.5 rounded-xl border border-chat-border bg-chat-screen/90 overflow-hidden shadow-xs">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-chat-surface/60 border-b border-chat-border text-[11px] font-mono text-chat-foreground-secondary">
+        <span className="uppercase text-[10px] tracking-wider text-chat-foreground-tertiary font-semibold">
           {language || "code"}
         </span>
         <button
           type="button"
           onClick={handleCopy}
-          className="flex items-center gap-1 text-[10px] text-[#838383] hover:text-[#f5f5f5] transition-colors p-1 rounded hover:bg-white/5"
+          aria-label={copied ? "Copied" : copyFailed ? "Copy failed" : "Copy code"}
+          className="flex items-center gap-1 text-[10px] text-chat-foreground-secondary hover:text-chat-foreground transition-colors p-1 rounded hover:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           {copied ? (
             <>
-              <Check className="w-3 h-3 text-emerald-400" />
-              <span className="text-emerald-400 font-sans">Copied</span>
+              <Check className="w-3 h-3 text-status-success" />
+              <span className="text-status-success font-sans">Copied</span>
+            </>
+          ) : copyFailed ? (
+            <>
+              <AlertCircle aria-hidden="true" className="w-3 h-3 text-chat-danger" />
+              <span className="text-chat-danger font-sans">Failed</span>
             </>
           ) : (
             <>
@@ -87,7 +111,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
           )}
         </button>
       </div>
-      <div className="overflow-x-auto p-3 text-[11px] font-mono text-[#f5f5f5] leading-relaxed scrollbar-thin scrollbar-thumb-[#191919]">
+      <div className="overflow-x-auto p-3 text-[11px] font-mono text-chat-foreground leading-relaxed scrollbar-sleek">
         <pre className="!bg-transparent !p-0 !m-0">
           <code className={className} {...props}>
             {children}
@@ -146,7 +170,7 @@ const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children, count }
             }
           : undefined
       }
-      className="flex flex-col gap-px max-h-64 overflow-y-auto w-full my-1 scrollbar-thin"
+      className="flex flex-col gap-px max-h-64 overflow-y-auto w-full my-1 scrollbar-sleek"
     >
       {children}
     </div>
@@ -167,19 +191,36 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   const isUser = role === "user";
   const formattedTime = formatTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workExpanded, setWorkExpanded] = useState(false);
   const hasProse = Boolean(content && content.trim().length > 0);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    const ok = await copyTextToClipboard(content);
+    setCopied(ok);
+    if (!ok) setCopyFailed(true);
+    timerRef.current = setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 2000);
   };
 
   const metaRow = (
     <div className="flex items-center gap-1.5">
       {formattedTime && (
-        <span className="font-mono text-xs text-[#838383] select-none">
+        <span className="font-mono text-xs text-chat-foreground-secondary select-none">
           {formattedTime}
         </span>
       )}
@@ -187,11 +228,14 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         type="button"
         data-testid="message-copy-button"
         onClick={handleCopy}
-        title="Copy message"
-        className="p-0.5 rounded text-[#818181] hover:text-[#838383] hover:bg-[#1a1b1b]/60 transition-colors"
+        title={copyFailed ? "Copy unavailable" : "Copy message"}
+        aria-label={copyFailed ? "Copy failed" : "Copy message"}
+        className="p-0.5 rounded text-chat-foreground-tertiary hover:text-chat-foreground-secondary hover:bg-chat-surface-raised/60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         {copied ? (
-          <Check className="size-3 text-emerald-400" />
+          <Check aria-hidden="true" className="size-3 text-status-success" />
+        ) : copyFailed ? (
+          <AlertCircle aria-hidden="true" className="size-3 text-chat-danger" />
         ) : (
           <Copy className="size-3" />
         )}
@@ -209,7 +253,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
       >
         <div
           data-testid="user-message-bubble"
-          className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-[#161616] text-[#f5f5f5] leading-relaxed text-base break-words select-text"
+          className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{content}</p>
           {attachments.length > 0 && (
@@ -234,11 +278,11 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
           data-testid="worked-for-toggle"
           aria-expanded={workExpanded}
           onClick={() => setWorkExpanded((prev) => !prev)}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-[#838383] hover:text-[#f5f5f5]"
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-chat-foreground-secondary hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <ChevronRight
             className={cn(
-              "size-3 transition-transform duration-[180ms] ease-out",
+              "size-3 transition-transform duration-200 ease-out",
               workExpanded && "rotate-90"
             )}
           />
@@ -263,7 +307,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
       {hasProse && (
         <div
           data-testid="assistant-message-body"
-          className="w-full text-[#f5f5f5] leading-relaxed text-base break-words select-text"
+          className="w-full text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -309,13 +353,13 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[#346bf1] hover:text-[#346bf1]/80 underline underline-offset-2"
+                  className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
                 >
                   {children}
                 </a>
               ),
               blockquote: ({ children }) => (
-                <blockquote className="border-l-2 border-[#191919] pl-2.5 my-2 text-[#838383] italic">
+                <blockquote className="border-l-2 border-chat-border pl-2.5 my-2 text-chat-foreground-secondary italic">
                   {children}
                 </blockquote>
               ),

@@ -585,3 +585,18 @@ export async function fetchAgentConversation(args: {
   }
   throw new ConversationFetchError("REQUEST_FAILED", `Agent history request failed with status ${response.status}`);
 }
+
+export const MAX_RETAINED_CHAT_MESSAGES = 400;
+
+export function capRetainedMessages(
+  messages: readonly MobileChatMessageProps[],
+  max: number = MAX_RETAINED_CHAT_MESSAGES,
+): { messages: MobileChatMessageProps[]; truncated: boolean } {
+  if (messages.length <= max) {
+    return { messages: [...messages], truncated: false };
+  }
+  return {
+    messages: messages.slice(messages.length - max),
+    truncated: true,
+  };
+}

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { mapAgentConversation, type ConversationMessage } from "./agentConversation";
+import {
+  mapAgentConversation,
+  type ConversationMessage,
+  capRetainedMessages,
+  MAX_RETAINED_CHAT_MESSAGES,
+} from "./agentConversation";
+import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ToolCallCardProps } from "./chat/MobileChatComponents";
 
 describe("mapAgentConversation tool calls and thinking", () => {
@@ -772,5 +778,34 @@ describe("mapAgentConversation tool calls and thinking", () => {
     }
     expect(new Set(firstWorkKeys).size).toBe(firstWorkKeys.length);
     expect(new Set(secondWorkKeys).size).toBe(secondWorkKeys.length);
+  });
+
+  it("caps retained messages to the newest MAX_RETAINED_CHAT_MESSAGES when over the limit and preserves order", () => {
+    const totalCount = MAX_RETAINED_CHAT_MESSAGES + 25;
+    const overMessages: MobileChatMessageProps[] = Array.from({ length: totalCount }, (_, i) => ({
+      id: `msg-${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Message ${i}`,
+    }));
+
+    const overResult = capRetainedMessages(overMessages);
+    expect(overResult.truncated).toBe(true);
+    expect(overResult.messages).toHaveLength(MAX_RETAINED_CHAT_MESSAGES);
+    expect(overResult.messages[0].id).toBe("msg-25");
+    expect(overResult.messages[MAX_RETAINED_CHAT_MESSAGES - 1].id).toBe(`msg-${totalCount - 1}`);
+    expect(overResult.messages).toEqual(overMessages.slice(25));
+
+    const exactMessages: MobileChatMessageProps[] = Array.from(
+      { length: MAX_RETAINED_CHAT_MESSAGES },
+      (_, i) => ({
+        id: `exact-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `Exact message ${i}`,
+      }),
+    );
+    const exactResult = capRetainedMessages(exactMessages);
+    expect(exactResult.truncated).toBe(false);
+    expect(exactResult.messages).toHaveLength(MAX_RETAINED_CHAT_MESSAGES);
+    expect(exactResult.messages).toEqual(exactMessages);
   });
 });

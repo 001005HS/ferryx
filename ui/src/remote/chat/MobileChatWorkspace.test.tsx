@@ -162,29 +162,17 @@ describe("MobileChatWorkspace", () => {
     expect(textarea.value).toBe("");
   });
 
-  it("6. quick action chip clicks trigger action or populate input", () => {
+  it("6. renders composer when quickActions are absent", () => {
     const handleSend = vi.fn();
-    const handleSelectQuickAction = vi.fn();
-
-    const quickActions = [
-      {
-        id: "git-diff",
-        label: "Git Diff",
-        prompt: "Show the current git diff",
-      },
-    ];
 
     render(
       <MobileChatWorkspace
         messages={[]}
         onSendMessage={handleSend}
-        quickActions={quickActions}
-        onSelectQuickAction={handleSelectQuickAction}
       />
     );
 
     expect(screen.getByTestId("chat-composer-textarea")).toBeInTheDocument();
-    expect(screen.queryByText("Git Diff")).not.toBeInTheDocument();
     expect(screen.queryByTestId("mobile-chat-quick-actions")).not.toBeInTheDocument();
   });
 
@@ -320,5 +308,21 @@ describe("MobileChatWorkspace", () => {
         followHostSize: true,
       })
     );
+  });
+
+  it("13. closed drawer carries inert attribute and aria-hidden true", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        sessionId="sess-closed-1"
+        token="tok-closed-1"
+        transportUrl="http://localhost:3000"
+      />
+    );
+
+    const drawer = screen.getByTestId("terminal-drawer");
+    expect(drawer).toHaveAttribute("aria-hidden", "true");
+    expect(drawer).toHaveAttribute("inert");
   });
 });

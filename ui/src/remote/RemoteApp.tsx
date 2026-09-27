@@ -25,7 +25,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
-import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration } from "./agentConversation";
+import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration, capRetainedMessages } from "./agentConversation";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
@@ -356,6 +356,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     };
   }, [revokeChatAttachmentUrls]);
   const lastConversationSessionRef = useRef<string | null>(null);
+  const retentionTruncatedRef = useRef(false);
   const [chatIsRunning, setChatIsRunning] = useState(false);
   const [chatWarnings, setChatWarnings] = useState<readonly string[]>([]);
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
@@ -1127,6 +1128,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
     if (lastConversationSessionRef.current !== effectiveSessionId) {
       lastConversationSessionRef.current = effectiveSessionId;
+      retentionTruncatedRef.current = false;
       revokeChatAttachmentUrls();
       setChatMessages([]);
       setChatWarnings([]);
@@ -1137,6 +1139,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
     const poll = async () => {
       if (cancelled || fetching) return;
+      if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
       try {
         const page = await fetchAgentConversation({
@@ -1147,7 +1150,12 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           signal: controller.signal,
         });
         if (cancelled) return;
-        setChatWarnings(page.warnings);
+        const retentionWarning = "Older messages are hidden to keep the phone view responsive.";
+        setChatWarnings(
+          retentionTruncatedRef.current && !page.warnings.includes(retentionWarning)
+            ? [...page.warnings, retentionWarning]
+            : [...page.warnings],
+        );
         setChatMessages((prev) => {
           const mapped = mapAgentConversation(page.items, {
             activeTurnStartedAt: assistantTurnStartedAtRef.current,
@@ -1167,19 +1175,37 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           const fresh = mapped.filter((message) =>
             !(message.role === "user" && optimisticText.has(message.content)),
           );
-          return [...kept, ...fresh].sort((a, b) => {
+          const sorted = [...kept, ...fresh].sort((a, b) => {
             const aMatch = /^(?:user|assistant)-(\d+)$/.exec(a.id);
             const bMatch = /^(?:user|assistant)-(\d+)$/.exec(b.id);
             const aOrdinal = aMatch === null ? Number.POSITIVE_INFINITY : Number(aMatch[1]);
             const bOrdinal = bMatch === null ? Number.POSITIVE_INFINITY : Number(bMatch[1]);
             return aOrdinal - bOrdinal;
           });
+          const { messages: capped, truncated } = capRetainedMessages(sorted);
+          if (truncated) {
+            retentionTruncatedRef.current = true;
+            const hiddenWarning = "Older messages are hidden to keep the phone view responsive.";
+            setChatWarnings((prev) =>
+              prev.includes(hiddenWarning) ? prev : [...prev, hiddenWarning],
+            );
+          }
+          return capped;
         });
       } catch (error) {
         if (cancelled) return;
         if (error instanceof ConversationFetchError && error.code === "TRANSCRIPT_NOT_FOUND") {
           revokeChatAttachmentUrls();
+          retentionTruncatedRef.current = false;
+          setChatWarnings((prev) =>
+            prev.filter((warning) => warning !== "Older messages are hidden to keep the phone view responsive."),
+          );
           setChatMessages([]);
+        } else {
+          const pollFailedWarning = "Transcript refresh failed; showing the last known state.";
+          setChatWarnings((prev) =>
+            prev.includes(pollFailedWarning) ? prev : [...prev, pollFailedWarning],
+          );
         }
       } finally {
         fetching = false;
@@ -1274,20 +1300,20 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
-      <header className="flex h-7 shrink-0 items-center justify-between border-b border-[#191919] bg-[#111111] px-2.5">
+      <header className="flex h-7 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
           type="button"
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-[#141414] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-[#346bf1] text-[10px] font-bold text-[#ffffff]" aria-hidden="true">F</span>
+          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-chat-primary text-[10px] font-bold text-chat-primary-foreground" aria-hidden="true">F</span>
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
-          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-[#838383]" aria-label="Current desktop context">{contextName(model.context)}</span>
-          <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-[#838383] transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
+          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-chat-foreground-secondary" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-chat-foreground-secondary transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
           <span
@@ -1297,7 +1323,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             title={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
             className={`hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none sm:flex ${
               transport.type === "relay"
-                ? "bg-status-idle/15 text-[#838383]"
+                ? "bg-status-idle/15 text-chat-foreground-secondary"
                 : "bg-status-success/15 text-status-success"
             }`}
           >
@@ -1340,15 +1366,15 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             </button>
           ) : null}
 
-          <div className="hidden items-center gap-1 border-l border-[#191919]/40 pl-2 sm:flex">
+          <div className="hidden items-center gap-1 border-l border-chat-border/40 pl-2 sm:flex">
             <button
               type="button"
               data-testid="remote-view-mode-chat"
               onClick={() => setViewMode("chat")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "chat"
-                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
-                  : "text-[#838383] hover:text-[#f5f5f5]"
+                  ? "bg-chat-surface-raised text-chat-foreground"
+                  : "text-chat-foreground-secondary hover:text-chat-foreground"
               }`}
             >
               Chat
@@ -1359,8 +1385,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               onClick={() => setViewMode("terminal")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "terminal"
-                  ? "bg-[#1a1b1b] text-[#f5f5f5]"
-                  : "text-[#838383] hover:text-[#f5f5f5]"
+                  ? "bg-chat-surface-raised text-chat-foreground"
+                  : "text-chat-foreground-secondary hover:text-chat-foreground"
               }`}
             >
               Terminal
@@ -1384,7 +1410,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         creationError={creationError}
       >
         {viewMode === "chat" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
             <MobileChatWorkspace
               headerTitle={
                 model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
@@ -1400,6 +1426,19 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
                 // Attachments are blocked by the mobile composer until remote upload is supported.
                 if (attachments.length > 0) return;
+                const ws = terminalSocketRef.current;
+                const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
+
+                if (!isSocketOpen) {
+                  const socketClosedWarning =
+                    "Message not sent: the terminal connection is closed. Reopen the terminal and try again.";
+                  setChatWarnings((prev) =>
+                    prev.includes(socketClosedWarning) ? prev : [...prev, socketClosedWarning],
+                  );
+                  console.warn("Terminal WebSocket is not open for input");
+                  return;
+                }
+
                 const userMsg: MobileChatMessageProps = {
                   id: `user-${Date.now()}`,
                   role: "user",
@@ -1413,23 +1452,31 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
                 if (effectiveSessionId && token) {
                   const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
-                  const ws = terminalSocketRef.current;
-                  if (ws && ws.readyState === 1 /* OPEN */) {
-                    ws.send(commandPayload);
-                  } else {
-                    console.warn("Terminal WebSocket is not open for input");
-                  }
+                  ws!.send(commandPayload);
                 }
               }}
               onStopExecution={() => {
+                const ws = terminalSocketRef.current;
+                const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
                 if (effectiveSessionId && token) {
-                  const interruptPayload = "\x03";
-                  const ws = terminalSocketRef.current;
-                  if (ws && ws.readyState === 1 /* OPEN */) {
-                    ws.send(interruptPayload);
+                  if (isSocketOpen) {
+                    const interruptPayload = "\x03";
+                    ws!.send(interruptPayload);
                   } else {
+                    const interruptFailedWarning =
+                      "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
+                    setChatWarnings((prev) =>
+                      prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
+                    );
                     console.warn("Terminal WebSocket is not open for interrupt");
                   }
+                } else if (!isSocketOpen) {
+                  const interruptFailedWarning =
+                    "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
+                  setChatWarnings((prev) =>
+                    prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
+                  );
+                  console.warn("Terminal WebSocket is not open for interrupt");
                 }
                 finalizeAssistantTurnDuration();
                 setChatIsRunning(false);
@@ -1459,10 +1506,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             />
           </div>
         ) : viewMode === "browser" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a] overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
             {browserSessions.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-1 bg-[#111111] border-b border-[#191919] text-xs overflow-x-auto shrink-0">
-                <span className="text-[#838383] text-[11px] shrink-0">Browsers:</span>
+              <div className="flex items-center gap-1.5 px-2 py-1 bg-chat-surface border-b border-chat-border text-xs overflow-x-auto shrink-0">
+                <span className="text-chat-foreground-secondary text-[11px] shrink-0">Browsers:</span>
                 {browserSessions.map((s) => (
                   <button
                     key={s.browserId}
@@ -1471,8 +1518,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     onClick={() => setSelectedBrowserId(s.browserId)}
                     className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
                       selectedBrowserId === s.browserId
-                        ? "bg-[#346bf1] text-[#ffffff]"
-                        : "bg-[#1a1b1b] text-[#838383] hover:bg-[#141414] hover:text-[#f5f5f5]"
+                        ? "bg-chat-primary text-white"
+                        : "bg-chat-surface-raised text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
                     }`}
                   >
                     {s.title || s.browserId}
@@ -1481,7 +1528,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                 <button
                   type="button"
                   onClick={() => void fetchBrowserSessions()}
-                  className="ml-auto text-[11px] text-[#838383] hover:text-[#f5f5f5]"
+                  className="ml-auto text-[11px] text-chat-foreground-secondary hover:text-chat-foreground"
                 >
                   Refresh
                 </button>
@@ -1496,14 +1543,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                 onBack={() => setViewMode("terminal")}
               />
             ) : (
-              <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-[#838383] gap-3">
+              <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-chat-foreground-secondary gap-3">
                 <p className="text-sm font-medium">No active browser session selected</p>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
                     placeholder="Enter browser ID..."
                     data-testid="remote-manual-browser-id-input"
-                    className="px-2 py-1 text-xs rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] font-mono"
+                    className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
                         setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
@@ -1514,7 +1561,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     type="button"
                     data-testid="remote-fetch-browsers-btn"
                     onClick={() => void fetchBrowserSessions()}
-                    className="px-2.5 py-1 text-xs rounded bg-[#1a1b1b] text-[#f5f5f5] font-medium hover:bg-[#141414] transition"
+                    className="px-2.5 py-1 text-xs rounded bg-chat-surface-raised text-chat-foreground font-medium hover:bg-chat-surface-hover transition"
                   >
                     Refresh Sessions
                   </button>

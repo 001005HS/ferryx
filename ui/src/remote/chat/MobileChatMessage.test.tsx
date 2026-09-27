@@ -9,10 +9,12 @@ import {
   ApprovalActionCard,
 } from "./MobileChatComponents";
 import { MobileChatMessage } from "./MobileChatMessage";
+import * as clipboardModule from "../../lib/clipboard";
 
 describe("MobileChatComponents & MobileChatMessage", () => {
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
   });
 
   it("renders ActivityIndicator for different states", () => {
@@ -114,7 +116,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(container.textContent).toContain("Please run the tests");
     const bubble = container.querySelector("[data-testid='user-message-bubble']");
     expect(bubble).not.toBeNull();
-    expect(bubble?.className).toContain("bg-[#161616]");
+    expect(bubble?.className).toContain("bg-chat-user-bubble");
     expect(bubble?.parentElement?.className).toContain("ml-auto");
   });
 
@@ -226,12 +228,8 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(screen.getByTestId("message-copy-button")).toBeInTheDocument();
   });
 
-  it("copies message content via the copy button", () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText },
-      configurable: true,
-    });
+  it("copies message content via the copy button", async () => {
+    const copySpy = vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(true);
     render(
       <MobileChatMessage
         id="msg-8"
@@ -240,7 +238,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
       />
     );
     fireEvent.click(screen.getByTestId("message-copy-button"));
-    expect(writeText).toHaveBeenCalledWith("Copy me");
+    expect(copySpy).toHaveBeenCalledWith("Copy me");
   });
 
   it("renders fenced code block with CodeBlock component even if single line", () => {
@@ -266,7 +264,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     );
     expect(container.textContent).toContain("cargo check");
     const codeEl = container.querySelector("code");
-    expect(codeEl?.className).toContain("text-[#4bb8f0]");
+    expect(codeEl?.className).toContain("text-chat-code");
   });
 
   it("renders the message with empty content without throwing and shows no copy button for empty assistant turn", () => {
@@ -444,5 +442,79 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(button).not.toHaveAttribute("aria-label");
     expect(button).toHaveAccessibleName(/First line of prose/);
   });
-});
 
+  it("every button rendered by MobileChatMessage has a non-empty accessible name (aria-label or text content)", () => {
+    render(
+      <MobileChatMessage
+        id="msg-accessible-buttons"
+        role="assistant"
+        content={"Here is a code block:\n```ts\nconst a = 1;\n```"}
+        durationLabel="1m"
+        toolCalls={[
+          {
+            toolName: "bash",
+            command: "git status",
+            output: "clean",
+            status: "success",
+          },
+          {
+            kind: "thinking",
+            text: "Thinking line 1\nThinking line 2",
+          },
+        ]}
+        approvalAction={{
+          title: "Approve changes",
+          description: "Do you approve?",
+          onAccept: vi.fn(),
+          onDecline: vi.fn(),
+        }}
+      />
+    );
+
+    const buttons = screen.getAllByRole("button");
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const btn of buttons) {
+      const ariaLabel = btn.getAttribute("aria-label");
+      const text = btn.textContent?.trim();
+      const accessibleName = ariaLabel || text || "";
+      expect(accessibleName.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("when the clipboard write resolves false the copy button shows the failure affordance instead of the 'Copied' check", async () => {
+    vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(false);
+    render(
+      <MobileChatMessage
+        id="msg-copy-failure"
+        role="assistant"
+        content="Test copy failure"
+      />
+    );
+
+    const copyBtn = screen.getByTestId("message-copy-button");
+    fireEvent.click(copyBtn);
+
+    const failed = await screen.findByTitle("Copy unavailable");
+    expect(failed).toBeInTheDocument();
+    expect(failed).toHaveAttribute("aria-label", "Copy failed");
+    expect(screen.queryByText("Copied")).not.toBeInTheDocument();
+  });
+
+  it("when code-block copy resolves false the button displays a readable failure label and has aria-label 'Copy failed'", async () => {
+    vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(false);
+    render(
+      <MobileChatMessage
+        id="msg-code-copy-failure"
+        role="assistant"
+        content={"```ts\nconst x = 42;\n```"}
+      />
+    );
+
+    const codeCopyBtn = screen.getByRole("button", { name: "Copy code" });
+    fireEvent.click(codeCopyBtn);
+
+    const failedLabel = await screen.findByText("Failed");
+    expect(failedLabel).toBeInTheDocument();
+    expect(codeCopyBtn).toHaveAttribute("aria-label", "Copy failed");
+  });
+});

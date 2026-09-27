@@ -111,6 +111,41 @@
   --status-success-rgb: 134 239 172;
   --status-idle: #737373;
   --status-idle-rgb: 115 115 115;
+
+  /* Mobile chat surface (remote phone client; T3 Code parity palette) */
+  --chat-screen: #0a0a0a;
+  --chat-screen-rgb: 10 10 10;
+  --chat-surface: #111111;
+  --chat-surface-rgb: 17 17 17;
+  --chat-surface-raised: #1a1b1b;
+  --chat-surface-raised-rgb: 26 27 27;
+  --chat-surface-hover: #141414;
+  --chat-surface-hover-rgb: 20 20 20;
+  --chat-user-bubble: #161616;
+  --chat-user-bubble-rgb: 22 22 22;
+  --chat-foreground: #f5f5f5;
+  --chat-foreground-rgb: 245 245 245;
+  --chat-foreground-secondary: #838383;
+  --chat-foreground-secondary-rgb: 131 131 131;
+  --chat-foreground-tertiary: #818181;
+  --chat-foreground-tertiary-rgb: 129 129 129;
+  --chat-border: #191919;
+  --chat-border-rgb: 25 25 25;
+  --chat-primary: #346bf1;
+  --chat-primary-rgb: 52 107 241;
+  --chat-primary-foreground: #ffffff;
+  --chat-primary-foreground-rgb: 255 255 255;
+  --chat-link: #4a7cf5;
+  --chat-link-rgb: 74 124 245;
+  --chat-code: #4bb8f0;
+  --chat-code-rgb: 75 184 240;
+  --chat-danger: #ff6467;
+  --chat-danger-rgb: 255 100 103;
+
+  --chat-row-hover: rgba(255, 255, 255, 0.04);
+  --chat-composer-panel: rgba(10, 10, 10, 0.92);
+  --chat-composer-surface: rgba(26, 27, 27, 0.9);
+  --chat-composer-border: rgba(25, 25, 25, 0.8);
 }
 
 html,
@@ -166,6 +201,10 @@ body {
   .scrollbar-sleek::-webkit-scrollbar-thumb {
     border-radius: 999px;
     background: rgb(var(--muted-foreground-rgb) / 0.28);
+  }
+
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
   }
 
   .terminal-host {

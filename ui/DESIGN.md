@@ -61,6 +61,30 @@ Sidebar scale, smallest to largest:
 | `text-[13px]` | Workspace switcher row |
 Branch names and other git identifiers always render `font-mono`.
 
+### Mobile chat surface tokens
+These are the remote phone client's only palette. Chat components reference the **Tailwind semantic name**, never a hex value. Chat surfaces may additionally use the shared semantic tokens --status-working / --status-warning / --status-success (agent status), --ring (focus rings) and --terminal (the embedded terminal viewport); no other colour value may appear in a chat component.
+
+| Token | Tailwind utility | Use |
+|---|---|---|
+| `--chat-screen` `#0a0a0a` | `bg-chat-screen` / `text-chat-screen` | Root viewport/screen background |
+| `--chat-surface` `#111111` | `bg-chat-surface` / `text-chat-surface` | Default surface / card background |
+| `--chat-surface-raised` `#1a1b1b` | `bg-chat-surface-raised` | Elevated card / modal background |
+| `--chat-surface-hover` `#141414` | `bg-chat-surface-hover` | Hover state for interactive chat rows/buttons |
+| `--chat-user-bubble` `#161616` | `bg-chat-user-bubble` | User message bubble fill |
+| `--chat-foreground` `#f5f5f5` | `text-chat-foreground` | Primary text and headings |
+| `--chat-foreground-secondary` `#838383` | `text-chat-foreground-secondary` | Secondary labels, timestamps, metadata |
+| `--chat-foreground-tertiary` `#818181` | `text-chat-foreground-tertiary` | Tertiary/de-emphasized text and icons |
+| `--chat-border` `#191919` | `border-chat-border` | Standard card and separator border |
+| `--chat-primary` `#346bf1` | `bg-chat-primary` / `text-chat-primary` | Primary action buttons and focus accents |
+| `--chat-primary-foreground` `#ffffff` | `text-chat-primary-foreground` | Text and icons on `chat-primary` fills (white on #346bf1 = 4.65:1) |
+| `--chat-link` `#4a7cf5` | `text-chat-link` | Markdown links in chat prose (5.18:1 on the chat screen; the primary blue is 4.26:1 and fails AA at text size) |
+| `--chat-code` `#4bb8f0` | `text-chat-code` / `bg-chat-code` | Code block highlighting and inline code text |
+| `--chat-danger` `#ff6467` | `text-chat-danger` / `bg-chat-danger` | Destructive actions, errors, cancellation |
+| `--chat-row-hover` `rgba(255,255,255,0.04)` | `bg-chat-row-hover` | Subtle white-alpha hover on chat rows |
+| `--chat-composer-panel` `rgba(10,10,10,0.92)` | `bg-chat-composer-panel` | Backdrop panel for mobile composer |
+| `--chat-composer-surface` `rgba(26,27,27,0.9)` | `bg-chat-composer-surface` | Translucent input editor surface |
+| `--chat-composer-border` `rgba(25,25,25,0.8)` | `border-chat-composer-border` | Translucent composer border |
+
 ## 2. Primitives
 
 Reusable, already shipped. Compose these; don't hand-roll equivalents.
@@ -192,12 +216,20 @@ Rules:
   Failed connections stop the spinner and show the structured error plus a small retry button.
   Ready workspaces with no tabs retain the existing empty state.
 - No hover state may change anything other than color/opacity on a non-interactive element.
+- The chat terminal drawer opens and closes with a composited opacity/transform transition only (its 45vh/85vh height change is instant, never a layout animation); the chat's looping motion (animate-ping, animate-spin) carries motion-reduce:animate-none; the scroll-to-latest affordance has no looping animation; no hover transform on non-interactive elements.
 
 ## 6. Responsive Behavior
 
 The sidebar is user-resizable and persisted (`orca.sidebar.width`), clamped 220-420px, default 236px.
 Every row must survive the 220px floor: names `truncate`, badges and action icons `shrink-0`,
 metadata lines truncate rather than wrap.
+
+### Mobile chat surface constants
+- Drawer heights: `45vh` collapsed / `85vh` expanded.
+- Control dimensions: `2.25rem` (`size-9`) composer controls and `1.75rem` (`size-7`) header controls.
+- Corner radii: `20px` user-bubble radius, `12px` card radius.
+- Typography: `16px` composer editor font (prevents iOS zoom-on-focus).
+- Safe-area rule: `ui/index.html` sets `viewport-fit=cover` and the composer uses `.pb-safe`, because `env(safe-area-inset-*)` is 0 without `viewport-fit=cover`.
 
 ## 7. Accessibility Constraints
 
@@ -208,6 +240,7 @@ metadata lines truncate rather than wrap.
 - All icon-only controls carry `aria-label` (enforced by `IconButton`).
 - Focus is visible on every control: `focus-visible:ring-1 focus-visible:ring-ring`.
 - Nested action buttons must not be DOM descendants of the row button (no nested interactives).
+- Every icon-only chat control carries `aria-label`, every chat control carries `focus-visible:ring-1 focus-visible:ring-ring`, the running activity indicator is `role="status"`, a closed terminal drawer is inert and `aria-hidden`.
 
 ## 8. Accepted Debt
 
@@ -216,3 +249,4 @@ metadata lines truncate rather than wrap.
   per project). Deferred; the collapsed chevron communicates "expandable" without promising a number.
 - Worktree rows re-derive display names from branch strings on each render. Cheap at realistic
   worktree counts; revisit only if a project exceeds a few hundred worktrees.
+- **Mobile composer attachment staging:** The mobile composer can stage attachments but sending is blocked until remote upload exists, so the composer states the block in a polite status region.

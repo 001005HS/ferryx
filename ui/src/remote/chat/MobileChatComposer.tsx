@@ -8,15 +8,9 @@ import {
   FileText,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import type { ChatAttachment } from "./MobileChatComponents";
 
-export interface ChatAttachment {
-  readonly id: string;
-  readonly name: string;
-  readonly size: number;
-  readonly type: string;
-  readonly url?: string;
-  readonly file?: File;
-}
+export type { ChatAttachment };
 
 export interface MobileChatComposerHandle {
   clearDraft: () => void;
@@ -29,8 +23,6 @@ export interface MobileChatComposerProps {
   readonly isRunning?: boolean;
   readonly disabled?: boolean;
   readonly placeholder?: string;
-  readonly quickActions?: readonly unknown[];
-  readonly onSelectQuickAction?: (action: any) => void;
   readonly className?: string;
 }
 
@@ -49,9 +41,7 @@ export const MobileChatComposer = React.forwardRef<
   onClearDraft,
   isRunning = false,
   disabled = false,
-  placeholder = "Ask the repo agent, or run a command...",
-  quickActions: _quickActions,
-  onSelectQuickAction: _onSelectQuickAction,
+  placeholder = "Ask the agent…",
   className,
 }, ref) => {
   const [text, setText] = useState("");
@@ -163,10 +153,9 @@ export const MobileChatComposer = React.forwardRef<
         return {
           id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           name: file.name,
-          size: file.size,
-          type: file.type,
+          size: formatFileSize(file.size),
+          type: file.type || "file",
           url,
-          file,
         };
       });
 
@@ -197,14 +186,16 @@ export const MobileChatComposer = React.forwardRef<
     <div
       data-testid="mobile-chat-composer"
       className={cn(
-        "flex flex-col w-full bg-[rgba(10,10,10,0.92)] border-t border-[rgba(25,25,25,0.8)] rounded-2xl backdrop-blur-md pb-safe select-none",
+        "flex flex-col w-full bg-chat-composer-panel border-t border-chat-composer-border rounded-2xl backdrop-blur-md pb-safe select-none",
         className
       )}
     >
       {attachments.length > 0 && (
         <div
           data-testid="chat-composer-attachments-blocked"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-destructive bg-destructive/10 border-b border-destructive/20"
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-danger bg-chat-danger/10 border-b border-chat-danger/20"
         >
           <span>Attachments aren&apos;t supported from the phone yet. Remove them to send.</span>
         </div>
@@ -212,7 +203,7 @@ export const MobileChatComposer = React.forwardRef<
       {attachments.length > 0 && (
         <div
           data-testid="chat-composer-attachments"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 overflow-x-auto no-scrollbar"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 overflow-x-auto scrollbar-none"
         >
           {attachments.map((att) => {
             const isImage = att.type.startsWith("image/") && att.url;
@@ -220,32 +211,33 @@ export const MobileChatComposer = React.forwardRef<
               <div
                 key={att.id}
                 data-testid={`attachment-preview-${att.id}`}
-                className="group relative flex items-center gap-2 rounded-lg bg-[#111111]/90 border border-border/80 p-1.5 pr-2.5 shrink-0 max-w-[200px] shadow-sm"
+                className="group relative flex items-center gap-2 rounded-lg bg-chat-surface/90 border border-chat-border p-1.5 pr-2.5 shrink-0 max-w-[200px] shadow-sm"
               >
                 {isImage ? (
                   <img
                     src={att.url}
                     alt={att.name}
-                    className="size-8 rounded object-cover bg-[#0a0a0a] border border-border/60"
+                    className="size-8 rounded object-cover bg-chat-screen border border-chat-border/60"
                   />
                 ) : (
-                  <div className="flex size-8 items-center justify-center rounded bg-secondary/40 text-muted-foreground border border-border/50">
+                  <div className="flex size-8 items-center justify-center rounded bg-chat-surface-raised/60 text-chat-foreground-secondary border border-chat-border/50">
                     <FileText className="size-4" />
                   </div>
                 )}
                 <div className="flex flex-col min-w-0 flex-1">
-                  <span className="truncate text-xs font-mono font-medium text-foreground">
+                  <span className="truncate text-xs font-mono font-medium text-chat-foreground">
                     {att.name}
                   </span>
-                  <span className="text-[10px] font-mono text-muted-foreground">
-                    {formatFileSize(att.size)}
+                  <span className="text-[10px] font-mono text-chat-foreground-secondary">
+                    {att.size}
                   </span>
                 </div>
                 <button
                   type="button"
                   data-testid={`remove-attachment-${att.id}`}
+                  aria-label={`Remove attachment ${att.name}`}
                   onClick={() => handleRemoveAttachment(att.id)}
-                  className="size-5 rounded-md bg-secondary/60 hover:bg-destructive/80 hover:text-destructive-foreground text-muted-foreground flex items-center justify-center shrink-0 transition-colors"
+                  className="size-5 rounded-md bg-chat-surface-raised hover:bg-chat-danger/80 hover:text-chat-screen text-chat-foreground-secondary flex items-center justify-center shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   <X className="size-3" />
                 </button>
@@ -268,14 +260,15 @@ export const MobileChatComposer = React.forwardRef<
         <button
           type="button"
           data-testid="attach-file-button"
+          aria-label="Attach file"
           disabled={disabled}
           onClick={() => fileInputRef.current?.click()}
-          className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground active:bg-secondary/60 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+          className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <Plus className="size-4" />
         </button>
 
-        <div className="relative flex min-h-[38px] flex-1 items-center rounded-xl bg-[rgba(26,27,27,0.9)] border border-[rgba(25,25,25,0.8)] focus-within:border-[#346bf1]/80 focus-within:ring-1 focus-within:ring-[#346bf1]/30 px-[14px] pb-2.5 pt-1.5 transition-all">
+        <div className="relative flex min-h-[38px] flex-1 items-center rounded-xl bg-chat-composer-surface border border-chat-composer-border focus-within:border-chat-primary/80 focus-within:ring-1 focus-within:ring-chat-primary/30 px-[14px] pb-2.5 pt-1.5 transition-all">
           <textarea
             ref={textareaRef}
             data-testid="chat-composer-textarea"
@@ -283,11 +276,15 @@ export const MobileChatComposer = React.forwardRef<
             value={text}
             disabled={disabled}
             placeholder={placeholder}
+            aria-label="Ask the repo agent"
+            enterKeyHint="send"
+            autoComplete="off"
+            inputMode="text"
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            className="w-full resize-none bg-transparent font-sans text-sm text-[#f5f5f5] placeholder:text-[#838383] focus:outline-none max-h-36 overflow-y-auto leading-relaxed scrollbar-thin"
+            className="w-full resize-none bg-transparent font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
           />
         </div>
 
@@ -297,7 +294,7 @@ export const MobileChatComposer = React.forwardRef<
           disabled
           aria-label="Voice input is not supported"
           title="Voice input is not supported"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground active:bg-secondary/60 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+          className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <Mic className="size-4" />
         </button>
@@ -306,8 +303,9 @@ export const MobileChatComposer = React.forwardRef<
           <button
             type="button"
             data-testid="stop-button"
+            aria-label="Stop the running turn"
             onClick={onStop}
-            className="flex size-9 shrink-0 items-center justify-center rounded-full bg-red-600 text-white shadow-sm hover:bg-red-700 active:bg-red-800 active:scale-95 transition-all"
+            className="flex size-9 shrink-0 items-center justify-center rounded-full bg-chat-danger text-chat-foreground shadow-sm hover:bg-chat-danger/90 active:bg-chat-danger/80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <Square className="size-4 fill-current" />
           </button>
@@ -315,13 +313,14 @@ export const MobileChatComposer = React.forwardRef<
           <button
             type="button"
             data-testid="send-button"
+            aria-label="Send message"
             disabled={!canSubmit}
             onClick={handleSend}
             className={cn(
-              "flex size-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm",
+              "flex size-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               canSubmit
-                ? "bg-[#346bf1] text-[#ffffff] hover:brightness-110 active:brightness-95"
-                : "bg-secondary/40 text-muted-foreground/50 border border-border/40 cursor-not-allowed"
+                ? "bg-chat-primary text-chat-primary-foreground hover:brightness-110 active:brightness-95"
+                : "bg-chat-surface-raised/40 text-chat-foreground-secondary/50 border border-chat-border/40 cursor-not-allowed"
             )}
           >
             <ArrowUp className="size-4 stroke-[2.5]" />

@@ -1,43 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
-import {
-  MobileChatQuickActions,
-  DEFAULT_QUICK_ACTIONS,
-} from "./MobileChatQuickActions";
 import { MobileChatComposer } from "./MobileChatComposer";
-
-describe("MobileChatQuickActions", () => {
-  beforeEach(cleanup);
-  afterEach(cleanup);
-
-  it("renders default quick action chips", () => {
-    const onSelectAction = vi.fn();
-    render(<MobileChatQuickActions onSelectAction={onSelectAction} />);
-
-    expect(screen.getByTestId("mobile-chat-quick-actions")).toBeInTheDocument();
-    expect(screen.getByText("Git status")).toBeInTheDocument();
-    expect(screen.getByText("Run tests")).toBeInTheDocument();
-    expect(screen.getByText("Explain")).toBeInTheDocument();
-    expect(screen.getByText("Review diff")).toBeInTheDocument();
-    expect(screen.getByText("Stop")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("Git status"));
-    expect(onSelectAction).toHaveBeenCalledWith(DEFAULT_QUICK_ACTIONS[0]);
-  });
-
-  it("handles isRunning state on Stop action chip", () => {
-    const onSelectAction = vi.fn();
-    render(
-      <MobileChatQuickActions
-        onSelectAction={onSelectAction}
-        isRunning={true}
-      />
-    );
-    const stopButton = screen.getByTestId("quick-action-stop");
-    expect(stopButton.className).toContain("text-[#ff6467]");
-  });
-});
 
 describe("MobileChatComposer", () => {
   beforeEach(cleanup);
@@ -50,7 +14,7 @@ describe("MobileChatComposer", () => {
     const textarea = screen.getByTestId("chat-composer-textarea");
     expect(textarea).toHaveAttribute(
       "placeholder",
-      "Ask the repo agent, or run a command..."
+      "Ask the agent…"
     );
     expect(screen.getByTestId("attach-file-button")).toBeInTheDocument();
     expect(screen.getByTestId("mic-button")).toBeDisabled();

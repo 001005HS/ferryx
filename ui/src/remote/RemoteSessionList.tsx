@@ -463,7 +463,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         disabled={pending !== null}
         onClick={() => selectPane(tab)}
         className={`flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
-          paneActive ? "bg-white/[0.06] text-[#fafafa]" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]"
+          paneActive ? "bg-white/[0.06] text-foreground" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]"
         }`}
       >
         {logo ? (
@@ -633,7 +633,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                                 focusTerminalInput();
                               }}
                               className={`flex min-h-[28px] w-full items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
-                                active ? "bg-[#3f3f3f] text-[#fafafa]" : "text-worktree-sidebar-foreground hover:bg-white/[0.04]"
+                                active ? "bg-worktree-sidebar-accent text-foreground" : "text-worktree-sidebar-foreground hover:bg-white/[0.04]"
                               }`}
                             >
                               {loading ? (
