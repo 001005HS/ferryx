@@ -649,12 +649,12 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
 
 #[cfg(target_os = "windows")]
 fn write_native_clipboard(text: &str) -> bool {
-    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::{GlobalFree, HWND};
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{
-        GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
     };
 
     if text.is_empty() {

@@ -21,7 +21,7 @@ async fn missing_checkout_rich_preview_http() {
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { stopped.await.unwrap(); }).await.unwrap(); });
-    let mut owned_sessions = Vec::new();
+    let mut owned_sessions: Vec<String> = Vec::new();
     let result = std::panic::AssertUnwindSafe(async {
         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();
         let base = format!("http://{addr}/api/v1/workspace");
