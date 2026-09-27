@@ -161,6 +161,10 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           ...state,
           tabs,
           activeTabId: action.activate === false ? state.activeTabId : action.tab.id,
+          returnTabIdByTabId:
+            !exists && action.activate !== false && (action.tab.kind === "file" || action.tab.kind === "browser") && state.activeTabId
+              ? { ...state.returnTabIdByTabId, [action.tab.id]: state.activeTabId }
+              : state.returnTabIdByTabId,
           layoutsByTabId,
         },
         true,
@@ -190,9 +194,14 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
 
       let activeTabId = state.activeTabId;
       if (state.activeTabId === action.tabId) {
-        activeTabId = tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? null;
+        const returnTabId = state.returnTabIdByTabId?.[action.tabId];
+        activeTabId = returnTabId && tabs.some((tab) => tab.id === returnTabId)
+          ? returnTabId
+          : tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? null;
       }
-      return normalizeLayoutInternal({ ...state, tabs, activeTabId, layoutsByTabId }, true);
+      const returnTabIdByTabId = { ...state.returnTabIdByTabId };
+      delete returnTabIdByTabId[action.tabId];
+      return normalizeLayoutInternal({ ...state, tabs, activeTabId, returnTabIdByTabId, layoutsByTabId }, true);
     }
     case "ACTIVATE_TAB": {
       if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;

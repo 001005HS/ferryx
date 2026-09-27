@@ -9,6 +9,71 @@ function tab(id: string, sessionId: string): TerminalTab {
 }
 
 describe("file preview tabs", () => {
+  it("returns to the previously active tab after closing a newly opened file tab", () => {
+    const fileTab: FileTab = {
+      kind: "file", id: "file", label: "readme.md", path: "/repo/readme.md",
+      backendSessionId: "backend-1", line: null, col: null,
+      workspaceId: "ws-1", previewId: "preview-1",
+    };
+    let state = createLayoutState([tab("left", "s1"), tab("middle", "s2"), tab("right", "s3")], "middle");
+    state = layoutReducer(state, { type: "ADD_TAB", tab: fileTab });
+
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: fileTab.id });
+
+    expect(state.activeTabId).toBe("middle");
+    expect(state.tabGroups?.[state.focusedGroupId ?? ""]?.activeTabId).toBe("middle");
+  });
+
+  it("returns to the previously active tab after closing a newly opened browser tab", () => {
+    const browserTab: BrowserTab = {
+      kind: "browser", id: "browser", label: "Browser", browserId: "browser-1",
+      url: "about:blank", title: "Browser", loading: false, canGoBack: false,
+      canGoForward: false, zoomFactor: 1, loadError: null,
+    };
+    let state = createLayoutState([tab("left", "s1"), tab("middle", "s2"), tab("right", "s3")], "middle");
+    state = layoutReducer(state, { type: "ADD_TAB", tab: browserTab });
+
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: browserTab.id });
+
+    expect(state.activeTabId).toBe("middle");
+  });
+
+  it("falls back to an adjacent tab if the previous tab was closed first", () => {
+    const fileTab: FileTab = {
+      kind: "file", id: "file", label: "readme.md", path: "/repo/readme.md",
+      backendSessionId: "backend-1", line: null, col: null,
+      workspaceId: "ws-1", previewId: "preview-1",
+    };
+    let state = createLayoutState([tab("left", "s1"), tab("middle", "s2"), tab("right", "s3")], "middle");
+    state = layoutReducer(state, { type: "ADD_TAB", tab: fileTab });
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: "middle" });
+
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: fileTab.id });
+
+    expect(state.activeTabId).toBe("right");
+  });
+
+  it("returns through nested browser and file tabs in opening order", () => {
+    const browserTab: BrowserTab = {
+      kind: "browser", id: "browser", label: "Browser", browserId: "browser-1",
+      url: "about:blank", title: "Browser", loading: false, canGoBack: false,
+      canGoForward: false, zoomFactor: 1, loadError: null,
+    };
+    const fileTab: FileTab = {
+      kind: "file", id: "file", label: "readme.md", path: "/repo/readme.md",
+      backendSessionId: "backend-1", line: null, col: null,
+      workspaceId: "ws-1", previewId: "preview-1",
+    };
+    let state = createLayoutState([tab("left", "s1"), tab("middle", "s2"), tab("right", "s3")], "middle");
+    state = layoutReducer(state, { type: "ADD_TAB", tab: browserTab });
+    state = layoutReducer(state, { type: "ADD_TAB", tab: fileTab });
+
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: fileTab.id });
+    expect(state.activeTabId).toBe(browserTab.id);
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: browserTab.id });
+    expect(state.activeTabId).toBe("middle");
+  });
+
   it("uses a file pane, not a terminal session, as the default content", () => {
     const fileTab: FileTab = {
       kind: "file",

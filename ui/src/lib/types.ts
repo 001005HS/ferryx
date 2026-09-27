@@ -471,6 +471,7 @@ export type LayoutState = {
   nestedSplit?: NestedSplit | null;
   /** Active tab in the currently focused tab group. */
   activeTabId: string | null;
+  returnTabIdByTabId?: Record<string, string>;
   /** Terminal-pane tree owned independently by each tab. */
   layoutsByTabId: Record<string, TabPaneLayout>;
   /** Orca-style tab groups. Optional only for backwards-compatible persisted/test state. */
