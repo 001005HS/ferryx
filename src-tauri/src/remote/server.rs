@@ -7727,4 +7727,188 @@ mod tests {
         let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    #[tokio::test]
+    async fn test_agent_history_walks_a_long_transcript_back_to_its_first_message() {
+        use std::io::Write;
+
+        let home = std::env::temp_dir().join(format!(
+            "ferryx-agent-long-pager-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions = home.join(".omo").join("agent").join("sessions").join("--proj--");
+        std::fs::create_dir_all(&sessions).expect("create sessions dir");
+        let session_id = "01a0d650-db7a-7817-a21b-7be552a81e90";
+        let transcript = sessions.join(format!("2026-09-25T00-00-00-000Z_{session_id}.jsonl"));
+        let mut file = std::fs::File::create(&transcript).expect("create transcript");
+        for i in 0..3200 {
+            writeln!(
+                file,
+                r#"{{"type":"message","id":"m{i}","message":{{"role":"user","content":[{{"type":"text","text":"message {i}"}}]}}}}"#
+            )
+            .unwrap();
+        }
+        drop(file);
+
+        let terminal_service = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+        *state.agent_history_home.write() = Some(home.clone());
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "agent-long-pager-device")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let mut collected_ordinals: Vec<u64> = Vec::new();
+        let mut text_by_ordinal: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+        let mut next_cursor: Option<u64> = None;
+        let mut page_count: usize = 0;
+
+        loop {
+            page_count += 1;
+            assert!(
+                page_count <= 20,
+                "walk exceeded 20 pages (infinite loop or paging bug); page_count={page_count}"
+            );
+
+            let mut query_params: Vec<(&str, String)> = vec![("limit", "200".to_string())];
+            if let Some(cursor_val) = next_cursor {
+                query_params.push(("cursor", cursor_val.to_string()));
+            }
+
+            let body: serde_json::Value = client
+                .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .query(&query_params)
+                .send()
+                .await
+                .expect("paged agent-history request")
+                .json()
+                .await
+                .expect("paged json body");
+
+            let items = body["items"].as_array().expect("items array");
+            assert!(
+                !items.is_empty() && items.len() <= 200,
+                "page {page_count} items len {} must be between 1 and 200",
+                items.len()
+            );
+
+            let page_ordinals: Vec<u64> = items
+                .iter()
+                .map(|item| item["ordinal"].as_u64().expect("item ordinal as u64"))
+                .collect();
+
+            // Ordinals strictly ascending within the page
+            for window in page_ordinals.windows(2) {
+                assert!(
+                    window[0] < window[1],
+                    "page {page_count} ordinals must be strictly ascending: {} < {}",
+                    window[0],
+                    window[1]
+                );
+            }
+
+            // The page's largest ordinal is smaller than every ordinal already collected
+            let page_max = *page_ordinals.iter().max().unwrap();
+            for &seen in &collected_ordinals {
+                assert!(
+                    page_max < seen,
+                    "page {page_count} max ordinal {page_max} must be strictly smaller than seen ordinal {seen}"
+                );
+            }
+
+            for item in items {
+                let ord = item["ordinal"].as_u64().unwrap();
+                if let Some(txt) = item["text"].as_str() {
+                    text_by_ordinal.insert(ord, txt.to_string());
+                }
+            }
+
+            collected_ordinals.extend(page_ordinals);
+
+            if let Some(cursor_num) = body["nextCursor"].as_u64() {
+                next_cursor = Some(cursor_num);
+            } else {
+                assert!(
+                    body["nextCursor"].is_null(),
+                    "nextCursor must be a number or null"
+                );
+                break;
+            }
+        }
+
+        assert_eq!(page_count, 16, "exactly 16 pages expected for 3200 messages / 200 per page");
+
+        let mut sorted_ordinals = collected_ordinals.clone();
+        sorted_ordinals.sort_unstable();
+        let expected_ordinals: Vec<u64> = (0..3200).collect();
+        assert_eq!(
+            sorted_ordinals, expected_ordinals,
+            "sorted collected ordinals must cover all 0..3200"
+        );
+        assert_eq!(
+            text_by_ordinal.get(&0).map(String::as_str),
+            Some("message 0"),
+            "text of ordinal 0 must be 'message 0'"
+        );
+
+        // Fetch once with limit=200&before=1600 and once with limit=200&cursor=1600
+        let before_body: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("limit", "200"), ("before", "1600")])
+            .send()
+            .await
+            .expect("agent-history limit=200&before=1600 request")
+            .json()
+            .await
+            .expect("before json body");
+        let before_items = before_body["items"].as_array().expect("before items array");
+
+        let cursor_body: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/agent-history/{session_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("limit", "200"), ("cursor", "1600")])
+            .send()
+            .await
+            .expect("agent-history limit=200&cursor=1600 request")
+            .json()
+            .await
+            .expect("cursor json body");
+        let cursor_items = cursor_body["items"].as_array().expect("cursor items array");
+
+        assert!(
+            !before_items.is_empty(),
+            "before items array must be non-empty"
+        );
+        assert_eq!(
+            before_items, cursor_items,
+            "items from ?before=1600 and ?cursor=1600 must be equal"
+        );
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
