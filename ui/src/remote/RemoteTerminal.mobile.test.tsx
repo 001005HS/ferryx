@@ -5,13 +5,17 @@ import { RemoteTerminal } from "./RemoteTerminal";
 class Socket {
   static OPEN = 1;
   static latest: Socket;
+  url?: string;
   readyState = 1;
   binaryType = "";
   send = vi.fn();
   close = vi.fn();
   onopen?: () => void;
   onmessage?: (event: MessageEvent) => void;
-  constructor() { Socket.latest = this; }
+  constructor(url?: string) {
+    this.url = url;
+    Socket.latest = this;
+  }
 }
 const sink = () => screen.getByTestId("remote-terminal-input-sink") as HTMLTextAreaElement;
 const grid = () => screen.getByTestId("remote-terminal-grid");
@@ -331,5 +335,52 @@ describe("mobile terminal input lifecycle", () => {
     fireEvent.input(input, { target: { value: `${jamo} ` }, inputType: "insertText" });
     expect(Socket.latest.send.mock.calls).toEqual([[new TextEncoder().encode("이렇게 ")]]);
     expect(sink()).toHaveValue("");
+  });
+
+  it("sends resize on ResizeObserver change and remoteResize on remoteStatus generation when followHostSize is false", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    expect(Socket.latest.url).toContain("cols=80&rows=20");
+    act(() => Socket.latest.onopen?.());
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    height = 200;
+    act(() => resize([], {} as ResizeObserver));
+    expect(Socket.latest.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", cols: 80, rows: 10 })
+    );
+
+    act(() => {
+      Socket.latest.onmessage?.({
+        data: JSON.stringify({ type: "remoteStatus", generation: "gen-1" }),
+      } as MessageEvent);
+    });
+    expect(Socket.latest.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "remoteResize", generation: "gen-1", cols: 80, rows: 10 })
+    );
+  });
+
+  it("never puts cols/rows in socket URL and never sends resize or remoteResize when followHostSize is true", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" followHostSize={true} />);
+    expect(Socket.latest.url).toMatch(/\/api\/v1\/terminal\/a\?token=token-a&render=grid$/);
+    expect(Socket.latest.url).not.toContain("cols=");
+    expect(Socket.latest.url).not.toContain("rows=");
+
+    act(() => Socket.latest.onopen?.());
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    height = 200;
+    act(() => resize([], {} as ResizeObserver));
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    act(() => {
+      Socket.latest.onmessage?.({
+        data: JSON.stringify({ type: "remoteStatus", generation: "gen-1" }),
+      } as MessageEvent);
+    });
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    expect(grid().className).toContain("overflow-x-auto");
+    expect(grid().className).toContain("overflow-y-hidden");
+    expect(grid().style.touchAction).toBe("pan-x");
   });
 });

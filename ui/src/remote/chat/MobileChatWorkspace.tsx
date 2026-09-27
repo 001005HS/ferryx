@@ -334,6 +334,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 embedded={true}
                 isAccountSession={isAccountSession}
                 createWebSocket={createWebSocket}
+                followHostSize={true}
               />
             )}
           </div>

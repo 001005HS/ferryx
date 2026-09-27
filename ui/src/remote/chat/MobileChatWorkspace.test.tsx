@@ -3,8 +3,13 @@ import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { MobileChatWorkspace } from "./MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./MobileChatMessage";
 
+const mockRemoteTerminal = vi.fn();
+
 vi.mock("../RemoteTerminal", () => ({
-  RemoteTerminal: () => <div data-testid="mock-remote-terminal">Terminal Mock</div>,
+  RemoteTerminal: (props: unknown) => {
+    mockRemoteTerminal(props);
+    return <div data-testid="mock-remote-terminal">Terminal Mock</div>;
+  },
 }));
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -292,5 +297,28 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("mobile-chat-header")).toBeInTheDocument();
     expect(screen.getByTestId("chat-composer-textarea")).toBeInTheDocument();
     expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
+  });
+
+  it("12. passes followHostSize to RemoteTerminal drawer", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        sessionId="sess-follow-1"
+        token="tok-follow-1"
+        transportUrl="http://localhost:3000"
+      />
+    );
+
+    const toggleButton = screen.getByTestId("terminal-toggle-button");
+    fireEvent.click(toggleButton);
+    expect(screen.getByTestId("mock-remote-terminal")).toBeInTheDocument();
+    expect(mockRemoteTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "sess-follow-1",
+        token: "tok-follow-1",
+        followHostSize: true,
+      })
+    );
   });
 });

@@ -55,6 +55,7 @@ type RemoteTerminalProps = {
     pathAndQuery: string,
   ) => Promise<WebSocketLike> | WebSocketLike;
   readonly daemonEpoch?: string | number | null;
+  readonly followHostSize?: boolean;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -239,12 +240,15 @@ function terminalSocketUrl(
   geometry: GridGeometry,
   transportUrl: string,
   signal: AbortSignal,
+  followHostSize = false,
 ): Promise<string> | string {
   const withGeometry = (socketUrl: string): string => {
     const url = new URL(socketUrl);
     url.searchParams.set("render", "grid");
-    url.searchParams.set("cols", String(geometry.cols));
-    url.searchParams.set("rows", String(geometry.rows));
+    if (!followHostSize) {
+      url.searchParams.set("cols", String(geometry.cols));
+      url.searchParams.set("rows", String(geometry.rows));
+    }
     return url.toString();
   };
 
@@ -383,6 +387,7 @@ export function RemoteTerminal({
   attachKey,
   createWebSocket,
   daemonEpoch,
+  followHostSize = false,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   const wheelRemainderRowsRef = useRef(0);
@@ -554,6 +559,7 @@ export function RemoteTerminal({
       const socket = socketRef.current;
       const generationChanged = generationRef.current !== lastSentGenerationRef.current;
       if (
+        followHostSize ||
         !socket ||
         socket.readyState !== WebSocket.OPEN ||
         !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
@@ -589,7 +595,7 @@ export function RemoteTerminal({
       observer.disconnect();
       if (requestResizeRef.current === measureAndResize) requestResizeRef.current = () => {};
     };
-  }, [sessionId, settings.fontFamily, activeFontSize, token]);
+  }, [sessionId, settings.fontFamily, activeFontSize, token, followHostSize]);
 
   useEffect(() => {
     if (!socketRequest) return;
@@ -738,6 +744,7 @@ export function RemoteTerminal({
           socketRequest.geometry,
           transportUrl,
           abort.signal,
+          followHostSize,
         );
       } catch (error) {
         if (disposed) return;
@@ -773,7 +780,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;
@@ -1266,7 +1273,7 @@ export function RemoteTerminal({
             sendText(normalized);
           }
         }}
-        className="relative min-h-0 flex-1 overflow-hidden bg-terminal outline-none motion-reduce:transition-none"
+        className={`relative min-h-0 flex-1 ${followHostSize ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"} bg-terminal outline-none motion-reduce:transition-none`}
         style={{
           backgroundColor: settings.theme.background,
           color: settings.theme.foreground,
@@ -1274,7 +1281,7 @@ export function RemoteTerminal({
           fontSize: `${activeFontSize}px`,
           lineHeight: 1,
           whiteSpace: "pre",
-          touchAction: "none",
+          touchAction: followHostSize ? "pan-x" : "none",
         }}
       >
         {embedded && !connected ? (
