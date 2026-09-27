@@ -740,3 +740,103 @@ async fn ssh_reconnect_safety_atomic_attach_remote_generation_consistency() {
     assert_eq!(gen2, Some(2));
     assert_eq!(attachment2.snapshot.history, b"initial query\x1b[6n");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_transfer_sessions_excludes_remote_sessions_from_handover() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config")),
+        Some(dir.path().join("auth")),
+    ));
+
+    let remote_id = "test-remote-handover-session";
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(serde_json::json!({
+        "backendSessionId": remote_id,
+        "target": {"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"handover-target"},
+        "config": {"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "handover-request",
+        "remoteCursor": "0",
+        "cols": 80,
+        "rows": 24
+    })).unwrap();
+
+    server
+        .terminal_service
+        .remote()
+        .restore(descriptor)
+        .expect("remote session restore must succeed");
+
+    assert!(server.terminal_service.remote().contains(remote_id));
+    assert!(server
+        .terminal_service
+        .list_sessions()
+        .contains(&remote_id.to_string()));
+    assert!(!server
+        .terminal_service
+        .pty_manager()
+        .list_sessions()
+        .contains(&remote_id.to_string()));
+
+    let handover_path = dir.path().join("test_handover.sock");
+    let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(&handover_path)
+        .expect("handover socket bind must succeed");
+
+    let accept_handle = tokio::task::spawn_blocking(move || {
+        let (stream, _creds) = listener.accept().map_err(|e| (e, 0usize))?;
+        let mut exports = Vec::new();
+        loop {
+            match crate::daemon::handover_socket::recv_session(&stream) {
+                Ok(Some(export)) => exports.push(export),
+                Ok(None) => break,
+                Err(error) => return Err((error, exports.len())),
+            }
+        }
+        Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
+    });
+
+    let resp = request_response(
+        &server,
+        serde_json::json!({
+            "type": "transferSessions",
+            "handoverSocketPath": handover_path.to_string_lossy()
+        }),
+    )
+    .await;
+
+    match resp {
+        DaemonResponse::TransferSessionsOk {
+            transferred_count,
+            requested_count,
+        } => {
+            assert_eq!(
+                requested_count, 0,
+                "requested_count must exclude remote sessions"
+            );
+            assert_eq!(
+                transferred_count, 0,
+                "transferred_count must be 0 for remote sessions"
+            );
+        }
+        other => panic!("expected TransferSessionsOk, got: {other:?}"),
+    }
+
+    let exports = tokio::time::timeout(Duration::from_secs(5), accept_handle)
+        .await
+        .expect("accept task must not timeout")
+        .expect("accept task must join")
+        .expect("handover session drain must succeed");
+
+    assert_eq!(
+        exports.len(),
+        0,
+        "0 exports should arrive over handover socket"
+    );
+    assert!(server.terminal_service.remote().contains(remote_id));
+
+    let ids = persisted_durable_ids(&server.remote_sessions_path);
+    assert!(
+        ids.contains(&remote_id.to_string()),
+        "durable remote snapshot must contain remote session id"
+    );
+}

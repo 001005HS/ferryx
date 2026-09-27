@@ -2454,6 +2454,12 @@ impl DaemonServer {
                             accepted,
                             "Handover committed after adopting the transferred sessions"
                         );
+                        if let Err(error) = self
+                            .restore_remote_sessions_at(self.remote_sessions_path.clone())
+                            .await
+                        {
+                            tracing::error!(%error, "Handover committed, but restoring the predecessor's SSH/remote sessions failed; they will reattach on the next daemon start");
+                        }
                     }
                     Err(reason) => {
                         let abort_resp = legacy_peer
@@ -3553,70 +3559,74 @@ impl DaemonServer {
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
                     #[cfg(unix)]
                     {
-                        let path = std::path::PathBuf::from(handover_socket_path);
-                        match crate::daemon::handover_socket::connect_handover_socket(&path) {
-                            Ok((stream, _creds)) => {
-                                let sessions = self.terminal_service.list_sessions();
-                                let requested = sessions.len();
-                                let mut count = 0;
-                                let mut failures: Vec<String> = Vec::new();
-                                let transfer_id = uuid::Uuid::new_v4().to_string();
-                                let mut seq = 1;
-                                for session_id in sessions {
-                                    // A session dropped here dies when this predecessor retires: it
-                                    // has already promised the successor a handover, and nothing
-                                    // downstream can recover a session that was never sent. Name
-                                    // every casualty instead of silently skipping it.
-                                    match self.terminal_service.pty_manager().export_session(&session_id) {
-                                        Ok(export) => {
-                                            match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
-                                                Ok(()) => {
-                                                    count += 1;
-                                                    seq += 1;
-                                                }
-                                                Err(error) => {
-                                                    tracing::error!(
-                                                        session_id = %session_id,
-                                                        %error,
-                                                        "Failed to send a session to the successor; it will not survive this handover"
-                                                    );
-                                                    failures.push(format!("{session_id}: send failed: {error}"));
+                        if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
+                            daemon_error(format!("Failed to persist remote sessions before handover: {e}"))
+                        } else {
+                            let path = std::path::PathBuf::from(handover_socket_path);
+                            match crate::daemon::handover_socket::connect_handover_socket(&path) {
+                                Ok((stream, _creds)) => {
+                                    let sessions = self.terminal_service.pty_manager().list_sessions();
+                                    let requested = sessions.len();
+                                    let mut count = 0;
+                                    let mut failures: Vec<String> = Vec::new();
+                                    let transfer_id = uuid::Uuid::new_v4().to_string();
+                                    let mut seq = 1;
+                                    for session_id in sessions {
+                                        // A session dropped here dies when this predecessor retires: it
+                                        // has already promised the successor a handover, and nothing
+                                        // downstream can recover a session that was never sent. Name
+                                        // every casualty instead of silently skipping it.
+                                        match self.terminal_service.pty_manager().export_session(&session_id) {
+                                            Ok(export) => {
+                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
+                                                    Ok(()) => {
+                                                        count += 1;
+                                                        seq += 1;
+                                                    }
+                                                    Err(error) => {
+                                                        tracing::error!(
+                                                            session_id = %session_id,
+                                                            %error,
+                                                            "Failed to send a session to the successor; it will not survive this handover"
+                                                        );
+                                                        failures.push(format!("{session_id}: send failed: {error}"));
+                                                    }
                                                 }
                                             }
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(
-                                                session_id = %session_id,
-                                                %error,
-                                                "Failed to export a session for handover; it will not survive this handover"
-                                            );
-                                            failures.push(format!("{session_id}: export failed: {error}"));
+                                            Err(error) => {
+                                                tracing::error!(
+                                                    session_id = %session_id,
+                                                    %error,
+                                                    "Failed to export a session for handover; it will not survive this handover"
+                                                );
+                                                failures.push(format!("{session_id}: export failed: {error}"));
+                                            }
                                         }
                                     }
-                                }
-                                let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
-                                // The gap between what this predecessor was asked for and what it
-                                // could actually export is the shape of a lossy handover.
-                                if !failures.is_empty() {
-                                    tracing::error!(
+                                    let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                    // The gap between what this predecessor was asked for and what it
+                                    // could actually export is the shape of a lossy handover.
+                                    if !failures.is_empty() {
+                                        tracing::error!(
+                                            requested,
+                                            transferred = count,
+                                            lost = failures.len(),
+                                            casualties = %failures.join("; "),
+                                            "Handover will lose sessions: they could not be exported or sent"
+                                        );
+                                    }
+                                    tracing::info!(
                                         requested,
                                         transferred = count,
-                                        lost = failures.len(),
-                                        casualties = %failures.join("; "),
-                                        "Handover will lose sessions: they could not be exported or sent"
+                                        "Transferred sessions to the successor over the handover socket"
                                     );
+                                    DaemonResponse::TransferSessionsOk {
+                                        transferred_count: count,
+                                        requested_count: requested,
+                                    }
                                 }
-                                tracing::info!(
-                                    requested,
-                                    transferred = count,
-                                    "Transferred sessions to the successor over the handover socket"
-                                );
-                                DaemonResponse::TransferSessionsOk {
-                                    transferred_count: count,
-                                    requested_count: requested,
-                                }
+                                Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
                             }
-                            Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
                         }
                     }
                     #[cfg(not(unix))]
