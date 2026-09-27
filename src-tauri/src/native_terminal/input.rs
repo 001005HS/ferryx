@@ -102,16 +102,20 @@ pub enum NativeTerminalInput {
 /// macOS "natural text editing" chords that Ghostty resolves through default keybinds instead
 /// of the key encoder, so they emit legacy readline bytes rather than fixterm sequences.
 ///
+/// Ghostty sets these on macOS only; Ferryx keeps the Alt word-motion chords on every
+/// platform (readline binds `\eb`/`\ef` everywhere) and the Cmd/Super chords on macOS only,
+/// because elsewhere the Super key belongs to the OS and must not send line-editing bytes.
+///
 /// Mirrors the defaults in `vendor/ghostty/src/config/Config.zig`: Ferryx drives libghostty's
 /// encoder directly and has no keybind layer, so without this the shell receives fixterm
 /// sequences (`\x1b[1;9D`, `\x7f`) that readline does not act on.
-fn natural_text_editing_bytes(event: &KeyEvent) -> Option<&'static [u8]> {
+fn natural_text_editing_bytes(event: &KeyEvent, macos: bool) -> Option<&'static [u8]> {
     let mods = event.modifiers;
     if mods.ctrl || mods.shift {
         return None;
     }
 
-    let super_only = mods.super_key && !mods.alt;
+    let super_only = macos && mods.super_key && !mods.alt;
     let alt_only = mods.alt && !mods.super_key;
 
     match event.key {
@@ -133,7 +137,9 @@ impl NativeTerminalInput {
             Self::KeyEvent { key_event } => {
                 let event = key_event.to_key_event()?;
                 if event.action != KeyAction::Release {
-                    if let Some(bytes) = natural_text_editing_bytes(&event) {
+                    if let Some(bytes) =
+                        natural_text_editing_bytes(&event, cfg!(target_os = "macos"))
+                    {
                         return Ok(bytes.to_vec());
                     }
                 }
@@ -293,7 +299,7 @@ mod tests {
     use crate::native_terminal::composition::{
         CellMetrics, LogicalBounds, SurfaceCompositionLayout,
     };
-    use crate::native_terminal::key::{KeyAction, KeyCode, KeyModifiers};
+    use crate::native_terminal::key::{KeyAction, KeyCode, KeyEvent, KeyModifiers};
     use crate::native_terminal::{CellWide, CursorVisualStyle};
 
     fn test_layout(metrics: &CellMetrics) -> SurfaceCompositionLayout {
@@ -327,23 +333,23 @@ mod tests {
         };
 
         assert_eq!(
-            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, false, true)),
+            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, false, true), true),
             Some(b"\x01".as_slice())
         );
         assert_eq!(
-            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, false, true)),
+            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, false, true), true),
             Some(b"\x05".as_slice())
         );
         assert_eq!(
-            natural_text_editing_bytes(&chord(KeyCode::Backspace, false, true)),
+            natural_text_editing_bytes(&chord(KeyCode::Backspace, false, true), true),
             Some(b"\x15".as_slice())
         );
         assert_eq!(
-            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, true, false)),
+            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, true, false), true),
             Some(b"\x1bb".as_slice())
         );
         assert_eq!(
-            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, true, false)),
+            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, true, false), true),
             Some(b"\x1bf".as_slice())
         );
     }
@@ -369,11 +375,11 @@ mod tests {
         };
 
         assert_eq!(
-            natural_text_editing_bytes(&event(KeyCode::Backspace, alt, KeyAction::Press)),
+            natural_text_editing_bytes(&event(KeyCode::Backspace, alt, KeyAction::Press), true),
             None
         );
         assert_eq!(
-            natural_text_editing_bytes(&event(KeyCode::Delete, alt, KeyAction::Press)),
+            natural_text_editing_bytes(&event(KeyCode::Delete, alt, KeyAction::Press), true),
             None
         );
         assert_eq!(
@@ -381,7 +387,7 @@ mod tests {
                 KeyCode::ArrowLeft,
                 KeyModifiers::default(),
                 KeyAction::Press
-            )),
+            ), true),
             None
         );
         assert_eq!(
@@ -393,7 +399,7 @@ mod tests {
                     ..KeyModifiers::default()
                 },
                 KeyAction::Press
-            )),
+            ), true),
             None
         );
         assert_eq!(
@@ -405,7 +411,7 @@ mod tests {
                     ..KeyModifiers::default()
                 },
                 KeyAction::Press
-            )),
+            ), true),
             None
         );
         assert_eq!(
@@ -417,7 +423,7 @@ mod tests {
                     ..KeyModifiers::default()
                 },
                 KeyAction::Press
-            )),
+            ), true),
             None
         );
     }
@@ -449,9 +455,17 @@ mod tests {
             ..KeyModifiers::default()
         };
 
-        assert_eq!(encode("ArrowLeft", super_key), b"\x01".to_vec());
-        assert_eq!(encode("ArrowRight", super_key), b"\x05".to_vec());
-        assert_eq!(encode("Backspace", super_key), b"\x15".to_vec());
+        if cfg!(target_os = "macos") {
+            assert_eq!(encode("ArrowLeft", super_key), b"\x01".to_vec());
+            assert_eq!(encode("ArrowRight", super_key), b"\x05".to_vec());
+            assert_eq!(encode("Backspace", super_key), b"\x15".to_vec());
+        } else {
+            // Elsewhere Super belongs to the OS: the chord goes to the key encoder,
+            // never to readline's line-editing bytes.
+            assert_ne!(encode("ArrowLeft", super_key), b"\x01".to_vec());
+            assert_ne!(encode("ArrowRight", super_key), b"\x05".to_vec());
+            assert_ne!(encode("Backspace", super_key), b"\x15".to_vec());
+        }
         assert_eq!(encode("ArrowLeft", alt), b"\x1bb".to_vec());
         assert_eq!(encode("ArrowRight", alt), b"\x1bf".to_vec());
 
@@ -685,5 +699,120 @@ mod tests {
             .expect("key event feed succeeds");
 
         assert_eq!(after_enter.cursor.x, 0);
+    }
+
+    #[test]
+    fn super_chords_edit_text_only_on_macos() {
+        use super::natural_text_editing_bytes;
+
+        let super_left = KeyEvent {
+            key: KeyCode::ArrowLeft,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+        let super_right = KeyEvent {
+            key: KeyCode::ArrowRight,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+        let super_backspace = KeyEvent {
+            key: KeyCode::Backspace,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+
+        assert_eq!(
+            natural_text_editing_bytes(&super_left, true),
+            Some(&b"\x01"[..])
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&super_right, true),
+            Some(&b"\x05"[..])
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&super_backspace, true),
+            Some(&b"\x15"[..])
+        );
+
+        assert_eq!(natural_text_editing_bytes(&super_left, false), None);
+        assert_eq!(natural_text_editing_bytes(&super_right, false), None);
+        assert_eq!(natural_text_editing_bytes(&super_backspace, false), None);
+    }
+
+    #[test]
+    fn alt_word_motion_applies_on_every_platform() {
+        use super::natural_text_editing_bytes;
+
+        let alt_left = KeyEvent {
+            key: KeyCode::ArrowLeft,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                alt: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+        let alt_right = KeyEvent {
+            key: KeyCode::ArrowRight,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                alt: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+
+        for macos in [true, false] {
+            assert_eq!(
+                natural_text_editing_bytes(&alt_left, macos),
+                Some(&b"\x1bb"[..])
+            );
+            assert_eq!(
+                natural_text_editing_bytes(&alt_right, macos),
+                Some(&b"\x1bf"[..])
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_and_shift_chords_are_left_to_the_encoder() {
+        use super::natural_text_editing_bytes;
+
+        let ctrl_left = KeyEvent {
+            key: KeyCode::ArrowLeft,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                ctrl: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+        let shift_super_left = KeyEvent {
+            key: KeyCode::ArrowLeft,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                shift: true,
+                super_key: true,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+
+        for macos in [true, false] {
+            assert_eq!(natural_text_editing_bytes(&ctrl_left, macos), None);
+            assert_eq!(natural_text_editing_bytes(&shift_super_left, macos), None);
+        }
     }
 }
