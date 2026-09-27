@@ -54,7 +54,7 @@ import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/Sortabl
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
-import { fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
+import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
@@ -578,6 +578,13 @@ export function Sidebar({
                             onResetAgentState={onResetAgentState}
                             sortableWorkspaceId={group.groupId}
                             label={`${group.groupId} worktrees`}
+                            emptyState={
+                              <EmptyWorktreesHint
+                                onCreateWorktree={
+                                  project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
+                                }
+                              />
+                            }
                           />}
                         </SortableContext>
                       </div>

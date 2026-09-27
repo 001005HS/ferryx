@@ -823,4 +823,17 @@ describe("Sidebar navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Inbox (1)" }));
     expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
   });
+
+  it("renders emptyState hint text when a project has zero worktrees", () => {
+    const emptyProjects = [
+      { workspaceId: "empty-proj", repoRoot: "/repos/empty-proj", gitRoot: "/repos/empty-proj" },
+    ];
+    renderSidebar({
+      projects: emptyProjects,
+      activeProjectId: "empty-proj",
+      worktrees: [],
+    });
+
+    expect(screen.getByText("No worktrees listed yet.")).toBeInTheDocument();
+  });
 });
