@@ -1966,6 +1966,39 @@ describe("FOCUS_EXISTING_SESSION navigation", () => {
     expect(next.activityBySessionId?.["session-2"]?.seen).toBe(false);
   });
 
+  it("keeps every other pane's attention in the same worktree, across split siblings and other tabs", () => {
+    const split = restoredSplitState();
+    const other: TerminalTab = { id: "tab-other", label: "other", sessionId: "session-3" };
+    const base: WorkspaceState = {
+      ...split,
+      sessions: { ...split.sessions, "session-3": restoredSession("session-3", "restored-backend-3") },
+      layout: {
+        ...split.layout,
+        tabs: [...split.layout.tabs, other],
+        layoutsByTabId: {
+          ...split.layout.layoutsByTabId,
+          [other.id]: {
+            root: { type: "leaf", leafId: "leaf-3" },
+            activeLeafId: "leaf-3",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-3": "session-3" },
+          },
+        },
+      },
+      activityBySessionId: {
+        "session-1": doneActivity("left done"),
+        "session-2": doneActivity("right done"),
+        "session-3": { ...doneActivity("other tab waiting"), state: "waiting" as const },
+      },
+    };
+
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-1" });
+
+    expect(next.activityBySessionId?.["session-1"]?.seen).toBe(true);
+    expect(next.activityBySessionId?.["session-2"]?.seen).toBe(false);
+    expect(next.activityBySessionId?.["session-3"]?.seen).toBe(false);
+  });
+
   it("selects the parked owning worktree, then its tab and leaf", () => {
     const parkedTab: TerminalTab = { id: "tab-feature", label: "feature", sessionId: "session-2" };
     const base: WorkspaceState = {

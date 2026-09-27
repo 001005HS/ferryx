@@ -30,7 +30,6 @@ import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
-import type { ChatAttachment as ComponentAttachment } from "./chat/MobileChatComponents";
 import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
 import type { WebSocketLike } from "./RemoteTerminal";
 import { AccountLoginPage } from "./AccountLoginPage";
@@ -1399,24 +1398,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               warnings={chatWarnings}
               isRunning={chatIsRunning}
               onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
-                for (const att of attachments) {
-                  if (att.url && att.url.startsWith("blob:")) {
-                    chatAttachmentUrlsRef.current.add(att.url);
-                  }
-                }
-                const mappedAttachments: ComponentAttachment[] = attachments.map((att) => ({
-                  id: att.id,
-                  name: att.name,
-                  type: (att.type.startsWith("image/") ? "image" : "file") as "image" | "file",
-                  url: att.url,
-                  size: att.size ? `${Math.round(att.size / 1024)} KB` : undefined,
-                }));
+                // Attachments are blocked by the mobile composer until remote upload is supported.
+                if (attachments.length > 0) return;
                 const userMsg: MobileChatMessageProps = {
                   id: `user-${Date.now()}`,
                   role: "user",
                   content: text,
                   timestamp: Date.now(),
-                  attachments: mappedAttachments,
+                  attachments: [],
                 };
                 setChatMessages((prev) => [...prev, userMsg]);
                 assistantTurnStartedAtRef.current = Date.now();

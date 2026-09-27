@@ -3,14 +3,17 @@ import {
   ChevronLeft,
   ChevronRight,
   GitBranch,
+  Inbox,
   LoaderCircle,
   Plus,
   Server,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
-import React, { useMemo, type ReactNode } from "react";
+import React, { useEffect, useMemo, useState, type ReactNode } from "react";
 import { IconButton } from "../components/ui/IconButton";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 
 export type RemoteTerminalTabInfo = {
@@ -424,6 +427,20 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     for (const tab of matches) claimedPaneIds.add(tab.id);
   }
   const orphanPanes = paneTabs.filter((tab) => !claimedPaneIds.has(tab.id));
+  const attentionRows = model.context.workspaceId
+    ? buildRemoteAttentionRows(model.context.workspaceId, model.context.workspaceId, paneTabs, model.context.activeTabId)
+    : [];
+  const openAttentionRow = (row: AttentionRow) => {
+    const tab = paneTabs.find((candidate) => candidate.id === row.id);
+    if (!tab) return;
+    selectPane(tab);
+    onSelectorOpenChange(false);
+  };
+  // The worktree list is the sheet's default; the inbox is a sub view the header icon opens.
+  const [inboxOpen, setInboxOpen] = useState(false);
+  useEffect(() => {
+    if (!selectorOpen) setInboxOpen(false);
+  }, [selectorOpen]);
 
   const renderPaneRow = (tab: (typeof paneTabs)[number], siblingWorktreeLabel: string | null | undefined) => {
     const logo = resolveAgentLogo(tab.agentType);
@@ -488,7 +505,26 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       {selectorOpen ? (
         <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-worktree-sidebar text-worktree-sidebar-foreground shadow-xl" role="dialog" aria-label="Workspace context">
-          <div className="flex h-8 items-center justify-end border-b border-worktree-sidebar-border px-1.5">
+          <div className="flex h-8 items-center justify-between border-b border-worktree-sidebar-border px-1.5">
+            <button
+              type="button"
+              aria-label={attentionRows.length > 0 ? `Inbox (${attentionRows.length})` : "Inbox"}
+              aria-pressed={inboxOpen}
+              onClick={() => setInboxOpen((open) => !open)}
+              className={`relative flex size-6 items-center justify-center rounded-md transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                inboxOpen ? "bg-white/[0.08] text-worktree-sidebar-foreground" : "text-muted-foreground"
+              }`}
+            >
+              <Inbox className="size-3.5" aria-hidden="true" />
+              {attentionRows.length > 0 ? (
+                <span
+                  data-testid="remote-attention-count"
+                  className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
+                >
+                  {attentionRows.length > 9 ? "9+" : attentionRows.length}
+                </span>
+              ) : null}
+            </button>
             <button
               type="button"
               aria-label="Close worktree list"
@@ -498,6 +534,11 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               <X className="size-3.5" aria-hidden="true" />
             </button>
           </div>
+          {inboxOpen ? (
+            <div data-testid="remote-attention-inbox" className="flex max-h-96 min-h-0 flex-col">
+              <AttentionInbox rows={attentionRows} onOpen={openAttentionRow} compact />
+            </div>
+          ) : (<>
           <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-worktree-sidebar-border px-1">
             <button
               type="button"
@@ -645,6 +686,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             </section>
           ) : null}
           </div>
+          </>)}
           <div className="flex h-8 shrink-0 items-center justify-between gap-1 border-t border-worktree-sidebar-border px-1.5">
             {onOpenHosts ? (
               <IconButton label="Machines" onClick={onOpenHosts}>

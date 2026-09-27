@@ -1,15 +1,19 @@
 import React, { useState } from "react";
 import {
   Check,
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  Copy,
   Terminal,
   AlertCircle,
-  CheckCircle2,
   Loader2,
   FileText,
+  Eye,
+  SquarePen,
+  Search,
+  Globe,
+  Sparkles,
+  ListChecks,
+  Wrench,
+  Brain,
+  MessageSquare,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 
@@ -155,167 +159,234 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
 export type ToolStatus = "running" | "success" | "error";
 
 export interface ToolCallCardProps {
+  kind?: "tool";
   toolName: string;
+  /** The call's own one-line description, shown next to the tool name. */
+  summary?: string;
   command?: string;
   output?: string;
-  status: ToolStatus;
+  status?: "running" | "success" | "error";
   durationMs?: number;
-  initiallyExpanded?: boolean;
   className?: string;
+  workKey?: string;
+}
+
+export function getToolIcon(toolName: string) {
+  const lower = (toolName || "").toLowerCase();
+  if (["bash", "cmd", "eval", "shell", "exec"].includes(lower)) return Terminal;
+  if (["read", "view", "cat", "look_at"].includes(lower)) return Eye;
+  if (["edit", "write", "apply_patch", "ast_grep_replace"].includes(lower)) return SquarePen;
+  if (
+    ["grep", "glob", "search", "find", "ast_grep_search"].includes(lower) ||
+    lower.startsWith("lsp_")
+  )
+    return Search;
+  if (lower.startsWith("web") || lower === "fetch" || lower === "browser") return Globe;
+  if (lower === "task" || lower.startsWith("agent") || lower === "workpool") return Sparkles;
+  if (lower === "todo") return ListChecks;
+  return Wrench;
+}
+
+export function getToolVerb(toolName: string): string {
+  const lower = (toolName || "").toLowerCase();
+  if (["read", "view", "cat", "look_at"].includes(lower)) return "Read";
+  if (["edit", "write", "apply_patch", "ast_grep_replace"].includes(lower)) return "Edited";
+  if (
+    ["grep", "glob", "search", "find", "ast_grep_search"].includes(lower) ||
+    lower.startsWith("lsp_")
+  )
+    return "Searched";
+  if (lower.startsWith("web") || lower === "fetch" || lower === "browser") return "Fetched";
+  if (lower === "todo") return "Updated todos";
+  return `Ran ${toolName || "tool"}`;
 }
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = ({
   toolName,
+  summary,
   command,
   output,
-  status,
-  durationMs,
-  initiallyExpanded = false,
+  status = "success",
   className,
+  workKey: _workKey,
 }) => {
-  const [expanded, setExpanded] = useState(initiallyExpanded);
-  const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = Boolean(command || output);
+  const isError = status === "error";
+  const isRunning = status === "running";
 
-  const handleCopy = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const textToCopy = output || command || "";
-    if (!textToCopy) return;
-    navigator.clipboard.writeText(textToCopy);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  const Icon = getToolIcon(toolName);
+  const verb = getToolVerb(toolName);
+  const firstLine = command ? command.trim().split("\n")[0] : "";
 
-  const statusConfig = {
-    running: {
-      badge: "Running",
-      badgeClass: "bg-sky-500/10 text-sky-400 border-sky-500/20",
-      icon: Loader2,
-      spin: true,
-      borderClass: "border-sky-500/20",
-    },
-    success: {
-      badge: "Completed",
-      badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-      icon: CheckCircle2,
-      spin: false,
-      borderClass: "border-[#191919]",
-    },
-    error: {
-      badge: "Failed",
-      badgeClass: "bg-rose-500/10 text-rose-400 border-rose-500/20",
-      icon: AlertCircle,
-      spin: false,
-      borderClass: "border-rose-500/20",
-    },
-  }[status];
-
-  const StatusIcon = statusConfig.icon;
+  const rowContent = (
+    <>
+      <div className="w-6 h-6 shrink-0 flex items-center justify-center">
+        <Icon
+          aria-hidden="true"
+          className={cn("w-3.5 h-3.5", isError ? "text-[#ff6467]" : "text-[#838383]")}
+          style={{ width: "14px", height: "14px" }}
+        />
+      </div>
+      <div
+        className={cn(
+          "min-w-0 flex-1 truncate text-sm leading-none",
+          isError ? "text-[#ff6467]" : "text-[#838383]",
+          isRunning && "work-shimmer-text"
+        )}
+      >
+        {summary ? (
+          <span>{summary}</span>
+        ) : (
+          <>
+            <span>{verb}</span>
+            {firstLine && (
+              <>
+                {" "}
+                <span className="font-mono">{firstLine}</span>
+              </>
+            )}
+          </>
+        )}
+      </div>
+      {status === "error" && <span className="sr-only">Failed</span>}
+      {status === "running" && <span className="sr-only">Running</span>}
+    </>
+  );
 
   return (
-    <div
-      className={cn(
-        "rounded-xl border bg-[#0a0a0a]/70 shadow-xs backdrop-blur-md transition-all overflow-hidden my-2",
-        statusConfig.borderClass,
-        className
+    <div className={cn("w-full", className)}>
+      {canExpand ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          data-testid="work-row"
+          onClick={() => setExpanded((prev) => !prev)}
+          className={cn(
+            "w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded hover:bg-white/[0.04] transition-colors group",
+            isError ? "text-[#ff6467]" : "text-[#838383]"
+          )}
+        >
+          {rowContent}
+        </button>
+      ) : (
+        <div
+          data-testid="work-row"
+          className={cn(
+            "w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded transition-colors group",
+            isError ? "text-[#ff6467]" : "text-[#838383]"
+          )}
+        >
+          {rowContent}
+        </div>
       )}
-    >
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left hover:bg-white/[0.03] active:bg-white/[0.05] transition-colors"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <Terminal className="w-3.5 h-3.5 text-[#838383] shrink-0" />
-          <span className="text-xs font-semibold text-[#f5f5f5] tracking-tight font-mono truncate">
-            {toolName}
-          </span>
+
+      {canExpand && expanded && (
+        <div className="ml-7 border-l border-[#191919] pl-3 py-1 space-y-1.5">
           {command && (
-            <span className="text-[11px] text-[#838383] truncate font-mono hidden sm:inline opacity-80">
+            <pre
+              data-testid="tool-call-input"
+              tabIndex={0}
+              className="font-mono text-[12px] text-[#838383] whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+            >
               {command}
-            </span>
+            </pre>
+          )}
+          {output && (
+            <pre
+              data-testid="work-row-output"
+              tabIndex={0}
+              className="font-mono text-[12px] text-[#838383] whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+            >
+              {output}
+            </pre>
           )}
         </div>
+      )}
+    </div>
+  );
+};
 
-        <div className="flex items-center gap-2 shrink-0">
-          {durationMs !== undefined && (
-            <span className="text-[10px] text-[#818181] font-mono flex items-center gap-1">
-              <Clock className="w-2.5 h-2.5" />
-              {durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`}
-            </span>
-          )}
+export interface ThinkingBlockProps {
+  kind: "thinking";
+  text: string;
+  source?: "prose";
+  workKey?: string;
+}
 
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border font-mono",
-              statusConfig.badgeClass
+/** One entry in a turn's work disclosure: a tool call or a stretch of reasoning. */
+export type ChatWorkItem = ToolCallCardProps | ThinkingBlockProps;
+
+export const ThinkingBlock: React.FC<{ text: string; source?: "prose" }> = ({
+  text,
+  source,
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const trimmed = text ? text.trim() : "";
+  const firstLine = trimmed ? trimmed.split("\n")[0] : "";
+  const canExpand = trimmed.length > 0;
+  const isProse = source === "prose";
+  const Icon = isProse ? MessageSquare : Brain;
+
+  const rowContent = (
+    <>
+      <div className="w-6 h-6 shrink-0 flex items-center justify-center">
+        <Icon
+          aria-hidden="true"
+          className="w-3.5 h-3.5 text-[#838383]"
+          style={{ width: "14px", height: "14px" }}
+        />
+      </div>
+      <div className="min-w-0 flex-1 truncate text-sm text-[#838383] leading-none">
+        {isProse ? (
+          <>
+            <span className="sr-only">Message: </span>
+            {firstLine && <span className="italic opacity-80">{firstLine}</span>}
+          </>
+        ) : (
+          <>
+            <span className="font-medium">Thinking</span>
+            {firstLine && (
+              <>
+                {" "}
+                <span className="italic opacity-80">{firstLine}</span>
+              </>
             )}
+          </>
+        )}
+      </div>
+    </>
+  );
+
+  return (
+    <div data-testid="thinking-block" className="w-full">
+      {canExpand ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          data-testid="work-row"
+          onClick={() => setExpanded((prev) => !prev)}
+          className="w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded hover:bg-white/[0.04] transition-colors group text-[#838383]"
+        >
+          {rowContent}
+        </button>
+      ) : (
+        <div
+          data-testid="work-row"
+          className="w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded transition-colors group text-[#838383]"
+        >
+          {rowContent}
+        </div>
+      )}
+
+      {canExpand && expanded && (
+        <div className="ml-7 border-l border-[#191919] pl-3 py-1">
+          <p
+            tabIndex={0}
+            className="font-sans text-[12px] text-[#838383] italic whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
           >
-            <StatusIcon
-              className={cn("w-2.5 h-2.5", statusConfig.spin && "animate-spin")}
-            />
-            {statusConfig.badge}
-          </span>
-
-          <span className="text-[#818181]">
-            {expanded ? (
-              <ChevronDown className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronRight className="w-3.5 h-3.5" />
-            )}
-          </span>
-        </div>
-      </button>
-
-      {expanded && (
-        <div className="border-t border-[#191919] bg-black/40 text-xs">
-          {command && (
-            <div className="px-3 py-2 border-b border-[#191919] bg-[#111111]/30 flex items-start justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-[#838383] font-mono text-[11px]">
-                <span className="text-emerald-400 font-bold">$</span>
-                <span className="text-[#f5f5f5] break-all select-all">{command}</span>
-              </div>
-              <button
-                type="button"
-                onClick={handleCopy}
-                title="Copy command"
-                className="p-1 rounded text-[#818181] hover:text-[#f5f5f5] hover:bg-white/5 transition-colors shrink-0"
-              >
-                {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-              </button>
-            </div>
-          )}
-
-          {output ? (
-            <div className="relative">
-              <pre className="p-3 text-[11px] font-mono text-[#f5f5f5] overflow-x-auto max-h-56 scrollbar-thin scrollbar-thumb-[#191919] leading-relaxed whitespace-pre-wrap select-text">
-                {output}
-              </pre>
-              <div className="absolute top-2 right-2">
-                <button
-                  type="button"
-                  onClick={handleCopy}
-                  title="Copy output"
-                  className="px-1.5 py-1 rounded bg-[#1a1b1b]/80 hover:bg-[#141414] text-[#838383] hover:text-[#f5f5f5] text-[10px] font-mono flex items-center gap-1 border border-white/5 backdrop-blur-xs transition-colors"
-                >
-                  {copied ? (
-                    <>
-                      <Check className="w-3 h-3 text-emerald-400" />
-                      <span>Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="px-3 py-2 text-[11px] text-[#818181] italic font-mono">
-              (No output produced)
-            </div>
-          )}
+            {text}
+          </p>
         </div>
       )}
     </div>

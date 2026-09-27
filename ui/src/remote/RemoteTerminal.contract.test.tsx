@@ -93,6 +93,29 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).not.toHaveBeenCalled();
   });
 
+  it("omits viewport geometry from the grid socket request when followHostSize is true", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        title="Remote Shell"
+        followHostSize={true}
+      />,
+    );
+
+    expect(screen.getByText("Remote Shell")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    expect(socket().url).toMatch(/\/api\/v1\/terminal\/session-123\?token=token-abc&render=grid$/);
+    expect(socket().url).not.toContain("cols=");
+    expect(socket().url).not.toContain("rows=");
+
+    act(() => socket().onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
   it("builds account terminal socket URL with daemonEpoch and contains neither render nor cols", async () => {
     let capturedPath: string | null = null;
     const mockSocket = new MockWebSocket("mock://socket");
@@ -1414,5 +1437,22 @@ describe("remote terminal grid contract", () => {
 
     expect(screen.queryByTestId("remote-terminal-overflow-indicator")).toBeNull();
     expect(screen.queryByTestId("remote-terminal-buffered-indicator")).toBeNull();
+  });
+
+  it("enables horizontal scrolling container styles when followHostSize is true", () => {
+    render(
+      <RemoteTerminal
+        sessionId="session-grid-follow"
+        token="token-abc"
+        embedded={true}
+        followHostSize={true}
+      />,
+    );
+
+    const followGrid = screen.getByTestId("remote-terminal-grid");
+    expect(followGrid).toBeInTheDocument();
+    expect(followGrid.className).toContain("overflow-x-auto");
+    expect(followGrid.className).toContain("overflow-y-hidden");
+    expect(followGrid.style.touchAction).toBe("pan-x");
   });
 });

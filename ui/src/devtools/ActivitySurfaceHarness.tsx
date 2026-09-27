@@ -325,7 +325,6 @@ export function ActivitySurfaceHarness() {
       <div data-testid="harness-notifications" className="mt-4 flex h-80 w-[300px] flex-col border border-border bg-worktree-sidebar text-worktree-sidebar-foreground">
         <AttentionInbox
           rows={attentionRows}
-          openSessionCount={Object.keys(state.sessions).length}
           onOpen={(row) => {
             const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === row.sessionId);
             if (!tab) return;

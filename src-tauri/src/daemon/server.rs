@@ -1706,6 +1706,22 @@ pub(crate) fn handover_restorable_unexported(
     count
 }
 
+/// `owned` as the verdict should see it. An older predecessor counts SSH/remote sessions in
+/// `owned` although only local PTYs travel; those that the successor restores from the durable
+/// snapshot are not casualties. A newer predecessor already reports local PTYs only, so nothing
+/// is credited, and crediting it anyway would zero `owned` and disable the owned check.
+pub(crate) fn handover_effective_owned(
+    owned: usize,
+    listed_unique: usize,
+    restorable: usize,
+) -> usize {
+    if owned >= listed_unique && listed_unique > 0 {
+        owned.saturating_sub(restorable)
+    } else {
+        owned
+    }
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -1802,6 +1818,7 @@ impl DaemonServer {
                 .unwrap_or_else(daemon_ssh_store_path),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
             provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
+            desktop_geometries: Arc::new(Mutex::new(HashMap::new())),
         });
         #[cfg(test)]
         let remote_state = Arc::new(RemoteGatewayState::new_with_paths_and_service(
@@ -2495,7 +2512,12 @@ impl DaemonServer {
                     });
                     let restorable =
                         handover_restorable_unexported(&listed, &exported, &durable);
-                    let effective_owned = owned.saturating_sub(restorable);
+                    let listed_unique = listed
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
+                    let effective_owned =
+                        handover_effective_owned(owned, listed_unique, restorable);
                     // A predecessor that reports more than it delivered is the shape of a lossy
                     // handover: the sessions missing from `accepted` are the ones that lose their
                     // PTY owner when the predecessor retires. `owned` is what the predecessor
@@ -2503,6 +2525,7 @@ impl DaemonServer {
                     // checking `accepted` against `offered` alone cannot see those casualties.
                     tracing::info!(
                         owned,
+                        listed_unique,
                         offered,
                         accepted,
                         restorable,
@@ -2886,6 +2909,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                    self.record_desktop_geometry(&session_id, cols, rows);
                     match self.terminal_service.resize_operation(&session_id, generation, cols, rows) {
                         Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(e) => daemon_error(e.to_string()) },
                         Err(e) => daemon_error(e.to_string()),
@@ -2901,6 +2925,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) => {
+                    self.record_desktop_geometry(&session_id, cols, rows);
                     match self.validate_session_ssh_target(&session_id).await {
                         Err(e) => daemon_error(e.to_string()),
                         Ok(()) => match self.terminal_service.remote().resize(&session_id, generation, cols, rows) {
@@ -3108,6 +3133,7 @@ impl DaemonServer {
                     cols,
                     rows,
                 }) => {
+                    self.record_desktop_geometry(&session_id, cols, rows);
                     if self.session_router.is_local_session(&session_id) {
                         match self.resize_session(&session_id, cols, rows).await {
                             Ok(()) => DaemonResponse::ResizeOk,
@@ -4822,6 +4848,36 @@ mod tests {
         assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(3), 24, 24).is_ok());
         // 27 owned, 2 restorable => effective_owned = 25 > 24 accepted => abort.
         assert!(super::handover_delivery_verdict_owned(27usize.saturating_sub(2), 24, 24).is_err());
+    }
+
+    #[test]
+    fn handover_effective_owned_credits_only_an_old_predecessor() {
+        // Old predecessor: owned=28, listed_unique=28, restorable=3 gives 25,
+        // and handover_delivery_verdict_owned(25, 25, 25).is_ok().
+        let effective_old = super::handover_effective_owned(28, 28, 3);
+        assert_eq!(effective_old, 25);
+        assert!(super::handover_delivery_verdict_owned(effective_old, 25, 25).is_ok());
+
+        // New predecessor: owned=28, listed_unique=60, restorable=32 gives 28.
+        let effective_new = super::handover_effective_owned(28, 60, 32);
+        assert_eq!(effective_new, 28);
+
+        // New predecessor losing a PTY:
+        // handover_delivery_verdict_owned(handover_effective_owned(28, 60, 32), 27, 27).is_err().
+        // This is the production bug. It must be err.
+        assert!(super::handover_delivery_verdict_owned(effective_new, 27, 27).is_err());
+
+        // Old predecessor losing a PTY as well as the SSH sessions:
+        // handover_delivery_verdict_owned(handover_effective_owned(28, 28, 3), 24, 24).is_err().
+        assert!(super::handover_delivery_verdict_owned(
+            super::handover_effective_owned(28, 28, 3),
+            24,
+            24
+        )
+        .is_err());
+
+        // Empty case: owned=0, listed_unique=0, restorable=0 gives 0.
+        assert_eq!(super::handover_effective_owned(0, 0, 0), 0);
     }
 
     use super::*;
@@ -7366,5 +7422,158 @@ mod instance_lock_deadline_tests {
         );
         // Lock must have been dropped, so an immediate unarmed call succeeds.
         assert!(lock_file_with_optional_wait(&path, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_desktop_geometry_restore_lifecycle() {
+        use crate::remote::backend::RemoteSessionBackend;
+
+        let server = Arc::new(DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git").args(["init"]).current_dir(repo.path()).output();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+
+        // 1. Spawn a session initially at 80x24.
+        let session_id = server
+            .handle_spawn("req-restore-1", "default", None, None, 80, 24, None, None)
+            .await
+            .unwrap();
+
+        let session = server.terminal_service.get_session(&session_id).unwrap();
+        assert_eq!(session.get_size(), (80, 24));
+
+        // 2. Desktop resize to 120x30 recorded via request dispatch.
+        server.record_desktop_geometry(&session_id, 120, 30);
+        server
+            .resize_session(&session_id, 120, 30)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.session_service.desktop_geometry(&session_id),
+            Some((120, 30))
+        );
+        assert_eq!(session.get_size(), (120, 30));
+
+        // 3. Remote resize to 40x20 changes PTY size without overwriting desktop recorded geometry.
+        server
+            .session_service
+            .resize(&session_id, 40, 20)
+            .await
+            .unwrap();
+        assert_eq!(session.get_size(), (40, 20));
+        assert_eq!(
+            server.session_service.desktop_geometry(&session_id),
+            Some((120, 30)),
+            "remote resize must not overwrite desktop geometry"
+        );
+
+        // 4. restore_desktop_geometry restores PTY back to 120x30.
+        server
+            .session_service
+            .restore_desktop_geometry(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(session.get_size(), (120, 30));
+
+        // 5. restore without a record is a no-op.
+        server
+            .session_service
+            .desktop_geometries
+            .lock()
+            .remove(&session_id);
+        assert_eq!(server.session_service.desktop_geometry(&session_id), None);
+        server
+            .session_service
+            .resize(&session_id, 50, 25)
+            .await
+            .unwrap();
+        assert_eq!(session.get_size(), (50, 25));
+        server
+            .session_service
+            .restore_desktop_geometry(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(session.get_size(), (50, 25));
+
+        // 6. Session close cleans up recorded geometry
+        server
+            .session_service
+            .record_desktop_geometry(&session_id, 120, 30);
+        assert_eq!(
+            server.session_service.desktop_geometry(&session_id),
+            Some((120, 30))
+        );
+        server.handle_close(&session_id).await.unwrap();
+        assert_eq!(
+            server.session_service.desktop_geometry(&session_id),
+            None,
+            "session close must remove desktop geometry record"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_request_resize_records_desktop_geometry() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git").args(["init"]).current_dir(repo.path()).output();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let session_id = server
+            .handle_spawn("req-restore-2", "default", None, None, 80, 24, None, None)
+            .await
+            .unwrap();
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = tokio::io::split(client_stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        #[cfg(not(unix))]
+        let token = Some(server.transport_token.clone());
+        #[cfg(unix)]
+        let token = None;
+
+        let hs = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token,
+        };
+        let mut hs_json = serde_json::to_string(&hs).unwrap();
+        hs_json.push('\n');
+        write_half.write_all(hs_json.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+        reader.read_line(&mut line).await.unwrap();
+
+        let req = DaemonRequest::Resize {
+            session_id: session_id.clone(),
+            cols: 140,
+            rows: 45,
+        };
+        let mut json = serde_json::to_string(&req).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(resp, DaemonResponse::ResizeOk));
+
+        assert_eq!(
+            server.session_service.desktop_geometry(&session_id),
+            Some((140, 45)),
+            "DaemonRequest::Resize must record desktop geometry"
+        );
+
+        drop(reader);
+        drop(write_half);
+        let _ = server_task.await;
     }
 }

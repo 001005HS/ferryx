@@ -30,18 +30,18 @@ type ActivitySource = {
 type ParkedWorkspace = readonly [workspaceId: string, state: Pick<ActivitySource, "activityBySessionId">];
 
 export const ATTENTION_STATE_LABEL: Record<AttentionState, string> = {
-  "needs-you": "유저 인풋 요구",
-  done: "작업 종료",
+  "needs-you": "Needs input",
+  done: "Finished",
 };
 
 export const ATTENTION_STATE_SHORT_LABEL: Record<AttentionState, string> = {
-  "needs-you": "인풋 요구",
-  done: "종료",
+  "needs-you": "Input",
+  done: "Done",
 };
 
 export const ATTENTION_KIND_LABEL: Record<AttentionState, string> = {
-  "needs-you": "입력 대기",
-  done: "완료",
+  "needs-you": "Waiting",
+  done: "Done",
 };
 
 /** The first source that names a workspace owns it, so pass the mounted state before cached snapshots. */
@@ -122,7 +122,7 @@ export function buildAttentionRows(
     const state = attentionStateOf(entry, activity);
     if (!state) continue;
     const title = displayTitle(entry.labels.terminalTitle);
-    const who = entry.labels.agentLabel?.trim() || title || "터미널";
+    const who = entry.labels.agentLabel?.trim() || title || "Terminal";
     const question = activity?.state === "waiting" ? activity.detail?.trim() || undefined : undefined;
     rows.push({
       id: entry.id,
@@ -208,10 +208,10 @@ export function buildRemoteAttentionRows(
 
 export function formatAttentionTime(at: number, now: number): string {
   const seconds = Math.max(0, Math.floor((now - at) / 1000));
-  if (seconds < 60) return "방금";
+  if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}분 전`;
+  if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}시간 전`;
-  return `${Math.floor(hours / 24)}일 전`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }

@@ -111,6 +111,7 @@ import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentit
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessionLifecycle";
+import { flashPane } from "./lib/paneFlash";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
@@ -1559,7 +1560,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isWorktreeListOpen, setIsWorktreeListOpen] = useState(false);
+  const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
@@ -1984,10 +1985,11 @@ function WorkspaceApp({
     if (!project || !liveState || !hasNavigableSession(liveState, row.sessionId)) {
       // A row that can no longer take you anywhere is noise; drop it instead of leaving a dead click.
       notificationCenterStore.dismissSession(row.workspaceId, row.sessionId);
-      toast.info("세션이 닫혀 알림을 지웠습니다");
+      toast.info("Session closed; notification cleared");
       return;
     }
     handleNotificationTarget({ workspaceId: row.workspaceId, sessionId: row.sessionId, revision: row.revision });
+    flashPane(row.sessionId);
   }, [handleNotificationTarget]);
 
   const sidebarAttention = useMemo<SidebarAttention>(() => ({
@@ -1998,9 +2000,9 @@ function WorkspaceApp({
       attentionRows.map((row) => ({ id: row.id, expectedRevision: row.revision })),
     ),
     openSessionCount,
-    worktreeListOpen: isWorktreeListOpen,
-    onWorktreeListOpenChange: setIsWorktreeListOpen,
-  }), [attentionRows, handleOpenAttentionRow, isWorktreeListOpen, openSessionCount]);
+    inboxOpen: isInboxOpen,
+    onInboxOpenChange: setIsInboxOpen,
+  }), [attentionRows, handleOpenAttentionRow, isInboxOpen, openSessionCount]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -2460,13 +2462,14 @@ function WorkspaceApp({
     setIsSettingsOpen((current) => !current);
   }, []);
   const handleToggleNotificationCenter = useCallback(() => {
-    if (isSidebarOpen && !isWorktreeListOpen) {
+    // The inbox lives inside the sidebar, so reaching it from a collapsed sidebar opens both.
+    if (!isSidebarOpen) {
+      setIsInboxOpen(true);
       toggleSidebar();
       return;
     }
-    setIsWorktreeListOpen(false);
-    if (!isSidebarOpen) toggleSidebar();
-  }, [isSidebarOpen, isWorktreeListOpen, toggleSidebar]);
+    setIsInboxOpen((open) => !open);
+  }, [isSidebarOpen, toggleSidebar]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleDeleteWorktree = useCallback((worktree: Worktree) => {
@@ -3122,7 +3125,7 @@ function WorkspaceApp({
             </IconButton>
             <IconButton
               data-shortcut="notifications.toggle"
-              label={attentionRows.length > 0 ? `인박스 열기 (${attentionRows.length})` : "인박스 열기"}
+              label={attentionRows.length > 0 ? `Open inbox (${attentionRows.length})` : "Open inbox"}
               className="no-drag relative"
               size="sm"
               onClick={handleToggleNotificationCenter}
