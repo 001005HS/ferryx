@@ -129,6 +129,28 @@ function splitLayout(): LayoutState {
   };
 }
 
+function twoTabLayout(activeTabId: string): LayoutState {
+  const first = splitLayout();
+  const second: TerminalTab = { id: "tab-second", label: "second", sessionId: "session-c" };
+  return {
+    ...first,
+    tabs: [...first.tabs, second],
+    activeTabId,
+    tabGroups: {
+      "group-main": { id: "group-main", tabIds: ["tab-main", second.id], activeTabId },
+    },
+    layoutsByTabId: {
+      ...first.layoutsByTabId,
+      [second.id]: {
+        root: { type: "leaf", leafId: "leaf-c" },
+        activeLeafId: "leaf-c",
+        expandedLeafId: null,
+        sessionIdsByLeafId: { "leaf-c": "session-c" },
+      },
+    },
+  };
+}
+
 function paneDragStart() {
   return {
     active: {
@@ -170,6 +192,30 @@ function renderSplit() {
 }
 
 describe("drop feedback visibility over native terminal surfaces", () => {
+  it("hides old native panes and shows the selected pane when switching tabs", async () => {
+    platform.isMac = true;
+    vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    const sessions = {
+      "session-a": session("session-a"),
+      "session-b": session("session-b"),
+      "session-c": session("session-c"),
+    };
+    const view = render(<TerminalSplitView layout={twoTabLayout("tab-main")} sessions={sessions} />);
+    await act(async () => {});
+    expect(visibilityByLeafId()).toEqual({ "leaf-a": "true", "leaf-b": "true", "leaf-c": "false" });
+
+    await act(async () => {
+      view.rerender(<TerminalSplitView layout={twoTabLayout("tab-second")} sessions={sessions} />);
+    });
+    expect(visibilityByLeafId()).toEqual({ "leaf-a": "false", "leaf-b": "false", "leaf-c": "true" });
+
+    await act(async () => {
+      view.rerender(<TerminalSplitView layout={twoTabLayout("tab-main")} sessions={sessions} />);
+    });
+    expect(visibilityByLeafId()).toEqual({ "leaf-a": "true", "leaf-b": "true", "leaf-c": "false" });
+  });
+
   it("keeps both macOS panes visible while the targeted pane paints drop feedback", () => {
     platform.isMac = true;
     vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });

@@ -845,6 +845,7 @@ function TabGroupView({
                     node={tabLayout.root}
                     tab={tab}
                     tabLayout={tabLayout}
+                    tabVisible={isTabActive}
                     sessions={sessions}
                     activityBySessionId={activityBySessionId}
                     groupFocused={isFocused && isTabActive}
@@ -890,6 +891,7 @@ type PaneRendererProps = {
   node: PaneNode;
   tab: WorkspaceTab;
   tabLayout: TabPaneLayout;
+  tabVisible: boolean;
   sessions: Record<string, TerminalSession>;
   activityBySessionId?: Record<string, TerminalActivity>;
   groupFocused: boolean;
@@ -936,6 +938,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         activity={props.activityBySessionId?.[sessionId]}
         isOnlyLeaf={tabLayout.root.type === "leaf"}
         isActive={props.groupFocused && tabLayout.activeLeafId === node.leafId}
+        tabVisible={props.tabVisible}
         browserPanesVisible={browserPanesVisible}
         dropFeedbackLeafId={dropFeedbackLeafId}
         searchOpen={props.searchLeafId === node.leafId}
@@ -989,6 +992,7 @@ type PaneLeafViewProps = {
   activity?: TerminalActivity;
   isOnlyLeaf: boolean;
   isActive: boolean;
+  tabVisible: boolean;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
   searchOpen?: boolean;
@@ -1018,6 +1022,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   activity,
   isOnlyLeaf,
   isActive,
+  tabVisible,
   browserPanesVisible,
   dropFeedbackLeafId,
   searchOpen,
@@ -1090,7 +1095,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   const flashToken = usePaneFlashToken(flashSessionId);
 
   return (
-    <NativeTerminalVisibilityProvider visible occluded={showsDropFeedback}>
+    <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
     <div
       ref={(node) => {
         droppable.setNodeRef(node);
