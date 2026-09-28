@@ -1,7 +1,8 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
-import { Toaster } from "sonner";
+import { Toaster } from "../components/ui/sonner";
+import { TerminalFileLinkActions } from "../components/TerminalFileLinkActions";
 
 import "../index.css";
 import { TabBar } from "../components/TabBar";
@@ -20,6 +21,8 @@ import {
   retainFilePreview,
 } from "../lib/filePreviewTabRegistry";
 import { openTerminalToken } from "../lib/linkRouting";
+import { TERMINAL_FILE_LINK_ACTION_EVENT } from "../lib/terminalLinkTarget";
+import { isMacPlatform, terminalLinkOpenHint } from "../lib/terminalLinkHints";
 import type { FileTab } from "../lib/types";
 
 declare global {
@@ -179,11 +182,27 @@ const FIXTURES: Record<string, FixtureEntry> = {
     kind: "text",
     text: MAIN_TS_CONTENT,
   },
+  "src/main.ts": {
+    kind: "text",
+    text: MAIN_TS_CONTENT,
+  },
+  "/qa/repo/src/main.ts": {
+    kind: "text",
+    text: MAIN_TS_CONTENT,
+  },
   "/repo/README.md": {
     kind: "markdown",
     text: README_MD_CONTENT,
   },
+  "README.md": {
+    kind: "markdown",
+    text: README_MD_CONTENT,
+  },
   "/repo/docs/guide.md": {
+    kind: "markdown",
+    text: GUIDE_MD_CONTENT,
+  },
+  "docs/guide.md": {
     kind: "markdown",
     text: GUIDE_MD_CONTENT,
   },
@@ -200,6 +219,11 @@ const FIXTURES: Record<string, FixtureEntry> = {
 function findFixture(reqPath: string): { resolvedPath: string; fixture: FixtureEntry } {
   if (FIXTURES[reqPath]) {
     return { resolvedPath: reqPath, fixture: FIXTURES[reqPath] };
+  }
+  for (const [fixturePath, fixture] of Object.entries(FIXTURES)) {
+    if (fixturePath.endsWith(reqPath) || reqPath.endsWith(fixturePath)) {
+      return { resolvedPath: fixturePath, fixture };
+    }
   }
   const dotIndex = reqPath.lastIndexOf(".");
   if (dotIndex !== -1) {
@@ -219,6 +243,39 @@ mockIPC((cmd, args) => {
       ? (args as { path: string }).path
       : undefined;
   logQa(path !== undefined ? `invoke:${cmd}:${path}` : `invoke:${cmd}`);
+
+  if (cmd === "cmd_file_open_with_apps") {
+    return {
+      apps: [
+        { id: "/Applications/TextEdit.app", name: "TextEdit" },
+        { id: "/Applications/Visual Studio Code.app", name: "Visual Studio Code" },
+      ],
+      supportsChooser: true,
+    };
+  }
+
+  if (cmd === "cmd_file_open_with") {
+    const appId =
+      typeof (args as { appId?: unknown })?.appId === "string"
+        ? (args as { appId: string }).appId
+        : "";
+    logQa(`openWith:${appId}`);
+    return null;
+  }
+
+  if (cmd === "cmd_webview_print") {
+    logQa("print");
+    return null;
+  }
+
+  if (cmd === "cmd_path_reveal" || cmd === "cmd_reveal_path") {
+    const targetPath =
+      typeof (args as { path?: unknown })?.path === "string"
+        ? (args as { path: string }).path
+        : path ?? "";
+    logQa(`reveal:${targetPath}`);
+    return null;
+  }
 
   if (cmd === FILE_PREVIEW_COMMANDS.open) {
     const reqPath =
@@ -256,8 +313,12 @@ mockIPC((cmd, args) => {
       typeof (args as { path?: unknown })?.path === "string"
         ? (args as { path: string }).path
         : "";
-    const isDirectory = reqPath === "/repo/src";
-    const exists = reqPath in FIXTURES || isDirectory;
+    const isDirectory = reqPath === "/repo/src" || reqPath === "src";
+    const exists =
+      !reqPath.includes("missing") &&
+      (reqPath in FIXTURES ||
+        isDirectory ||
+        Object.keys(FIXTURES).some((f) => f.endsWith(reqPath) || reqPath.endsWith(f)));
     return {
       resolvedPath: reqPath,
       exists,
@@ -497,6 +558,65 @@ function FileOpenQaApp(): JSX.Element {
         </button>
       </div>
 
+      <div
+        data-testid="qa-terminal-link-ux-section"
+        className="flex flex-wrap items-center gap-2 border-b border-border bg-card/60 px-2 py-1.5 text-xs"
+      >
+        <span className="font-semibold text-muted-foreground">Terminal link UX:</span>
+        <button
+          type="button"
+          data-testid="qa-link-actions-file"
+          className="rounded border border-border bg-secondary px-2.5 py-1 font-medium text-secondary-foreground hover:bg-secondary/80"
+          onClick={() => {
+            window.dispatchEvent(
+              new CustomEvent(TERMINAL_FILE_LINK_ACTION_EVENT, {
+                detail: {
+                  token: {
+                    type: "file",
+                    path: "src/main.ts",
+                    absolutePath: "/qa/repo/src/main.ts",
+                    line: 12,
+                  },
+                  open: async (shift: boolean) => {
+                    logQa("linkOpen:" + shift);
+                  },
+                },
+              }),
+            );
+          }}
+        >
+          Link actions (file)
+        </button>
+        <button
+          type="button"
+          data-testid="qa-link-actions-url"
+          className="rounded border border-border bg-secondary px-2.5 py-1 font-medium text-secondary-foreground hover:bg-secondary/80"
+          onClick={() => {
+            window.dispatchEvent(
+              new CustomEvent(TERMINAL_FILE_LINK_ACTION_EVENT, {
+                detail: {
+                  token: {
+                    type: "url",
+                    target: "https://example.com",
+                  },
+                  open: async (shift: boolean) => {
+                    logQa("linkOpen:" + shift);
+                  },
+                },
+              }),
+            );
+          }}
+        >
+          Link actions (url)
+        </button>
+        <span
+          data-testid="qa-link-hint"
+          className="font-mono text-muted-foreground"
+        >
+          {terminalLinkOpenHint("file", isMacPlatform())}
+        </span>
+      </div>
+
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}
@@ -530,6 +650,7 @@ function FileOpenQaApp(): JSX.Element {
         )}
       </main>
 
+      <TerminalFileLinkActions />
       <Toaster position="bottom-right" />
     </div>
   );
