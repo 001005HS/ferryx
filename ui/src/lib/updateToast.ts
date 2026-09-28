@@ -2,6 +2,8 @@ import { toast } from "../components/ui/sonner";
 import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 import {
   downloadAndInstallUpdate,
+  getUpdateStatus,
+  relaunchApp,
   subscribeUpdateStatus,
   type UpdateStatus,
   updatesManagedExternally,
@@ -56,8 +58,9 @@ export function handleUpdateStatusChange(
         duration: Infinity,
         action: {
           label: "Update",
-          onClick: () => {
-            void downloadAndInstallUpdate();
+          onClick: async () => {
+            await downloadAndInstallUpdate();
+            if (getUpdateStatus().state === "downloaded") await relaunchApp();
           },
         },
         onDismiss: () => {

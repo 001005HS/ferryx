@@ -11,6 +11,8 @@ import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 
 let statusSubscriber: ((status: any) => void) | null = null;
 const mockDownloadAndInstallUpdate = vi.fn().mockResolvedValue(undefined);
+const mockRelaunchApp = vi.fn().mockResolvedValue(undefined);
+let updateState = "available";
 
 const mockUpdatesManagedExternally = vi.fn().mockResolvedValue(false);
 
@@ -22,6 +24,8 @@ vi.mock("./updater", () => ({
     };
   }),
   downloadAndInstallUpdate: () => mockDownloadAndInstallUpdate(),
+  getUpdateStatus: () => ({ state: updateState }),
+  relaunchApp: () => mockRelaunchApp(),
   updatesManagedExternally: () => mockUpdatesManagedExternally(),
 }));
 
@@ -64,6 +68,8 @@ describe("updateToast", () => {
     storage = createMockStorage();
     vi.clearAllMocks();
     mockUpdatesManagedExternally.mockResolvedValue(false);
+    mockDownloadAndInstallUpdate.mockResolvedValue(undefined);
+    updateState = "available";
     statusSubscriber = null;
   });
 
@@ -96,6 +102,31 @@ describe("updateToast", () => {
       const action = call[1].action;
       action.onClick();
       expect(mockDownloadAndInstallUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it("relaunches only after the toast update finishes installing", async () => {
+      let finishInstall: (() => void) | undefined;
+      mockDownloadAndInstallUpdate.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishInstall = () => { updateState = "downloaded"; resolve(); };
+      }));
+      handleUpdateStatusChange({ state: "available", version: "2026.830.3" }, storage);
+
+      const click = mockToast.info.mock.calls[0][1].action.onClick();
+      expect(mockRelaunchApp).not.toHaveBeenCalled();
+      expect(finishInstall).toBeTypeOf("function");
+      finishInstall?.();
+      await click;
+
+      expect(mockRelaunchApp).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not relaunch when the toast update fails", async () => {
+      mockDownloadAndInstallUpdate.mockImplementationOnce(async () => { updateState = "error"; });
+      handleUpdateStatusChange({ state: "available", version: "2026.830.3" }, storage);
+
+      await mockToast.info.mock.calls[0][1].action.onClick();
+
+      expect(mockRelaunchApp).not.toHaveBeenCalled();
     });
 
     it("persists dismissed version when toast is dismissed", () => {
