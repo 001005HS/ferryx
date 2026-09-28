@@ -7647,8 +7647,48 @@ describe("terminal link UX (U1-U3)", () => {
       );
     });
 
-    await Promise.resolve();
-    expect(actionEvents).toHaveLength(1);
+    // Disable mouse tracking again
+    setSessionMouseTracking("session-test-d", false);
+
+    // Third plain click (mouse tracking disabled again -> dispatches second action)
+    act(() => {
+      fireEvent.pointerDown(pane, {
+        button: 0,
+        clientX: 20,
+        clientY: 20,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          button: 0,
+          clientX: 20,
+          clientY: 20,
+          metaKey: false,
+          ctrlKey: false,
+          altKey: false,
+          shiftKey: false,
+          bubbles: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(actionEvents.length).toBeGreaterThanOrEqual(2);
+    });
+
+    await waitFor(() => {
+      expect(
+        tauriCoreMocks.invoke.mock.calls.filter((c) => c[0] === "cmd_file_preview_resolve").length,
+      ).toBe(2);
+    });
+
+    expect(actionEvents).toHaveLength(2);
+    expect(
+      tauriCoreMocks.invoke.mock.calls.filter((c) => c[0] === "cmd_file_preview_resolve").length,
+    ).toBe(2);
 
     window.removeEventListener("ferryx:terminal-file-link-actions", onAction);
     setSessionMouseTracking("session-test-d", false);
