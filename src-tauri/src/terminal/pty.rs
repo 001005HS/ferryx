@@ -1486,4 +1486,107 @@ mod tests {
 
         succ_pump.abort();
     }
+
+    /// Regression: closing an adopted session whose shell is running a foreground job.
+    ///
+    /// Job control puts the foreground job in its own process group. Handover used to record
+    /// that job's group (`tcgetpgrp`) as the session's group, so Close sent TERM/KILL to the
+    /// job only, the shell survived, and Close failed with "Timed out reaping killed PTY
+    /// session". The shell and its job ignore TERM and HUP, so only a KILL that actually
+    /// reaches each group lets Close succeed and leaves nothing behind.
+    #[tokio::test]
+    async fn close_adopted_session_reaps_shell_running_a_foreground_job() {
+        let predecessor = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("trap '' TERM HUP; set -m; sleep 300; sleep 300");
+        let (session_id, _pred_rx) = predecessor.spawn(cmd, 80, 24).expect("spawn shell");
+        let session = predecessor.get_session(&session_id).expect("session registered");
+        let shell_pid = session.pid().expect("shell pid");
+
+        // Wait until the job owns the terminal from a group other than the shell's.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let job_group = loop {
+            if let Ok(Some(group)) = session.foreground_process_group() {
+                if group != shell_pid {
+                    break group;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "foreground job never took the terminal"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        let export = predecessor.export_session(&session_id).expect("export session");
+        assert_eq!(
+            export.pgid,
+            Some(shell_pid),
+            "handover must record the shell's group, not the foreground job's"
+        );
+
+        // Adopt a record as older daemons wrote it: the job's group in place of the shell's.
+        let (master_fd, mut snapshot) = export.into_parts();
+        snapshot.pgid = Some(job_group);
+        let successor = PtyManager::new();
+        let _succ_rx = successor
+            .adopt_transferred_session(master_fd, snapshot)
+            .expect("adopt session");
+
+        tokio::time::timeout(Duration::from_secs(8), successor.close_session(&session_id))
+            .await
+            .expect("close must be bounded")
+            .expect("close must reap the adopted shell");
+
+        assert!(!successor.has_session(&session_id));
+        assert!(
+            !crate::terminal::session::AdoptedProcess { pid: shell_pid, process_group: None }
+                .is_alive(),
+            "the adopted shell must be gone after close"
+        );
+        // The job ignores the SIGHUP a dying session leader sends, so it only goes away if
+        // Close signalled the foreground group as well.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let job = crate::terminal::session::AdoptedProcess {
+            pid: job_group,
+            process_group: None,
+        };
+        while unsafe { libc::kill(-(job_group as i32), 0) } == 0 && job.is_alive() {
+            if std::time::Instant::now() >= deadline {
+                unsafe { libc::kill(-(job_group as i32), libc::SIGKILL) };
+                panic!("close left the foreground job running");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = session.kill();
+    }
+
+    /// Regression: a successor daemon is never the adopted shell's parent, so it cannot reap
+    /// it. An exited-but-unreaped process still answers `kill(pid, 0)`; liveness must report
+    /// it dead instead of letting Close wait out its reap timeout.
+    #[test]
+    fn adopted_process_is_not_alive_once_it_is_a_zombie() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .spawn()
+            .expect("spawn child");
+        let adopted = crate::terminal::session::AdoptedProcess {
+            pid: child.id(),
+            process_group: None,
+        };
+        assert!(adopted.is_alive(), "running child must be alive");
+
+        child.kill().expect("kill child");
+        // Deliberately not reaped: the child stays a zombie of this process.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while adopted.is_alive() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a killed, unreaped child must stop reporting alive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait().expect("reap child");
+    }
 }

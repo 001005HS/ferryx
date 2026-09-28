@@ -102,12 +102,65 @@ pub struct AdoptedProcess {
 impl AdoptedProcess {
     pub fn is_alive(&self) -> bool {
         let res = unsafe { libc::kill(self.pid as i32, 0) };
-        if res == 0 {
-            return true;
+        if res != 0 {
+            let err = std::io::Error::last_os_error();
+            return err.raw_os_error() == Some(libc::EPERM);
         }
-        let err = std::io::Error::last_os_error();
-        err.raw_os_error() == Some(libc::EPERM)
+        // A successor daemon is not the adopted shell's parent, so it can never waitpid it.
+        // An exited-but-unreaped shell still answers kill(pid, 0) until its real parent reaps
+        // it; treating that zombie as alive made Close time out after a successful SIGKILL.
+        !process_is_zombie(self.pid)
     }
+}
+
+/// The process group the kernel currently reports for `pid`.
+#[cfg(unix)]
+fn live_process_group(pid: u32) -> Option<u32> {
+    let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+    (group > 0).then_some(group as u32)
+}
+
+#[cfg(target_os = "macos")]
+fn process_is_zombie(pid: u32) -> bool {
+    // proc_pidinfo answers ESRCH for a zombie, so only the kinfo_proc sysctl can see one.
+    // libc does not bind kinfo_proc on Apple targets; read extern_proc.p_stat by offset
+    // (identical on arm64 and x86_64: 648-byte struct, p_stat at 36).
+    const KINFO_PROC_SIZE: usize = 648;
+    const P_STAT_OFFSET: usize = 36;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid as i32];
+    let mut info = [0u8; KINFO_PROC_SIZE];
+    let mut len = info.len();
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            info.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    read == 0 && len == KINFO_PROC_SIZE && u32::from(info[P_STAT_OFFSET]) == libc::SZOMB
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_is_zombie(pid: u32) -> bool {
+    // The state field follows the parenthesised command name, which may itself contain ')'.
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn process_is_zombie(_pid: u32) -> bool {
+    false
 }
 
 pub(crate) enum ProcessHandle {
@@ -496,22 +549,24 @@ impl PtySession {
             .and_then(|child| child.pid())
     }
 
+    /// The shell's own process group. This is what handover records and what lifecycle
+    /// signals target. It must never be the terminal's foreground job group
+    /// (`tcgetpgrp`): a record holding a job's group makes Close kill only that job and
+    /// leave the shell running. The kernel's live answer wins over a recorded group so a
+    /// record written by an older daemon (which stored the job group) cannot misdirect.
     pub fn pgid(&self) -> Option<u32> {
+        let pid = self.pid();
+        #[cfg(unix)]
+        {
+            if let Some(group) = pid.and_then(live_process_group) {
+                return Some(group);
+            }
+        }
         self.child
             .lock()
             .as_ref()
             .and_then(|child| child.process_group())
-            .or_else(|| {
-                #[cfg(unix)]
-                {
-                    self.foreground_process_group().ok().flatten()
-                }
-                #[cfg(not(unix))]
-                {
-                    None
-                }
-            })
-            .or_else(|| self.pid())
+            .or(pid)
     }
 
     pub fn pause_reader(&self) {
@@ -817,18 +872,28 @@ impl PtySession {
         };
 
         // portable-pty creates the child as the PTY session/process-group leader on Unix.
-        // Addressing the negative pid signals the whole job-control process group rather
+        // Addressing the negative group signals the shell's whole process group rather
         // than only the shell process.
-        let group = self.child.lock().as_ref().and_then(|h| h.process_group());
-        let target = group.map(|g| -(g as i32)).unwrap_or(-(pid as i32));
-        let result = unsafe { libc::kill(target, sig) };
-        if result == 0 {
-            return Ok(());
-        }
+        let shell_group = self.pgid().unwrap_or(pid);
+        // Termination must also reach a job that currently owns the terminal from its own
+        // group (job control puts every foreground job in a separate group). Read it before
+        // signalling, while the shell still holds the terminal.
+        let foreground_group = match signal {
+            TerminalSignal::Terminate | TerminalSignal::Kill => self
+                .foreground_process_group()
+                .ok()
+                .flatten()
+                .filter(|group| *group > 1 && *group != shell_group),
+            _ => None,
+        };
 
-        // Fallback to direct PID if process group signaling failed
-        let result = unsafe { libc::kill(pid as i32, sig) };
-        if result == 0 {
+        let mut delivered = unsafe { libc::kill(-(shell_group as i32), sig) } == 0
+            // Fallback to direct PID if process group signaling failed
+            || unsafe { libc::kill(pid as i32, sig) } == 0;
+        if let Some(group) = foreground_group {
+            delivered |= unsafe { libc::kill(-(group as i32), sig) } == 0;
+        }
+        if delivered {
             return Ok(());
         }
 
