@@ -56,6 +56,12 @@ vi.mock("./BrowserPane", () => ({
   ),
 }));
 
+vi.mock("./FilePreviewPane", () => ({
+  FilePreviewPane: ({ path }: { path: string }) => (
+    <div data-testid="file-preview-pane" data-path={path} />
+  ),
+}));
+
 import { TerminalSplitView } from "./TerminalSplitView";
 
 afterEach(cleanup);
@@ -78,7 +84,13 @@ type TerminalPaneLeafContent = {
   sessionId: string;
 };
 
-type PaneLeafContent = TerminalPaneLeafContent | BrowserPaneLeafContent;
+type FilePaneLeafContent = {
+  kind: "file";
+  path: string;
+  previewId?: string;
+};
+
+type PaneLeafContent = TerminalPaneLeafContent | BrowserPaneLeafContent | FilePaneLeafContent;
 
 type MixedTabPaneLayout = TabPaneLayout & {
   contentsByLeafId?: Record<string, PaneLeafContent>;
@@ -212,5 +224,107 @@ describe("TerminalSplitView mixed terminal and browser pane layout", () => {
 
     expect(termEdgeDropZones).toHaveLength(4);
     expect(browserEdgeDropZones).toHaveLength(4);
+
+    // 6. Copy Debug Info button exists on terminal pane toolbar, omitted on browser pane toolbar
+    const termToolbar = within(paneLeaves[0]).getByTestId("pane-toolbar");
+    const browserToolbar = within(paneLeaves[1]).getByTestId("pane-toolbar");
+    expect(within(termToolbar).getByRole("button", { name: "Copy Debug Info" })).toBeInTheDocument();
+    expect(within(browserToolbar).queryByRole("button", { name: "Copy Debug Info" })).not.toBeInTheDocument();
+  });
+
+  it("shows Copy Debug Info button only for terminal content, omitting it on browser and file panes", () => {
+    const singleTerminalTab: TerminalTab = {
+      kind: "terminal",
+      id: "tab-term-1",
+      label: "Terminal Workspace",
+      sessionId: "session-term-1",
+    };
+
+    const mixedLayout: MixedLayoutState = {
+      tabs: [singleTerminalTab],
+      activeTabId: singleTerminalTab.id,
+      tabGroups: {
+        "group-default": {
+          id: "group-default",
+          tabIds: [singleTerminalTab.id],
+          activeTabId: singleTerminalTab.id,
+        },
+      },
+      tabGroupLayout: { type: "group", groupId: "group-default" },
+      focusedGroupId: "group-default",
+      layoutsByTabId: {
+        [singleTerminalTab.id]: {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-term" },
+            second: {
+              type: "split",
+              direction: "vertical",
+              first: { type: "leaf", leafId: "leaf-browser" },
+              second: { type: "leaf", leafId: "leaf-file" },
+              ratio: 0.5,
+            },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-term",
+          expandedLeafId: null,
+          sessionIdsByLeafId: {
+            "leaf-term": "session-term-1",
+            "leaf-browser": "",
+            "leaf-file": "",
+          },
+          contentsByLeafId: {
+            "leaf-term": {
+              kind: "terminal",
+              sessionId: "session-term-1",
+            },
+            "leaf-browser": {
+              kind: "browser",
+              browserId: "browser-leaf-1",
+              url: "https://example.com/docs",
+              title: "Documentation",
+              loading: false,
+              canGoBack: true,
+              canGoForward: false,
+              profileId: "default",
+            },
+            "leaf-file": {
+              kind: "file",
+              path: "/repo/readme.md",
+              previewId: "preview-readme",
+            },
+          },
+        },
+      },
+    };
+
+    const sessions: Record<string, TerminalSession> = {
+      "session-term-1": createSession("session-term-1"),
+    };
+
+    render(
+      <TerminalSplitView
+        layout={mixedLayout as LayoutState}
+        sessions={sessions}
+        onNavigateBrowserTab={vi.fn()}
+        onReloadBrowserTab={vi.fn()}
+      />,
+    );
+
+    const paneLeaves = screen.getAllByTestId("pane-leaf");
+    expect(paneLeaves).toHaveLength(3);
+
+    // Terminal leaf: has Copy Debug Info
+    const termToolbar = within(paneLeaves[0]).getByTestId("pane-toolbar");
+    expect(within(termToolbar).getByRole("button", { name: "Copy Debug Info" })).toBeInTheDocument();
+
+    // Browser leaf: no Copy Debug Info
+    const browserToolbar = within(paneLeaves[1]).getByTestId("pane-toolbar");
+    expect(within(browserToolbar).queryByRole("button", { name: "Copy Debug Info" })).not.toBeInTheDocument();
+
+    // File leaf: no Copy Debug Info
+    const fileToolbar = within(paneLeaves[2]).getByTestId("pane-toolbar");
+    expect(within(fileToolbar).queryByRole("button", { name: "Copy Debug Info" })).not.toBeInTheDocument();
   });
 });

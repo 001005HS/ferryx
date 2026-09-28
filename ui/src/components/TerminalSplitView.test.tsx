@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { resetNotificationSettings, saveNotificationSettings } from "../lib/notificationSettings";
 import { flashPane, resetPaneFlashForTests } from "../lib/paneFlash";
+import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
 import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
 
@@ -15,6 +16,14 @@ const nativeMenu = vi.hoisted(() => ({
     items: Array<Record<string, unknown>>;
     onAction: (id: string) => void;
   },
+}));
+
+const mockClipboard = vi.hoisted(() => ({
+  copyTextToClipboard: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("../lib/clipboard", () => ({
+  copyTextToClipboard: (text: string) => mockClipboard.copyTextToClipboard(text),
 }));
 
 vi.mock("../lib/nativeMenu", () => ({
@@ -64,12 +73,14 @@ vi.mock("./TerminalPane", () => ({
 
 beforeEach(() => {
   resetNotificationSettings();
+  mockClipboard.copyTextToClipboard.mockResolvedValue(true);
 });
 
 afterEach(() => {
   cleanup();
   resetNotificationSettings();
   nativeMenu.lastCall = null;
+  mockClipboard.copyTextToClipboard.mockClear();
 });
 
 function tab(id: string, sessionId: string): TerminalTab {
@@ -140,8 +151,9 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.getByTestId("tab-strip")).toBeInTheDocument();
     expect(screen.getByTestId("pane-leaf")).toBeInTheDocument();
     expect(screen.getByTestId("pane-toolbar")).toBeInTheDocument();
-    expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("h-4");
+    expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("h-5");
     expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("pointer-events-none");
+    expect(screen.getByRole("button", { name: "Copy Debug Info" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane right" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane down" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close split view" })).not.toBeInTheDocument();
@@ -154,7 +166,7 @@ describe("TerminalSplitView group and pane rendering", () => {
     const hotspot = screen.getByTestId("pane-toolbar-hotspot");
     const toolbar = screen.getByTestId("pane-toolbar");
 
-    expect(hotspot).toHaveClass("h-4");
+    expect(hotspot).toHaveClass("h-5");
     expect(pane).toHaveAttribute("data-header-hovered", "false");
     expect(toolbar).toHaveClass("pointer-events-none");
 
@@ -764,14 +776,15 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 
-  it("narrows pane toolbar hover hotspot to h-4 (16px) and toggles toolbar on top hover", () => {
+  it("narrows pane toolbar hover hotspot to h-5 (20px) and toggles toolbar on top hover", () => {
     render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
 
     const hotspot = screen.getByTestId("pane-toolbar-hotspot");
     const toolbar = screen.getByTestId("pane-toolbar");
     const paneLeaf = screen.getByTestId("pane-leaf");
 
-    expect(hotspot).toHaveClass("h-4");
+    expect(hotspot).toHaveClass("h-5");
+    expect(toolbar).toHaveClass("h-5");
     expect(toolbar).toHaveClass("pointer-events-none");
 
     // Mock bounding rect for pane-leaf
@@ -787,11 +800,11 @@ describe("TerminalSplitView group and pane rendering", () => {
       toJSON: () => {},
     });
 
-    // Move mouse within top 16px (e.g. clientY = 108, relativeY = 8)
-    fireEvent.mouseMove(paneLeaf, { clientY: 108 });
+    // Move mouse within top 20px (e.g. clientY = 118, relativeY = 18)
+    fireEvent.mouseMove(paneLeaf, { clientY: 118 });
     expect(toolbar).toHaveClass("pointer-events-auto");
 
-    // Move mouse below 16px (e.g. clientY = 150, relativeY = 50)
+    // Move mouse below 20px (e.g. clientY = 150, relativeY = 50)
     fireEvent.mouseMove(paneLeaf, { clientY: 150 });
     expect(toolbar).toHaveClass("pointer-events-none");
   });
@@ -961,5 +974,94 @@ describe("inbox navigation flash", () => {
 
     fireEvent.animationEnd(second);
     expect(screen.queryByTestId("pane-inbox-flash")).toBeNull();
+  });
+});
+
+describe("TerminalSplitView pane copy debug info", () => {
+  it("copies exact debug info for the specific terminal pane, including inactive panes in a split", async () => {
+    const sessions = splitSessions();
+    render(<TerminalSplitView layout={splitLayout()} sessions={sessions} />);
+
+    const copyButtons = screen.getAllByRole("button", { name: "Copy Debug Info" });
+    expect(copyButtons).toHaveLength(2);
+
+    // Active pane (leaf-1)
+    fireEvent.click(copyButtons[0]);
+    expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledTimes(1);
+    expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledWith(
+      formatPaneDebugInfo("leaf-1", sessions["session-1"]),
+    );
+    const firstPayload = JSON.parse(mockClipboard.copyTextToClipboard.mock.calls[0][0]);
+    expect(firstPayload.leafId).toBe("leaf-1");
+    expect(firstPayload.sessionId).toBe("session-1");
+    expect(firstPayload.backendSessionId).toBe("backend-1");
+
+    mockClipboard.copyTextToClipboard.mockClear();
+
+    // Inactive pane (leaf-2)
+    fireEvent.click(copyButtons[1]);
+    expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledTimes(1);
+    expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledWith(
+      formatPaneDebugInfo("leaf-2", sessions["session-2"]),
+    );
+    const secondPayload = JSON.parse(mockClipboard.copyTextToClipboard.mock.calls[0][0]);
+    expect(secondPayload.leafId).toBe("leaf-2");
+    expect(secondPayload.sessionId).toBe("session-2");
+    expect(secondPayload.backendSessionId).toBe("backend-2");
+  });
+
+  it("stops propagation on click and pointerDown to avoid changing pane focus or triggering split/drag", () => {
+    const onFocusPane = vi.fn();
+    const onSplitPane = vi.fn();
+    const onClosePane = vi.fn();
+
+    render(
+      <TerminalSplitView
+        layout={singleTabLayout()}
+        sessions={{ "session-1": session("session-1", "backend-1") }}
+        onFocusPane={onFocusPane}
+        onSplitPane={onSplitPane}
+        onClosePane={onClosePane}
+      />,
+    );
+
+    const copyButton = screen.getByRole("button", { name: "Copy Debug Info" });
+
+    // Pointer down must stop propagation: must not focus pane, must not drag
+    fireEvent.pointerDown(copyButton);
+    expect(onFocusPane).not.toHaveBeenCalled();
+    expect(onSplitPane).not.toHaveBeenCalled();
+    expect(onClosePane).not.toHaveBeenCalled();
+    expect(copyButton).not.toHaveAttribute("draggable", "true");
+
+    // Click must copy without focusing or splitting
+    fireEvent.click(copyButton);
+    expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledWith(
+      formatPaneDebugInfo("leaf-1", session("session-1", "backend-1")),
+    );
+    expect(onFocusPane).not.toHaveBeenCalled();
+    expect(onSplitPane).not.toHaveBeenCalled();
+    expect(onClosePane).not.toHaveBeenCalled();
+  });
+
+  it("reveals toolbar when keyboard focus moves into toolbar controls and hides on blur", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+
+    const toolbar = screen.getByTestId("pane-toolbar");
+    const copyButton = screen.getByRole("button", { name: "Copy Debug Info" });
+
+    // Initially hidden
+    expect(toolbar).toHaveClass("pointer-events-none");
+    expect(toolbar).toHaveClass("opacity-0");
+
+    // Keyboard focus onto Copy button reveals toolbar
+    fireEvent.focus(copyButton);
+    expect(toolbar).toHaveClass("pointer-events-auto");
+    expect(toolbar).toHaveClass("opacity-100");
+
+    // Blur outside toolbar hides it
+    fireEvent.blur(toolbar, { relatedTarget: document.body });
+    expect(toolbar).toHaveClass("pointer-events-none");
+    expect(toolbar).toHaveClass("opacity-0");
   });
 });

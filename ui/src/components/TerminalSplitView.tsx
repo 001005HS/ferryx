@@ -18,7 +18,7 @@ import {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
-import { Columns2, Rows2, X } from "lucide-react";
+import { Columns2, Copy, Rows2, X } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 
@@ -38,6 +38,7 @@ import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalize
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
 import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { createFileTabMenuHandlers } from "../lib/fileTabPaths";
 import { getFilePreview } from "../lib/filePreviewTabRegistry";
 import { revealPath } from "../lib/tauri";
@@ -823,11 +824,6 @@ function TabGroupView({
         onTogglePin={onToggleTabPin}
         onResetAgentState={onResetAgentState}
         sessionIdForLifecycle={(tab) => focusedPaneSessionId(layout, tab)}
-        debugInfoForTab={(tab) => {
-          const sessionId = focusedPaneSessionId(layout, tab);
-          if (!sessionId) return null;
-          return formatPaneDebugInfo(getTabPaneLayout(layout, tab).activeLeafId ?? null, sessions[sessionId]);
-        }}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
         onMoveTabToSplit={moveTabToSplitEdge}
@@ -1089,6 +1085,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onFocusPane,
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
+  const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
   const leafRef = React.useRef<HTMLDivElement | null>(null);
   const focusFrameRef = React.useRef<number | null>(null);
   const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1174,7 +1171,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       onMouseMove={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         const relativeY = event.clientY - rect.top;
-        if (relativeY <= 16) {
+        if (relativeY <= 20) {
           if (!isHoveredTop) setIsHoveredTop(true);
         } else {
           if (isHoveredTop) setIsHoveredTop(false);
@@ -1223,7 +1220,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </>
       ) : null}
       <div
-        className="absolute inset-x-0 top-0 z-20 h-4 pointer-events-none"
+        className="absolute inset-x-0 top-0 z-20 h-5 pointer-events-none"
         data-testid="pane-toolbar-hotspot"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={(event) => {
@@ -1236,8 +1233,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
         ref={draggable.setNodeRef}
         {...draggable.attributes}
         {...draggable.listeners}
-        className={`absolute inset-x-0 top-0 z-30 flex h-3 items-center justify-end overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
-          isHoveredTop ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+        className={`absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
+          isHoveredTop || isFocusedWithin ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
@@ -1252,8 +1249,34 @@ const PaneLeafView = React.memo(function PaneLeafView({
         }}
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={() => setIsHoveredTop(false)}
+        onFocusCapture={() => setIsFocusedWithin(true)}
+        onBlurCapture={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Element) || !event.currentTarget.contains(nextTarget)) {
+            setIsFocusedWithin(false);
+          }
+        }}
       >
         <div className="flex items-center gap-0.5">
+          {content.kind === "terminal" ? (
+            <IconButton
+              label="Copy Debug Info"
+              size="sm"
+              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                const debugInfo = formatPaneDebugInfo(leafId, session);
+                void copyTextToClipboard(debugInfo).then((ok) => {
+                  if (!ok) console.warn("Could not copy pane debug info to clipboard");
+                });
+              }}
+            >
+              <Copy className="size-3" />
+            </IconButton>
+          ) : null}
+        </div>
+        <div className="ml-auto flex items-center gap-0.5">
           <IconButton
             label="Split pane right"
             data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.splitRight" : undefined}

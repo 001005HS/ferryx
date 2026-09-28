@@ -40,8 +40,6 @@ type TabBarProps = {
   onResetAgentState?: (tabId: string) => void;
   /** Session that the tab menu's Restart acts on. Defaults to the tab's own session. */
   sessionIdForLifecycle?: (tab: WorkspaceTab) => string | null;
-  /** One-line debug identity of the tab's focused pane; enables "Copy Debug Info". */
-  debugInfoForTab?: (tab: WorkspaceTab) => string | null;
   filePathsForTab?: (tab: FileTab) => { absolute: string; relative: string | null };
   onReloadFileTab?: (tabId: string) => void;
   onOpenFileExternally?: (tabId: string) => void;
@@ -89,7 +87,6 @@ export function TabBar({
   onTogglePin,
   onResetAgentState,
   sessionIdForLifecycle,
-  debugInfoForTab,
   filePathsForTab,
   onReloadFileTab,
   onOpenFileExternally,
@@ -404,15 +401,6 @@ export function TabBar({
         onActivate(tab.id);
         requestSessionLifecycleAction("restart", lifecycleSessionId);
       };
-      const debugInfo = debugInfoForTab?.(tab);
-      if (debugInfo) {
-        items.push({ kind: "item", id: "copy-debug-info", label: "Copy Debug Info" });
-        actions["copy-debug-info"] = () => {
-          void copyTextToClipboard(debugInfo).then((ok) => {
-            if (!ok) console.warn("Could not copy pane debug info to clipboard");
-          });
-        };
-      }
     }
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "close", label: "Close tab", enabled: !tab.pinned });
@@ -432,7 +420,7 @@ export function TabBar({
       actions["close-left"] = () => onCloseToLeft(tab.id);
     }
     openMenu("cmd_native_tab_context_menu", items, { x: event.clientX, y: event.clientY }, actions);
-  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, debugInfoForTab, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;
