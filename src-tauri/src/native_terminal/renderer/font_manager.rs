@@ -387,6 +387,24 @@ pub fn derived_cell_metrics_for_scale(scale_factor: f64) -> CellMetrics {
 mod tests {
     use super::*;
 
+    fn bytes_per_pixel(glyph: &RasterizedGlyph) -> usize {
+        match glyph {
+            RasterizedGlyph::Alpha(_) => 1,
+            RasterizedGlyph::Subpixel(_) | RasterizedGlyph::Color(_) => 4,
+        }
+    }
+
+    fn glyph_pixel_coverage(glyph: &RasterizedGlyph, x: usize, y: usize, width: usize) -> u64 {
+        let bpp = bytes_per_pixel(glyph);
+        let base = (y * width + x) * bpp;
+        let buf = glyph.buffer();
+        if bpp == 1 {
+            buf[base] as u64
+        } else {
+            buf[base + 3] as u64
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn p06_windows_stack_matches_explicit_installed_face() {
@@ -432,24 +450,26 @@ mod tests {
         );
         assert_eq!(mgr.font_size(), DEFAULT_TERMINAL_FONT_SIZE);
 
-        let ascii_mask = mgr
-            .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false)
-            .into_buffer();
+        let ascii_glyph = mgr
+            .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false);
+        let ascii_bpp = bytes_per_pixel(&ascii_glyph);
+        let ascii_mask = ascii_glyph.into_buffer();
         assert_eq!(
             ascii_mask.len(),
-            (metrics.width_px * metrics.height_px * 4) as usize
+            (metrics.width_px * metrics.height_px * ascii_bpp as u32) as usize
         );
         assert!(
             !ascii_mask.iter().all(|&b| b == 0),
             "ASCII 'A' must produce non-empty mask when system font exists"
         );
 
-        let cjk_mask = mgr
-            .rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false)
-            .into_buffer();
+        let cjk_glyph = mgr
+            .rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false);
+        let cjk_bpp = bytes_per_pixel(&cjk_glyph);
+        let cjk_mask = cjk_glyph.into_buffer();
         assert_eq!(
             cjk_mask.len(),
-            (metrics.width_px * 2 * metrics.height_px * 4) as usize
+            (metrics.width_px * 2 * metrics.height_px * cjk_bpp as u32) as usize
         );
         assert!(
             !cjk_mask.iter().all(|&b| b == 0),
@@ -532,12 +552,16 @@ mod tests {
     #[test]
     fn test_variable_font_korean_weight_instantiation() {
         let mgr = FontManager::new_with_family_and_size("MesloLGS NF, Noto Sans KR", 13.0);
-        let mask = mgr
-            .rasterize_glyph("실", 16, 16, false, false)
-            .into_buffer();
-        assert_eq!(mask.len(), 1024);
+        let glyph = mgr.rasterize_glyph("실", 16, 16, false, false);
+        let bpp = bytes_per_pixel(&glyph);
+        let mask = glyph.into_buffer();
+        assert_eq!(mask.len(), 16 * 16 * bpp);
 
-        let ink_sum: u64 = mask.chunks_exact(4).map(|px| px[3] as u64).sum();
+        let ink_sum: u64 = if bpp == 1 {
+            mask.iter().map(|&px| px as u64).sum()
+        } else {
+            mask.chunks_exact(4).map(|px| px[3] as u64).sum()
+        };
         let density = (ink_sum as f64) / 255.0 / 256.0;
 
         // Thin on this machine is ~0.098, Regular (wght=400) is ~0.188
@@ -590,13 +614,14 @@ mod tests {
         let mid_y = (h / 2) as usize;
 
         // 'L': bottom-half ink > top-half ink
-        let l_mask = mgr.rasterize_glyph("L", w, h, false, false).into_buffer();
+        let l_glyph = mgr.rasterize_glyph("L", w, h, false, false);
+        let l_bpp = bytes_per_pixel(&l_glyph);
+        assert_eq!(l_glyph.buffer().len(), (w * h * l_bpp as u32) as usize);
         let mut top_ink_l = 0u64;
         let mut bottom_ink_l = 0u64;
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let idx = (y * (w as usize) + x) * 4;
-                let val = l_mask[idx + 3] as u64;
+                let val = glyph_pixel_coverage(&l_glyph, x, y, w as usize);
                 if y < mid_y {
                     top_ink_l += val;
                 } else {
@@ -611,13 +636,14 @@ mod tests {
         );
 
         // 'P': top-half ink > bottom-half ink
-        let p_mask = mgr.rasterize_glyph("P", w, h, false, false).into_buffer();
+        let p_glyph = mgr.rasterize_glyph("P", w, h, false, false);
+        let p_bpp = bytes_per_pixel(&p_glyph);
+        assert_eq!(p_glyph.buffer().len(), (w * h * p_bpp as u32) as usize);
         let mut top_ink_p = 0u64;
         let mut bottom_ink_p = 0u64;
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let idx = (y * (w as usize) + x) * 4;
-                let val = p_mask[idx + 3] as u64;
+                let val = glyph_pixel_coverage(&p_glyph, x, y, w as usize);
                 if y < mid_y {
                     top_ink_p += val;
                 } else {
@@ -632,14 +658,13 @@ mod tests {
         );
 
         // 'g': descender must put ink in the bottom quarter of the cell
-        let g_mask = mgr.rasterize_glyph("g", w, h, false, false).into_buffer();
+        let g_glyph = mgr.rasterize_glyph("g", w, h, false, false);
+        let g_bpp = bytes_per_pixel(&g_glyph);
+        assert_eq!(g_glyph.buffer().len(), (w * h * g_bpp as u32) as usize);
         let bottom_quarter_ink: u64 = ((h * 3 / 4) as usize..h as usize)
             .map(|y| {
                 (0..w as usize)
-                    .map(|x| {
-                        let idx = (y * (w as usize) + x) * 4;
-                        g_mask[idx + 3] as u64
-                    })
+                    .map(|x| glyph_pixel_coverage(&g_glyph, x, y, w as usize))
                     .sum::<u64>()
             })
             .sum();
@@ -650,14 +675,13 @@ mod tests {
         );
 
         // '─': horizontal bar must be centered within ±2px of buffer middle
-        let line_mask = mgr.rasterize_glyph("─", w, h, false, false).into_buffer();
+        let line_glyph = mgr.rasterize_glyph("─", w, h, false, false);
+        let line_bpp = bytes_per_pixel(&line_glyph);
+        assert_eq!(line_glyph.buffer().len(), (w * h * line_bpp as u32) as usize);
         let mut row_sums: Vec<(usize, u64)> = (0..h as usize)
             .map(|y| {
                 let sum: u64 = (0..w as usize)
-                    .map(|x| {
-                        let idx = (y * (w as usize) + x) * 4;
-                        line_mask[idx + 3] as u64
-                    })
+                    .map(|x| glyph_pixel_coverage(&line_glyph, x, y, w as usize))
                     .sum();
                 (y, sum)
             })
@@ -676,19 +700,34 @@ mod tests {
         let mgr = FontManager::new_with_family_and_size("MesloLGS NF", 13.0);
 
         // U+E0B0 (Powerline triangle) is covered by MesloLGS NF
-        let pua_mask = mgr
-            .rasterize_glyph("\u{e0b0}", 8, 16, false, false)
-            .into_buffer();
-        assert!(
-            pua_mask.iter().any(|&b| b > 0),
-            "U+E0B0 must produce non-empty mask with MesloLGS NF"
+        let pua_glyph = mgr.rasterize_glyph("\u{e0b0}", 8, 16, false, false);
+        let pua_bpp = bytes_per_pixel(&pua_glyph);
+        let pua_mask = pua_glyph.into_buffer();
+        assert_eq!(pua_mask.len(), (8 * 16 * pua_bpp as u32) as usize);
+
+        #[cfg(target_os = "windows")]
+        let has_pua = crate::native_terminal::renderer::directwrite_raster::any_family_covers(
+            "MesloLGS NF",
+            "\u{e0b0}",
         );
+        #[cfg(not(target_os = "windows"))]
+        let has_pua = true;
+
+        if has_pua {
+            assert!(
+                pua_mask.iter().any(|&b| b > 0),
+                "U+E0B0 must produce non-empty mask with MesloLGS NF"
+            );
+        } else {
+            eprintln!("skip U+E0B0: no installed font covers it");
+        }
 
         // U+10FFFD (unassigned PUA codepoint) must produce an all-zero buffer, never arbitrary Han pixels
-        let missing_mask = mgr
-            .rasterize_glyph("\u{10fffd}", 8, 16, false, false)
-            .into_buffer();
-        assert_eq!(missing_mask.len(), 128);
+        let missing_glyph = mgr
+            .rasterize_glyph("\u{10fffd}", 8, 16, false, false);
+        let missing_bpp = bytes_per_pixel(&missing_glyph);
+        let missing_mask = missing_glyph.into_buffer();
+        assert_eq!(missing_mask.len(), (8 * 16 * missing_bpp as u32) as usize);
         assert!(
             missing_mask.iter().all(|&b| b == 0),
             "Unassigned codepoint U+10FFFD must yield an all-zero buffer"
@@ -719,10 +758,11 @@ mod tests {
         } else {
             metrics.width_px
         };
-        let mask = mgr
-            .rasterize_glyph("I", odd_width, metrics.height_px, false, false)
-            .into_buffer();
-        assert_eq!(mask.len(), (odd_width * metrics.height_px * 4) as usize);
+        let glyph = mgr
+            .rasterize_glyph("I", odd_width, metrics.height_px, false, false);
+        let bpp = bytes_per_pixel(&glyph);
+        let mask = glyph.into_buffer();
+        assert_eq!(mask.len(), (odd_width * metrics.height_px * bpp as u32) as usize);
         let total_coverage: u32 = mask.iter().map(|&b| b as u32).sum();
         assert!(total_coverage > 0, "glyph mask must not be empty");
     }
@@ -733,10 +773,11 @@ mod tests {
         let metrics = mgr.cell_metrics();
         if metrics.width_px > 2 {
             let tight_width = metrics.width_px - 1;
-            let mask = mgr
-                .rasterize_glyph("M", tight_width, metrics.height_px, false, false)
-                .into_buffer();
-            assert_eq!(mask.len(), (tight_width * metrics.height_px * 4) as usize);
+            let glyph = mgr
+                .rasterize_glyph("M", tight_width, metrics.height_px, false, false);
+            let bpp = bytes_per_pixel(&glyph);
+            let mask = glyph.into_buffer();
+            assert_eq!(mask.len(), (tight_width * metrics.height_px * bpp as u32) as usize);
             let total_coverage: u32 = mask.iter().map(|&b| b as u32).sum();
             assert!(
                 total_coverage > 0,
@@ -752,10 +793,20 @@ mod resolution_tests {
 
     #[test]
     fn rasterizes_the_glyphs_agents_actually_emit() {
+        let family_stack = "MesloLGS NF, Noto Sans KR, monospace";
         let manager =
-            FontManager::new_with_family_and_size("MesloLGS NF, Noto Sans KR, monospace", 14.0);
+            FontManager::new_with_family_and_size(family_stack, 14.0);
 
         for ch in ["\u{2500}", "\u{28fe}", "\u{e0b0}", "\u{f418}", "\u{ac19}"] {
+            #[cfg(target_os = "windows")]
+            if !crate::native_terminal::renderer::directwrite_raster::any_family_covers(
+                family_stack,
+                ch,
+            ) {
+                eprintln!("skip {ch:?}: no installed font covers it");
+                continue;
+            }
+
             let raster = manager.rasterize_glyph(ch, 16, 32, false, false);
             assert!(
                 raster.buffer().iter().any(|&px| px != 0),
