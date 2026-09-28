@@ -239,6 +239,36 @@ pub fn macos_wheel_scroll_rows(scrolling_delta_y: f64, has_precise_deltas: bool)
     rows.clamp(i16::MIN as i64, i16::MAX as i64) as i16
 }
 
+/// How the macOS native scroll-wheel fast path must treat one wheel event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeWheelDispatch {
+    /// Hand the event back to AppKit untouched so the webview owns it.
+    PassThrough,
+    /// Claim the event for this session's terminal scrollback and consume it.
+    Terminal(String),
+}
+
+/// Decides the owner of a macOS scroll-wheel event before AppKit dispatches it.
+///
+/// macOS keeps native terminal surfaces attached underneath DOM overlays, so a
+/// surface still resolves at the pointer while a dialog or search overlay covers
+/// it. Claiming the event then would swallow every wheel tick before WebKit sees
+/// it, leaving the overlay scrollable only by dragging its scrollbar. A DOM
+/// overlay that owns input therefore wins over the surface beneath it, and the
+/// terminal keeps the fast path only while it is the topmost input owner.
+pub fn native_wheel_dispatch(
+    dom_overlay_owns_input: bool,
+    session_at_point: Option<String>,
+) -> NativeWheelDispatch {
+    if dom_overlay_owns_input {
+        return NativeWheelDispatch::PassThrough;
+    }
+    match session_at_point {
+        Some(session_id) => NativeWheelDispatch::Terminal(session_id),
+        None => NativeWheelDispatch::PassThrough,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +314,33 @@ mod tests {
         assert_eq!(macos_wheel_scroll_rows(0.2, false), -1);
         assert_eq!(macos_wheel_scroll_rows(-2.7, false), 3);
         assert_eq!(macos_wheel_scroll_rows(2.7, false), -3);
+    }
+
+    #[test]
+    fn test_native_wheel_dispatch_lets_a_dom_overlay_scroll_over_a_covered_surface() {
+        // A dialog or search overlay above an attached surface owns the wheel: the
+        // event must reach WebKit, or the overlay cannot be wheel-scrolled.
+        assert_eq!(
+            native_wheel_dispatch(true, Some("covered-session".into())),
+            NativeWheelDispatch::PassThrough
+        );
+        assert_eq!(
+            native_wheel_dispatch(true, None),
+            NativeWheelDispatch::PassThrough
+        );
+    }
+
+    #[test]
+    fn test_native_wheel_dispatch_claims_the_event_for_the_surface_under_the_pointer() {
+        assert_eq!(
+            native_wheel_dispatch(false, Some("focused-session".into())),
+            NativeWheelDispatch::Terminal("focused-session".into())
+        );
+        // No surface under the pointer: nothing to claim, the webview keeps the event.
+        assert_eq!(
+            native_wheel_dispatch(false, None),
+            NativeWheelDispatch::PassThrough
+        );
     }
 
     #[test]

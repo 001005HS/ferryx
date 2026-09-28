@@ -1697,6 +1697,15 @@ pub async fn cmd_native_terminal_set_scrollbar_overlay<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_set_dom_overlay_input(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    active: bool,
+) -> Result<(), IpcError> {
+    state.set_dom_overlay_owns_input(active);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,

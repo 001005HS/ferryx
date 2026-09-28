@@ -224,6 +224,9 @@ vi.mock("./lib/tauri", () => ({
   onNativeTerminalBell: vi.fn().mockResolvedValue(() => {}),
   onNativeTerminalFocus: vi.fn().mockResolvedValue(() => {}),
   onNativeTerminalTitle: vi.fn().mockResolvedValue(() => {}),
+  // Overlay input ownership reaches the host through this bridge; the App shell mounts
+  // the visibility provider, so the mock must expose it or every App render throws.
+  setNativeTerminalDomOverlayInput: vi.fn().mockResolvedValue(undefined),
   onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,

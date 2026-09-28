@@ -76,8 +76,8 @@ pub use renderer::{
 #[cfg(feature = "native-terminal")]
 pub use scroll::{
     compute_attention_frame_rects, compute_scrollbar_overlay_rect, macos_wheel_scroll_rows,
-    ScrollbarOverlayState, ATTENTION_FRAME_COLOR, ATTENTION_FRAME_THICKNESS_LOGICAL_PX,
-    ATTENTION_HALO_COLOR,
+    native_wheel_dispatch, NativeWheelDispatch, ScrollbarOverlayState, ATTENTION_FRAME_COLOR,
+    ATTENTION_FRAME_THICKNESS_LOGICAL_PX, ATTENTION_HALO_COLOR,
 };
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 pub use terminal::NativeTerminal;

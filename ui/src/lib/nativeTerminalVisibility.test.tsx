@@ -8,6 +8,12 @@ vi.mock("./shortcuts", () => ({
   isMacShortcutPlatform: vi.fn(() => false),
 }));
 
+const hostBridge = vi.hoisted(() => ({
+  setNativeTerminalDomOverlayInput: vi.fn(async (_active: boolean) => undefined),
+}));
+
+vi.mock("./tauri", () => hostBridge);
+
 import {
   NativeTerminalVisibilityProvider,
   useNativeTerminalVisibility,
@@ -266,5 +272,50 @@ describe("useNativeTerminalVisibility", () => {
 
     observeSpy.mockRestore();
     disconnectSpy.mockRestore();
+  });
+
+  describe("native host overlay ownership", () => {
+    it("reports overlay ownership transitions so the host releases the wheel", async () => {
+      hostBridge.setNativeTerminalDomOverlayInput.mockClear();
+      renderHook(() => useNativeTerminalVisibility());
+      // Mounting reports the current owner so a stale host flag cannot outlive a remount.
+      expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(false);
+
+      // The settings dialog is exactly this surface: while it covers the pane the host
+      // must stop claiming wheel events, or the dialog only scrolls by scrollbar drag.
+      const settingsDialog = document.createElement("div");
+      settingsDialog.setAttribute("role", "dialog");
+      await act(async () => {
+        document.body.appendChild(settingsDialog);
+      });
+      expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(true);
+
+      await act(async () => {
+        settingsDialog.remove();
+      });
+      expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(false);
+    });
+
+    it("never reports ownership for a surface that opted out of yielding", async () => {
+      hostBridge.setNativeTerminalDomOverlayInput.mockClear();
+      renderHook(() => useNativeTerminalVisibility());
+
+      const popover = document.createElement("div");
+      popover.setAttribute("role", "dialog");
+      popover.setAttribute("data-native-terminal-yield", "off");
+      await act(async () => {
+        document.body.appendChild(popover);
+      });
+      expect(
+        hostBridge.setNativeTerminalDomOverlayInput.mock.calls.every(([active]) => active === false),
+      ).toBe(true);
+
+      const modal = document.createElement("div");
+      modal.setAttribute("role", "dialog");
+      await act(async () => {
+        document.body.appendChild(modal);
+      });
+      expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(true);
+    });
   });
 });

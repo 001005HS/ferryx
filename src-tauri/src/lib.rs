@@ -959,8 +959,20 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                             let content_height = content_view.bounds().size.height;
                             let logical_x = location.x;
                             let logical_y = content_height - location.y;
-                            if let Some(session_id) =
-                                surface_host.session_at_logical_point(logical_x, logical_y)
+                            // A DOM overlay above the surface owns the wheel, so the event must
+                            // reach WebKit: claiming it here would leave the overlay scrollable
+                            // only by dragging its scrollbar.
+                            let session_id = match crate::native_terminal::native_wheel_dispatch(
+                                surface_host.dom_overlay_owns_input(),
+                                surface_host.session_at_logical_point(logical_x, logical_y),
+                            ) {
+                                crate::native_terminal::NativeWheelDispatch::PassThrough => {
+                                    return event_ptr.as_ptr();
+                                }
+                                crate::native_terminal::NativeWheelDispatch::Terminal(session_id) => {
+                                    session_id
+                                }
+                            };
                             {
                                 let delta_y = event.scrollingDeltaY();
                                 let has_precise = event.hasPreciseScrollingDeltas();
@@ -1440,6 +1452,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_scroll,
         cmd_native_terminal_scrollbar,
         cmd_native_terminal_set_scrollbar_overlay,
+        cmd_native_terminal_set_dom_overlay_input,
         cmd_native_terminal_set_attention_frame,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,

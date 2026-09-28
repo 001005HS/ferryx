@@ -708,6 +708,33 @@ export async function setNativeTerminalAttentionFrame(
   });
 }
 
+/**
+ * Last ownership state reported to the host. Every pane observes the same
+ * document-wide overlay, so the window has exactly one owner at a time and a
+ * repeat report is a no-op rather than another IPC round trip.
+ */
+let domOverlayInputOwner: boolean | null = null;
+
+/**
+ * Declares whether a DOM overlay (dialog or search surface) currently owns input
+ * over the terminal area. macOS keeps native terminal surfaces attached under
+ * such overlays, so the host's AppKit wheel monitor would otherwise claim every
+ * scroll event for the terminal behind the overlay, leaving that overlay
+ * scrollable only by dragging its scrollbar.
+ */
+export async function setNativeTerminalDomOverlayInput(active: boolean): Promise<void> {
+  if (domOverlayInputOwner === active) return;
+  domOverlayInputOwner = active;
+  if (!isTauri()) return;
+  try {
+    await invokeCommand<void>("cmd_native_terminal_set_dom_overlay_input", { active });
+  } catch (error) {
+    // The host never recorded this state; let the next transition retry it.
+    domOverlayInputOwner = null;
+    throw error;
+  }
+}
+
 export type NativeTerminalScrollBehavior =
   | { type: "top" }
   | { type: "bottom" }

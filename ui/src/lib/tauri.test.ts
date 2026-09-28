@@ -27,6 +27,9 @@ import {
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
+  setNativeTerminalDomOverlayInput,
+  scrollNativeTerminal,
+  scrollNativeTerminalViewport,
   onNativeTerminalCopyOrInterrupt,
   onNewTerminalTabMenu,
   onCloseTabMenu,
@@ -661,6 +664,54 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_attention_frame", {
       sessionId: "session-attention-1",
       attention: false,
+    });
+  });
+
+  it("reports DOM overlay input ownership to the host once per transition", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await setNativeTerminalDomOverlayInput(true);
+    await setNativeTerminalDomOverlayInput(true);
+    await setNativeTerminalDomOverlayInput(false);
+
+    // Repeated reports are the common case: every pane observes the same document-wide
+    // overlay, so only a real ownership transition may cross the IPC boundary.
+    expect(core.invoke.mock.calls).toEqual([
+      ["cmd_native_terminal_set_dom_overlay_input", { active: true }],
+      ["cmd_native_terminal_set_dom_overlay_input", { active: false }],
+    ]);
+  });
+
+  it("re-sends DOM overlay input ownership the host never acknowledged", async () => {
+    core.invoke.mockRejectedValueOnce(new Error("host busy"));
+    await expect(setNativeTerminalDomOverlayInput(true)).rejects.toMatchObject({
+      message: "host busy",
+    });
+
+    core.invoke.mockResolvedValue(undefined);
+    // The host never recorded the failed report, so the identical value must be sent
+    // again rather than deduped away, or the wheel stays owned by the wrong surface.
+    await setNativeTerminalDomOverlayInput(true);
+
+    expect(core.invoke).toHaveBeenCalledTimes(2);
+    expect(core.invoke).toHaveBeenLastCalledWith("cmd_native_terminal_set_dom_overlay_input", {
+      active: true,
+    });
+  });
+
+  it("invokes backend command to scroll native terminal viewport", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await scrollNativeTerminal("session-scroll-1", { type: "row", offset: 42 });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "session-scroll-1",
+      behavior: { type: "row", offset: 42 },
+    });
+
+    await scrollNativeTerminalViewport("session-scroll-2", 99);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "session-scroll-2",
+      behavior: { type: "row", offset: 99 },
     });
   });
 

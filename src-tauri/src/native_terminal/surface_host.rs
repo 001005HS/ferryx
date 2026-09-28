@@ -1,7 +1,7 @@
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, PhysicalSize, Runtime, Window};
 
@@ -564,11 +564,27 @@ pub struct NativeTerminalSurfaceHostState {
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
     pending_startups: Arc<Mutex<HashSet<String>>>,
     gpu_worker: Arc<GpuWorker>,
+    /// True while a DOM overlay (dialog or search surface) owns input over the
+    /// terminal area. macOS keeps surfaces attached underneath such overlays, so
+    /// the native scroll-wheel monitor must let the event reach WebKit then.
+    dom_overlay_owns_input: Arc<AtomicBool>,
 }
 
 impl NativeTerminalSurfaceHostState {
     pub fn gpu_worker(&self) -> &Arc<GpuWorker> {
         &self.gpu_worker
+    }
+
+    /// Records whether a DOM overlay currently owns input over the terminal area.
+    ///
+    /// The flag is shared by every clone of this state so the AppKit wheel monitor
+    /// observes the frontend's current owner instead of its own copy.
+    pub fn set_dom_overlay_owns_input(&self, owns_input: bool) {
+        self.dom_overlay_owns_input.store(owns_input, Ordering::Relaxed);
+    }
+
+    pub fn dom_overlay_owns_input(&self) -> bool {
+        self.dom_overlay_owns_input.load(Ordering::Relaxed)
     }
 
     pub fn session_snapshot_slot(&self, session_id: &str) -> Option<Arc<SnapshotSlot>> {
@@ -1068,6 +1084,7 @@ impl Clone for NativeTerminalSurfaceHostState {
             pty_resize_sink: Arc::clone(&self.pty_resize_sink),
             pending_startups: Arc::clone(&self.pending_startups),
             gpu_worker: Arc::clone(&self.gpu_worker),
+            dom_overlay_owns_input: Arc::clone(&self.dom_overlay_owns_input),
         }
     }
 }
@@ -1080,6 +1097,7 @@ impl Default for NativeTerminalSurfaceHostState {
             event_sink: Arc::new(RwLock::new(None)),
             pty_resize_sink: Arc::new(RwLock::new(None)),
             pending_startups: Arc::new(Mutex::new(HashSet::new())),
+            dom_overlay_owns_input: Arc::new(AtomicBool::new(false)),
             gpu_worker: Arc::new(
                 GpuWorker::new("ferryx-gpu-worker").expect("spawn native terminal gpu worker"),
             ),
@@ -4073,6 +4091,19 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dom_overlay_input_ownership_is_shared_across_host_state_clones() {
+        // The macOS wheel monitor holds a clone of this state, so a per-clone copy of
+        // the flag would never observe the frontend's overlay transitions.
+        let state = NativeTerminalSurfaceHostState::default();
+        assert!(!state.dom_overlay_owns_input());
+        let monitor_clone = state.clone();
+        state.set_dom_overlay_owns_input(true);
+        assert!(monitor_clone.dom_overlay_owns_input());
+        monitor_clone.set_dom_overlay_owns_input(false);
+        assert!(!state.dom_overlay_owns_input());
+    }
 
     #[tokio::test]
     async fn retired_replay_bottom_lock_preserves_new_generation_viewport() {
