@@ -85,15 +85,16 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
     webview_label: &str,
     out_path: &str,
 ) -> Result<String, IpcError> {
-    // `app` and `webview_label` are unused on this target: the capture source is
-    // macOS-only. They stay in the signature so every platform exposes one shape,
-    // and the non-macOS build must not warn about them.
-    let _ = (app, webview_label);
+    use tauri::Manager;
+
     // Reject an unusable output path BEFORE reporting the platform limitation, so a
     // caller that asked for an impossible path gets that specific error instead of a
     // blanket `Unsupported`. Nothing is written here, so the resolved path is
     // deliberately dropped.
     resolve_screenshot_path(out_path).map(|_resolved_path| ())?;
+    let _ = app
+        .get_webview(webview_label)
+        .ok_or_else(|| crate::browser::BrowserError::WebviewNotFound(webview_label.to_string()))?;
     Err(unsupported_screenshot_error())
 }
 
@@ -166,8 +167,13 @@ mod tests {
         assert!(res.to_str().unwrap().ends_with("my-shot.png"));
         assert!(!res.to_str().unwrap().starts_with('~'));
 
-        let abs = resolve_screenshot_path("/tmp/direct.png").expect("absolute path");
-        assert_eq!(abs, PathBuf::from("/tmp/direct.png"));
+        let absolute_input = if cfg!(windows) { r"C:\tmp\direct.png" } else { "/tmp/direct.png" };
+        let abs = resolve_screenshot_path(absolute_input).expect("absolute path");
+        assert_eq!(abs, PathBuf::from(absolute_input));
+
+        let rel = resolve_screenshot_path("shots/rel.png").expect("relative path");
+        assert!(rel.is_absolute(), "relative input must be anchored to the current dir");
+        assert!(rel.ends_with("shots/rel.png"));
     }
 
     #[tokio::test]

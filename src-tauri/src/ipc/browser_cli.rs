@@ -2832,10 +2832,10 @@ async fn send_browser_cli_request_at_path(
 
     let path_buf = token_path_for(socket_path);
     let token = crate::ipc::run_blocking(move || {
-        read_token_file(&path_buf).map_err(|e| IpcError::internal(e.to_string()))
+        Ok::<_, IpcError>(read_token_file(&path_buf))
     })
     .await
-    .map_err(|e| BrowserError::Internal(e.to_string()))?;
+    .map_err(|e| BrowserError::Internal(e.to_string()))??;
     let stream = UnixStream::connect(socket_path).await.map_err(|error| {
         BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
     })?;
@@ -2858,16 +2858,16 @@ async fn send_browser_cli_request_at_path(
 
     let port_path_buf = port_path.to_path_buf();
     let port = crate::ipc::run_blocking(move || {
-        read_port_from_file(&port_path_buf).map_err(|e| IpcError::internal(e.to_string()))
+        Ok::<_, IpcError>(read_port_from_file(&port_path_buf))
     })
     .await
-    .map_err(|e| BrowserError::Internal(e.to_string()))?;
+    .map_err(|e| BrowserError::Internal(e.to_string()))??;
     let token_path_buf = token_path_for(port_path);
     let token = crate::ipc::run_blocking(move || {
-        read_token_file(&token_path_buf).map_err(|e| IpcError::internal(e.to_string()))
+        Ok::<_, IpcError>(read_token_file(&token_path_buf))
     })
     .await
-    .map_err(|e| BrowserError::Internal(e.to_string()))?;
+    .map_err(|e| BrowserError::Internal(e.to_string()))??;
     let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .map_err(|error| {
@@ -3564,6 +3564,17 @@ mod tests {
         write_port_file(&port_path, closed_port).expect("write stale port file");
 
         let result = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path).await;
+        assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_browser_cli_send_request_missing_token_file_fails() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("stale.sock");
+        std::fs::write(&socket_path, b"").expect("write socket placeholder");
+
+        let result = send_browser_cli_request_at_path(BrowserCliRequest::List, &socket_path).await;
         assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
     }
 
