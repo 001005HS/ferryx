@@ -3,7 +3,7 @@ title: Introduction
 description: Introduction to Ferryx, a native Rust terminal workspace for running parallel AI coding agents with Git worktree isolation and mobile remote access.
 ---
 
-Ferryx is a native desktop terminal workspace for running several CLI coding agents — Claude Code, Codex, Gemini CLI, or anything else you start from a shell — at the same time, each in its own Git worktree. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is SUL-1.0 licensed (source-available, free for personal and non-commercial use) and ships for macOS, Windows, and Linux. For the checkable version of every claim on this page, see [product facts](/docs/facts/).
+Ferryx is a native desktop terminal workspace for running several CLI coding agents — Claude Code, Codex, Gemini CLI, or anything else you start from a shell — at the same time, each in its own Git worktree. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is SUL-1.0 licensed (source-available; personal, non-commercial, and internal business use are permitted) and ships for macOS, Windows, and Linux. For the checkable version of every claim on this page, see [product facts](/docs/facts/).
 
 ## The problem it addresses
 
@@ -16,11 +16,11 @@ Ferryx turns that workaround into a managed feature: each agent gets its own Git
 Most of Ferryx reduces to six concepts.
 
 - **Workspaces.** A workspace groups tabs, panes, and sessions around one project. ⌘1 through ⌘9 switch between them, and ⌘B toggles the sidebar.
-- **Worktrees.** Each agent that needs isolation gets a managed Git worktree under `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, jailed to the repository root.
+- **Worktrees.** Each agent that needs isolation gets a managed Git worktree under `.orca-worktrees/<workspace-id>/<slug>` on a branch named `orca/<workspace-id>/<slug>`, jailed to the repository root.
 - **Panes and tabs.** Terminals open as tabs and split into vertical or horizontal panes. ⌘T opens a terminal tab, ⌘D splits right, ⌘⇧D splits down, and you can drag a tab into any pane to rearrange the layout. Agents such as Claude Code, Codex, and Gemini CLI run here like any other command; status-detection manifests ship for eleven of them, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi, so a pane can report whether its agent is working, waiting on you, or idle.
 - **Browser tabs.** ⌘⇧B opens a browser tab beside the terminal panes, using the native WebView instead of a separate app. Documentation, a CI dashboard, or a deployed preview can live next to the sessions that depend on them.
-- **The daemon.** A headless Rust PTY daemon owns the pseudoterminals, not the window. Closing or reloading the GUI doesn't kill running processes. Output sits in a ring buffer with monotonic sequence numbers, so reconnecting replays what you missed; if the buffer has wrapped, the client is told there's a gap instead of being shown corrupted output. It's the persistence instinct of a terminal multiplexer, without giving up a graphical interface. Workspace state snapshots automatically, and the daemon reattaches, so an exit or crash doesn't cost you work.
-- **Remote access.** The daemon serves an authenticated gateway for a mobile web client. Pairing uses a 6-digit PIN, the terminal renders as a custom DOM grid rather than xterm.js, and a configurable relay URL covers access from outside your LAN.
+- **The daemon.** A headless Rust PTY daemon owns the pseudoterminals, not the window. Closing or reloading the GUI doesn't kill running processes while the daemon remains alive. Output sits in a ring buffer with monotonic sequence numbers, so reconnecting replays recent output; if the buffer has wrapped, the client is told there's a gap instead of being shown corrupted output. Workspace state snapshots automatically, and the GUI reattaches to the daemon. Stopping the daemon or rebooting the host can still end live PTYs.
+- **Remote access.** The daemon serves an authenticated gateway for a mobile web client. The terminal renders as a custom DOM grid rather than xterm.js, and a configurable relay URL covers access from outside your LAN. [Run a self-hosted relay](/docs/self-hosted-relay/) to operate that tunnel and its account service yourself.
 
 ## Install
 
@@ -57,4 +57,4 @@ The command palette (⌘K) is there if you'd rather browse actions than memorize
 
 ## Status
 
-Ferryx is early software: the core is usable, but expect rough edges and breaking changes between releases. Releases are calendar-versioned and published frequently, so check the [releases page](https://github.com/Indosaram/ferryx/releases/latest) for the current build and its notes. Terminal sessions and daemon communication work on macOS, Windows, and Linux; a few OS integrations, such as Dock badge counters and launchd supervision, are macOS-only today. Questions and bug reports are welcome in the [Discord](https://discord.gg/Z2hBkQEHUG).
+Ferryx is early software: the core is usable, but expect rough edges and breaking changes between releases. Releases are calendar-versioned and published frequently, so check the [releases page](https://github.com/Indosaram/ferryx/releases/latest) for the current build and its notes. Terminal sessions and daemon communication work on macOS, Windows, and Linux. Dock badge counters are macOS-only; launchd helper code exists but automatic login-time daemon supervision is not wired up. Questions and bug reports are welcome in the [Discord](https://discord.gg/Z2hBkQEHUG).

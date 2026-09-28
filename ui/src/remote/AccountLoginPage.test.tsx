@@ -227,7 +227,7 @@ describe("AccountLoginPage", () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
       expect(pollSpy).toHaveBeenCalledTimes(2);
-      expect(storeSpy).toHaveBeenCalledWith("tok-remote-1");
+      expect(storeSpy).toHaveBeenCalledWith("tok-remote-1", relayUrl);
       expect(onLoginSuccess).toHaveBeenCalledWith("tok-remote-1", "user@example.com");
 
       await act(async () => {

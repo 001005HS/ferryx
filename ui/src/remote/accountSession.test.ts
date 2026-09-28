@@ -12,6 +12,7 @@ import {
   createAccountConnection,
   AccountSessionError,
   getStoredAccountSessionToken,
+  storeAccountSessionToken,
   clearStoredAccountSessionToken,
   getStoredAccountOrigin,
   storeAccountOrigin,
@@ -291,7 +292,8 @@ describe("accountSession client module", () => {
     expect(call.url).not.toContain(sessionToken);
     expect(call.url).not.toContain("valid-code");
 
-    expect(getStoredAccountSessionToken()).toBe(sessionToken);
+    expect(getStoredAccountSessionToken(origin)).toBe(sessionToken);
+    expect(getStoredAccountSessionToken(DEFAULT_RELAY_ORIGIN)).toBeNull();
   });
 
   it("consumeLogin throws typed AccountSessionError on invalid code", async () => {
@@ -927,5 +929,17 @@ describe("accountSession client module", () => {
       expect(getStoredAccountOrigin()).toBeNull();
       expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
     });
+
+    it("does not expose a session issued by one account origin to another", () => {
+      storeAccountOrigin("https://first.account.example");
+      storeAccountSessionToken("issued-by-first");
+      expect(getStoredAccountSessionToken()).toBe("issued-by-first");
+
+      storeAccountOrigin("https://second.account.example");
+      expect(getStoredAccountSessionToken()).toBeNull();
+      expect(getStoredAccountSessionToken("https://first.account.example")).toBe("issued-by-first");
+      clearStoredAccountSessionToken();
+    });
+
   });
 });

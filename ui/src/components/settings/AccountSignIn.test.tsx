@@ -60,7 +60,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-1");
+    expect(storeSpy).toHaveBeenCalledWith("tok-1", "https://relay.checka.cc");
     expect(onSignIn).toHaveBeenCalledWith("tok-1", "user@example.com");
 
     await act(async () => {
@@ -106,7 +106,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-2");
+    expect(storeSpy).toHaveBeenCalledWith("tok-2", "https://relay.checka.cc");
     expect(onSignIn).toHaveBeenCalledWith("tok-2", "user2@example.com");
 
     await act(async () => {

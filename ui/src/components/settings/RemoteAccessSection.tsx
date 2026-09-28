@@ -37,6 +37,7 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [relayUrl, setRelayUrl] = useState("");
+  const [appliedRelayUrl, setAppliedRelayUrl] = useState("");
   const previousMode = useRef<RemoteGatewayStatus["mode"] | null>(null);
   const [statusError, setStatusError] = useState(false);
   const [devicesError, setDevicesError] = useState(false);
@@ -50,7 +51,8 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
       statusRef.current = s;
       setStatus(s);
       setStatusError(false);
-      if (s.relayUrl) setRelayUrl((current) => (current ? current : s.relayUrl ?? ""));
+      setAppliedRelayUrl(s.relayUrl ?? "");
+      setRelayUrl((current) => current || s.relayUrl || "");
       if (s.mode !== "off") previousMode.current = s.mode;
     }
     if (devList) { setDevices(devList); setDevicesError(false); }
@@ -82,6 +84,24 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
       }
     } catch (error: unknown) {
       setActionError(error instanceof Error ? error.message : "Failed to update remote access");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApplyRelay = async () => {
+    const trimmedRelay = relayUrl.trim();
+    setLoading(true);
+    setActionError(null);
+    try {
+      const s = await enableRemoteGateway({ mode: "relay", relayUrl: trimmedRelay });
+      statusRef.current = s;
+      setStatus(s);
+      setAppliedRelayUrl(s.relayUrl ?? trimmedRelay);
+      setRelayUrl(s.relayUrl ?? trimmedRelay);
+      await refreshStatus();
+    } catch (error: unknown) {
+      setActionError(error instanceof Error ? error.message : "Failed to apply relay URL");
     } finally {
       setLoading(false);
     }
@@ -156,16 +176,27 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
 
         <SettingRow
           label="Relay / Signaling Server URL"
-          description="The standard relay is fixed. Existing connections are preserved; see Connection Details for effective configuration."
+          description="Use an HTTPS URL for your own relay. Apply it to this machine; sign in to the same account origin separately to find its machines."
         >
-          <Input
-            type="url"
-            aria-label="Relay / Signaling Server URL"
-            placeholder={DEFAULT_RELAY_PLACEHOLDER}
-            value={relayUrl}
-            onChange={(e) => setRelayUrl(e.target.value)}
-            className="h-8 w-full max-w-64 rounded-md px-2 text-[12px] md:text-[12px] sm:w-64"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="url"
+              aria-label="Relay / Signaling Server URL"
+              placeholder={DEFAULT_RELAY_PLACEHOLDER}
+              value={relayUrl}
+              onChange={(e) => setRelayUrl(e.target.value)}
+              className="h-8 w-full max-w-64 rounded-md px-2 text-[12px] md:text-[12px] sm:w-64"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={loading || statusError || !status || !relayUrl.trim() || (status.mode === "relay" && relayUrl.trim() === appliedRelayUrl)}
+              onClick={() => void handleApplyRelay()}
+            >
+              Apply relay URL
+            </Button>
+          </div>
         </SettingRow>
       </div>
 

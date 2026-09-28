@@ -70,7 +70,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
 
         if (res.status === "approved" && res.token) {
           stopPolling();
-          storeAccountSessionToken(res.token);
+          storeAccountSessionToken(res.token, origin);
           onLoginSuccessRef.current(res.token, res.email ?? "");
         }
       } catch (err: unknown) {
@@ -131,8 +131,9 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
       // The account API is not necessarily on the page origin (the desktop app
       // serves this client without an account router), so resolve it first.
       resolveAccountOrigin(relayUrl)
-        .then((origin) => consumeLogin(origin, trimmedCode))
-        .then((res) => {
+        .then(async (origin) => ({ origin, res: await consumeLogin(origin, trimmedCode) }))
+        .then(({ origin, res }) => {
+          storeAccountSessionToken(res.token, origin);
           if (window.history && typeof window.history.replaceState === "function") {
             window.history.replaceState(null, "", window.location.pathname);
           }
@@ -187,6 +188,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
       const origin = await resolveAccountOrigin(relayUrl);
       const res = await consumeLogin(origin, tokenInput.trim());
       stopPolling();
+      storeAccountSessionToken(res.token, origin);
       onLoginSuccess(res.token, res.email);
     } catch (err: unknown) {
       if (err instanceof AccountSessionError) {

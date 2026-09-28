@@ -841,6 +841,32 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     }
   });
 
+  it("switches account authority without sending the previous session token to the new server", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    const calls: Array<{ url: string; authorization: string | undefined }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, authorization: new Headers(init?.headers).get("Authorization") ?? undefined });
+      return { ok: true, status: 200, json: async () => [] };
+    }));
+    try {
+      const view = render(<RemoteSection store={store} inventory={inventory} accountSessionToken="old-account-token" />);
+      const field = await screen.findByRole("textbox", { name: "Account server URL" });
+      fireEvent.change(field, { target: { value: "https://account.selfhost.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Use account server" }));
+
+      expect(screen.getByRole("textbox", { name: "Account server URL" })).toHaveValue("https://account.selfhost.example");
+      expect(calls.filter(({ url }) => url.startsWith("https://account.selfhost.example"))).toEqual([]);
+      expect(screen.queryByText("Account Active")).toBeNull();
+      view.unmount();
+      render(<RemoteSection store={store} inventory={inventory} />);
+      expect(screen.getByRole("textbox", { name: "Account server URL" })).toHaveValue("https://account.selfhost.example");
+      expect(screen.queryByText("Account Active")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("treats account machines with absent grantScope as ungranted and disables Add Project", async () => {
     const absentScopeMachine: AccountMachineView = {
       machineRecordId: "rec-absent",

@@ -56,11 +56,17 @@ fn resolve_account_data_dir(
         .map(|base| PathBuf::from(base).join(".ferryx").join("account"))
 }
 
-fn normalize_account_origin(value: &str) -> Result<String, AccountOriginError> {
+pub fn normalize_account_origin(value: &str) -> Result<String, AccountOriginError> {
     let url = url::Url::parse(value).map_err(|error| AccountOriginError {
         code: "ACCOUNT_ORIGIN_INVALID",
         message: error.to_string(),
     })?;
+    if !url.username().is_empty() || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(AccountOriginError {
+            code: "ACCOUNT_ORIGIN_INVALID",
+            message: "account origin must not contain credentials, path, query, or fragment".into(),
+        });
+    }
     let host = url.host_str().unwrap_or("");
     let loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
@@ -150,6 +156,14 @@ mod tests {
             "HOME must keep winning so existing platforms resolve the same directory"
         );
         assert_eq!(resolve_account_data_dir(None, None), None);
+    }
+
+    #[test]
+    fn explicit_cli_origin_rejects_insecure_and_embedded_credentials() {
+        assert_eq!(normalize_account_origin("http://relay.example.com").unwrap_err().code, "ACCOUNT_ORIGIN_INSECURE");
+        assert_eq!(normalize_account_origin("https://user:pass@relay.example.com").unwrap_err().code, "ACCOUNT_ORIGIN_INVALID");
+        assert_eq!(normalize_account_origin("https://relay.example.com/path").unwrap_err().code, "ACCOUNT_ORIGIN_INVALID");
+        assert_eq!(normalize_account_origin("http://127.0.0.1:18787/").unwrap(), "http://127.0.0.1:18787");
     }
 
     struct EnvGuard;

@@ -174,6 +174,39 @@ describe("RemoteAccessSection", () => {
     });
   });
 
+  it("applies a new relay origin while access is already enabled and restores it on reopen", async () => {
+    getRemoteStatus.mockResolvedValue(relayStatus);
+    const custom = { ...relayStatus, relayUrl: "https://relay.my-domain.example" };
+    enableRemoteGateway.mockResolvedValue(custom);
+
+    const view = render(<RemoteAccessSection />);
+    const field = await screen.findByLabelText("Relay / Signaling Server URL");
+    fireEvent.change(field, { target: { value: custom.relayUrl } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply relay URL" }));
+
+    await waitFor(() => expect(enableRemoteGateway).toHaveBeenCalledWith({
+      mode: "relay",
+      relayUrl: custom.relayUrl,
+    }));
+    getRemoteStatus.mockResolvedValue(custom);
+    view.unmount();
+    render(<RemoteAccessSection />);
+    expect(await screen.findByLabelText("Relay / Signaling Server URL")).toHaveValue(custom.relayUrl);
+  });
+
+  it("keeps the saved relay unchanged when applying an invalid origin fails", async () => {
+    getRemoteStatus.mockResolvedValue(relayStatus);
+    enableRemoteGateway.mockRejectedValue(new Error("Insecure public relay forbidden"));
+    render(<RemoteAccessSection />);
+    fireEvent.change(await screen.findByLabelText("Relay / Signaling Server URL"), {
+      target: { value: "http://relay.my-domain.example" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply relay URL" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Insecure public relay forbidden");
+    expect(screen.getByRole("switch", { name: "Remote Access" })).toBeChecked();
+    expect(enableRemoteGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("enables local-network mode when the relay URL is left empty", async () => {
     getRemoteStatus.mockResolvedValue(disabledStatus);
 

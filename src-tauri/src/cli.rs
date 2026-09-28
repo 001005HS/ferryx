@@ -2302,7 +2302,8 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
     match command {
         AccountCliCommand::Enroll { code, origin } => {
             let origin = match origin {
-                Some(value) => value,
+                Some(value) => crate::account::origin::normalize_account_origin(&value)
+                    .map_err(|error| error.to_string())?,
                 None => crate::account::origin::account_origin()
                     .map_err(|error| error.to_string())?,
             };
@@ -2334,7 +2335,8 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                 }
             };
             let origin = match origin {
-                Some(value) => value,
+                Some(value) => crate::account::origin::normalize_account_origin(&value)
+                    .map_err(|error| error.to_string())?,
                 None => crate::account::origin::account_origin()
                     .map_err(|error| error.to_string())?,
             };

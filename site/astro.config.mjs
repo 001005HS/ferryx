@@ -65,7 +65,10 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Getting Started',
-          items: [{ label: 'Introduction', slug: 'docs/introduction' }],
+          items: [
+            { label: 'Introduction', slug: 'docs/introduction' },
+            { label: 'Self-hosted relay', slug: 'docs/self-hosted-relay' },
+          ],
         },
         {
           label: 'Reference',

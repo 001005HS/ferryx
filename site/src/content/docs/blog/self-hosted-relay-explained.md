@@ -13,14 +13,16 @@ Long agent runs do not wait for you to be at the desk. Remote access that does n
 
 ## Outbound relay model
 
-Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway using a 6-digit PIN or QR. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “self hosted relay terminal”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx connects a mobile or browser client to an account-enrolled daemon through an authenticated gateway. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, you can return to the same session from a second device.
 
 ## Practical steps
 
-1. Enable the gateway on the host and generate a pairing PIN or QR.
-2. Open the Ferryx remote client on the phone or browser and complete pairing; the session binds to the host identity.
+For executable commands and settings paths, use the [self-hosted relay operations guide](/docs/self-hosted-relay/). The list below describes the topology rather than a standalone installation procedure.
+
+1. Run `ferryx-relay` behind HTTPS on a host reachable by the phone and the daemon.
+2. Enroll the daemon through the account service on that relay, then open the relay's web client on the phone or browser.
 3. Browse sessions, tap into a pane, and type as if you were local; the DOM grid keeps layout stable on small screens.
-4. For off-LAN access, point the client at your own outbound relay instead of depending on a third-party tunnel.
+4. Set the daemon gateway URL and the desktop account origin to your own deployment as described in the guide.
 5. Revoke a lost device from the host so its pairing grant stops working.
 
 | Checkpoint | What good looks like |

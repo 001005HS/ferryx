@@ -82,7 +82,7 @@ export function AccountSignIn({
 
         if (res.status === "approved" && res.token) {
           stopPolling();
-          storeAccountSessionToken(res.token);
+          storeAccountSessionToken(res.token, originRef.current);
           onSignInRef.current?.(res.token, res.email ?? "");
         }
       } catch (err: unknown) {
@@ -144,7 +144,7 @@ export function AccountSignIn({
       setErrorCode(null);
       consumeLogin(origin, trimmed)
         .then((res) => {
-          storeAccountSessionToken(res.token);
+          storeAccountSessionToken(res.token, origin);
           if (window.history && typeof window.history.replaceState === "function") {
             window.history.replaceState(null, "", window.location.pathname);
           }
@@ -230,7 +230,7 @@ export function AccountSignIn({
     try {
       const res = await consumeLogin(origin, cleanCode);
       stopPolling();
-      storeAccountSessionToken(res.token);
+      storeAccountSessionToken(res.token, origin);
       onSignIn?.(res.token, res.email);
     } catch (err: unknown) {
       if (err instanceof AccountSessionError) {

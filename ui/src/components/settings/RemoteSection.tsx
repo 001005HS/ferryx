@@ -49,6 +49,7 @@ import {
   clearStoredAccountSessionToken,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
+  storeAccountOrigin,
   issueEnrollmentCode,
   listMachines,
   openTunnel,
@@ -144,10 +145,13 @@ export function RemoteSection({
   accountOrigin: accountOriginProp,
   accountOriginResolver = getConfiguredAccountOrigin,
 }: RemoteSectionProps) {
-  const accountOrigin = accountOriginProp ?? accountOriginResolver();
+  const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
+  const accountOrigin = accountOriginProp ?? configuredOrigin;
+  const [accountOriginDraft, setAccountOriginDraft] = useState(accountOrigin);
+  const [accountOriginError, setAccountOriginError] = useState<string | null>(null);
   const [accountToken, setAccountToken] = useState<string | null>(() => {
     if (accountSessionTokenProp !== undefined) return accountSessionTokenProp;
-    return getStoredAccountSessionToken();
+    return getStoredAccountSessionToken(accountOrigin);
   });
 
   useEffect(() => {
@@ -239,6 +243,30 @@ export function RemoteSection({
     setAccountToken(null);
     setAccountMachines([]);
     setIssuedCode(null);
+  };
+  const handleUseAccountOrigin = () => {
+    let next: URL;
+    try {
+      next = new URL(accountOriginDraft.trim());
+    } catch {
+      setAccountOriginError("Enter an HTTPS account server URL.");
+      return;
+    }
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(next.hostname);
+    if ((next.protocol !== "https:" && !(next.protocol === "http:" && loopback)) || next.username || next.password || next.pathname !== "/" || next.search || next.hash) {
+      setAccountOriginError("Use an HTTPS server origin without a path or credentials (HTTP is allowed only on this machine).");
+      return;
+    }
+    const origin = next.origin;
+    setAccountOriginError(null);
+    if (origin === accountOrigin) return;
+    storeAccountOrigin(origin);
+    clearStoredAccountSessionToken();
+    setAccountToken(null);
+    setAccountMachines([]);
+    setIssuedCode(null);
+    setActionError(null);
+    setConfiguredOrigin(origin);
   };
   const [context] = useState<RemoteContext>(
     initialContext ?? { page: "machines", filter: legacySsh ? "ssh" : "all" },
@@ -661,10 +689,23 @@ export function RemoteSection({
     <section aria-label="Remote" className="space-y-5">
       <h1 className="text-xl font-semibold">Remote</h1>
 
+      {!accountOriginProp ? (
+        <div className="rounded-lg border border-border bg-card p-4 space-y-2">
+          <Label htmlFor="account-server-url">Account server URL</Label>
+          <p className="text-[11px] text-muted-foreground">Sign in and enroll machines through this account authority. This does not change the relay tunnel on this machine.</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input id="account-server-url" type="url" value={accountOriginDraft} onChange={(e) => setAccountOriginDraft(e.target.value)} className="h-8 w-full max-w-80 text-[12px]" />
+            <Button type="button" variant="outline" size="sm" disabled={accountOriginDraft.trim() === accountOrigin} onClick={handleUseAccountOrigin}>Use account server</Button>
+          </div>
+          {accountOriginError ? <p role="alert" className="text-[11px] text-destructive">{accountOriginError}</p> : null}
+        </div>
+      ) : null}
+
       {!accountToken ? (
         <AccountSignIn
+          key={accountOrigin}
           origin={accountOrigin}
-          onSignIn={(tok) => setAccountToken(tok)}
+          onSignIn={(tok) => { if (getConfiguredAccountOrigin() === accountOrigin) setAccountToken(tok); }}
         />
       ) : (
         <div

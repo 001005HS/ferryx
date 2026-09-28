@@ -29,14 +29,14 @@ Ferryx (SUL-1.0, Rust and Tauri v2) takes the same problem from the other end: i
 
 - **Sessions outlive the GUI.** A headless Rust daemon owns the pseudoterminals instead of the desktop window, so closing or reloading the app doesn't kill running processes. There's no separate multiplexer to remember.
 - **Reconnects replay what you missed.** Output lives in a 512 KiB ring buffer per session with monotonic sequence numbers. A reconnecting client receives the output it missed, and if the buffer overflowed it's told there's a gap rather than shown a silently corrupted transcript.
-- **Pairing uses a 6-digit PIN or a QR code.** You pair a phone with the running daemon, and nothing in the flow depends on an account with anyone.
+- **Machine enrollment uses an account-issued grant.** A headless host can enroll using an email magic link or a one-time code from the desktop account settings. Running your own account service avoids depending on the public relay.
 - **The mobile client is a custom DOM grid.** Ferryx doesn't ship xterm.js to the phone; the remote terminal renders through a purpose-built grid.
-- **Off-LAN access runs over your own relay.** The daemon holds an outbound tunnel to a relay, so reaching a machine behind NAT needs no inbound port and no public IP. The relay is the `ferryx-relay` binary in the same repository, so you can run it on your own host instead of the default one.
+- **Off-LAN access runs over your own relay.** The daemon holds an outbound tunnel to a relay, so reaching a machine behind NAT needs no inbound port and no public IP. The relay is the `ferryx-relay` binary in the same repository. [Self-hosting instructions](/docs/self-hosted-relay/) cover the server and both client settings.
 - **Any process, not any agent.** Whatever is in the pane is what you see: Claude Code, Codex, a test runner, a migration, a shell.
 
 In practice: start a run at your desk, leave, and open the paired web client on your phone to check progress or type the next command. The run never depended on the desktop window being open, and reconnecting after a while replays the output you missed.
 
-The trade is honest. There's no push notification to your lock screen, no vendor keeping a transcript in sync for you, and no support contract. What you get is no subscription, no account, no per-agent limitation, and infrastructure you can host yourself.
+The trade is honest. There's no push notification to your lock screen, no vendor keeping a transcript in sync for you, and no support contract. A self-hosted installation runs its own account authority for enrollment and login; it needs no public-service subscription and keeps the infrastructure under your control.
 
 ## A note on security
 

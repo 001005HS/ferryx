@@ -381,7 +381,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const lastAgentActivityRef = useRef<string | null>(null);
 
   const [accountSessionToken, setAccountSessionToken] = useState<string | null>(
-    () => getStoredAccountSessionToken(),
+    () => getStoredAccountSessionToken(relayUrl),
   );
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
 

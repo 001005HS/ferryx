@@ -17,7 +17,6 @@ import {
   setRemoteAuthToken,
 } from "../lib/remoteClient";
 import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
-import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 
 export const ACCOUNT_TOKEN_HOST_ID = "account";
 
@@ -119,19 +118,24 @@ function cleanOrigin(origin: string): string {
   return trimmed.replace(/\/+$/, "");
 }
 
-export function getStoredAccountSessionToken(): string | null {
+export function getStoredAccountSessionToken(origin: string = getConfiguredAccountOrigin()): string | null {
+  const issuer = typeof window !== "undefined" ? window.localStorage.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) : null;
+  if (issuer !== cleanOrigin(origin)) return null;
   return getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
 }
 
-export function storeAccountSessionToken(token: string): void {
+export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin()): void {
   setRemoteAuthToken(token, ACCOUNT_TOKEN_HOST_ID);
+  if (typeof window !== "undefined") window.localStorage.setItem(ACCOUNT_TOKEN_ORIGIN_KEY, cleanOrigin(origin));
 }
 
 export function clearStoredAccountSessionToken(): void {
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
+  if (typeof window !== "undefined") window.localStorage.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
 }
 
 export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
+const ACCOUNT_TOKEN_ORIGIN_KEY = "ferryx.account.tokenOrigin";
 
 export function getStoredAccountOrigin(
   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
@@ -147,7 +151,7 @@ export function storeAccountOrigin(
   origin: string,
   storage: Pick<Storage, "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): void {
-  storage?.setItem(ACCOUNT_ORIGIN_STORAGE_KEY, origin.trim());
+  storage?.setItem(ACCOUNT_ORIGIN_STORAGE_KEY, cleanOrigin(origin));
 }
 
 export function clearStoredAccountOrigin(
@@ -161,14 +165,6 @@ export function getConfiguredAccountOrigin(
 ): string {
   const stored = getStoredAccountOrigin(storage);
   if (stored) return stored;
-  try {
-    const active = selectActiveHost(remoteHostStore.getState());
-    if (active?.relayOrigin && active.relayOrigin.trim().length > 0) {
-      return active.relayOrigin.trim();
-    }
-  } catch {
-    // fallback below
-  }
   return DEFAULT_RELAY_ORIGIN;
 }
 
@@ -393,7 +389,7 @@ export async function consumeLogin(
     throw new AccountSessionError("INVALID_RESPONSE", "Malformed login response from server", res.status);
   }
 
-  storeAccountSessionToken(data.token);
+  storeAccountSessionToken(data.token, origin);
   return data;
 }
 

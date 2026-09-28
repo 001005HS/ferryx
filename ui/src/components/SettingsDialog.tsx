@@ -22,7 +22,6 @@ import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { RemoteSection } from "./settings/RemoteSection";
 import type { MachineProjectTarget, RemoteContext } from "../lib/machineNavigation";
-import { getConfiguredAccountOrigin } from "../remote/accountSession";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
 import { TerminalSection } from "./settings/TerminalSection";
 import type { SectionId } from "./settings/types";
@@ -198,7 +197,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               legacySsh={initialSection === "ssh"}
               onOpenProject={onOpenMachineProject}
               onOpenSshProject={onOpenSshProject}
-              accountOrigin={accountOrigin ?? getConfiguredAccountOrigin()}
+              accountOrigin={accountOrigin}
             />
           ) : null}
         </div>

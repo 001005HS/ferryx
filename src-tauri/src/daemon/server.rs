@@ -1049,6 +1049,7 @@ pub struct DaemonServer {
     workspace_registry: WorkspaceRegistry,
     remote_state: Arc<RemoteGatewayState>,
     remote_server_handle: Arc<Mutex<Option<RemoteServerHandle>>>,
+    remote_configure_lock: tokio::sync::Mutex<()>,
     epoch: u64,
     binary_path: Option<String>,
     binary_mtime_ms: Option<u64>,
@@ -1920,6 +1921,7 @@ impl DaemonServer {
             remote_state,
             remote_event_tx,
             remote_server_handle: remote_handle_for_handover,
+            remote_configure_lock: tokio::sync::Mutex::new(()),
             epoch,
             binary_path,
             binary_mtime_ms,
@@ -4276,6 +4278,41 @@ impl DaemonServer {
         &self,
         config: RemoteGatewayConfig,
     ) -> Result<(), String> {
+        let _configure = self.remote_configure_lock.lock().await;
+        let prev_config = self.remote_state.config.read().clone();
+        let bound_address = self.remote_state.bound_address.read().clone();
+        let bound_address = bound_address
+            .as_deref()
+            .and_then(|address| address.parse::<std::net::SocketAddr>().ok());
+        if prev_config.mode == RemoteNetworkMode::Relay
+            && config.mode == RemoteNetworkMode::Relay
+            && (config.port == prev_config.port
+                || bound_address.is_some_and(|address| address.port() == config.port))
+            && self.remote_server_handle.lock().is_some()
+        {
+            let address = bound_address
+                .ok_or_else(|| "Remote gateway listener address unavailable".to_string())?;
+            let client = RemoteServerHandle::prepare_relay(
+                Arc::clone(&self.remote_state), config.relay_url.as_deref(), address,
+            ).await?;
+            let state = Arc::clone(&self.remote_state);
+            let handles = Arc::clone(&self.remote_server_handle);
+            return crate::ipc::run_blocking(move || {
+                let mut handles = handles.lock();
+                let handle = handles.as_mut().ok_or_else(|| {
+                    crate::ipc::IpcError::internal("Remote gateway stopped during configuration")
+                })?;
+                *state.config.write() = config;
+                if let Err(error) = state.persist_config() {
+                    *state.config.write() = prev_config;
+                    return Err(crate::ipc::IpcError::internal(format!(
+                        "Failed to persist remote gateway config: {error}"
+                    )));
+                }
+                handle.replace_relay(state, client);
+                Ok(())
+            }).await.map_err(|error| error.to_string());
+        }
         if config.mode == RemoteNetworkMode::Off {
             let prev_handle = self.remote_server_handle.lock().take();
             if let Some(handle) = prev_handle {
@@ -4290,7 +4327,8 @@ impl DaemonServer {
             return Ok(());
         }
 
-        let prev_config = self.remote_state.config.read().clone();
+        let prev_running = *self.remote_state.is_running.read();
+        let prev_address = self.remote_state.bound_address.read().clone();
         *self.remote_state.config.write() = config.clone();
 
         match start_remote_server(Arc::clone(&self.remote_state)).await {
@@ -4307,9 +4345,8 @@ impl DaemonServer {
             }
             Err(err) => {
                 *self.remote_state.config.write() = prev_config;
-                *self.remote_state.is_running.write() = false;
-                *self.remote_state.bound_address.write() = None;
-                let _ = self.remote_state.persist_config();
+                *self.remote_state.is_running.write() = prev_running;
+                *self.remote_state.bound_address.write() = prev_address;
                 Err(err)
             }
         }
@@ -4700,6 +4737,97 @@ mod ssh_survival_tests;
 #[cfg(all(test, unix))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
+
+#[cfg(test)]
+mod live_relay_apply_tests {
+    use super::*;
+
+    struct Gateway(DaemonServer, [tokio::net::TcpListener; 2]);
+
+    impl Drop for Gateway {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.remote_server_handle.lock().take() {
+                handle.stop();
+            }
+        }
+    }
+
+    async fn fixture(root: &Path) -> (Gateway, std::net::SocketAddr, String) {
+        let server = Gateway(DaemonServer::new_with_paths(
+            Some(root.join("config.json")), Some(root.join("auth.json")),
+        ), [
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        ]);
+        server.0.configure_gateway(RemoteGatewayConfig {
+            mode: RemoteNetworkMode::Relay,
+            port: 0,
+            relay_url: Some(format!("http://{}", server.1[0].local_addr().unwrap())),
+            ..Default::default()
+        }).await.unwrap();
+        let address = server.0.remote_state.bound_address.read().as_ref()
+            .unwrap().parse().unwrap();
+        let pin = server.0.remote_state.auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let (token, _) = server.0.remote_state.auth_manager
+            .exchange_pairing_code(&pin, "relay-apply").unwrap();
+        (server, address, token)
+    }
+
+    async fn assert_listener(address: std::net::SocketAddr, token: &str) {
+        let client = reqwest::Client::builder().no_proxy()
+            .timeout(Duration::from_secs(5)).build().unwrap();
+        assert_eq!(client.get(format!("http://{address}/api/v1/health"))
+            .send().await.unwrap().status(), reqwest::StatusCode::OK);
+        assert_eq!(client.get(format!("http://{address}/api/v1/devices"))
+            .bearer_auth(token).send().await.unwrap().status(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn same_port_relay_apply_preserves_listener_and_auth() {
+        let root = tempfile::tempdir().unwrap();
+        let (server, address, token) = fixture(root.path()).await;
+        let previous_epoch = server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch;
+        assert_listener(address, &token).await;
+        let mut config = server.0.remote_state.config.read().clone();
+        config.port = address.port();
+        let next_url = format!("http://{}", server.1[1].local_addr().unwrap());
+        config.relay_url = Some(next_url.clone());
+
+        server.0.configure_gateway(config).await.unwrap();
+
+        assert!(*server.0.remote_state.is_running.read());
+        assert_eq!(server.0.remote_state.bound_address.read().as_deref(), Some(address.to_string().as_str()));
+        assert_ne!(server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch, previous_epoch);
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(persisted["relayUrl"], next_url);
+        assert_eq!(persisted["port"], address.port());
+        assert_listener(address, &token).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_relay_apply_preserves_config_publication_and_listener() {
+        let root = tempfile::tempdir().unwrap();
+        let (server, address, token) = fixture(root.path()).await;
+        let previous_epoch = server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch;
+        let previous_file = fs::read(root.path().join("config.json")).unwrap();
+        let previous_config = serde_json::to_value(&*server.0.remote_state.config.read()).unwrap();
+
+        for url in ["not a URL", "http://relay.example.com"] {
+            let mut config = server.0.remote_state.config.read().clone();
+            config.relay_url = Some(url.into());
+            assert!(server.0.configure_gateway(config).await.is_err());
+
+            assert_eq!(serde_json::to_value(&*server.0.remote_state.config.read()).unwrap(), previous_config);
+            assert_eq!(fs::read(root.path().join("config.json")).unwrap(), previous_file);
+            assert_eq!(server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch, previous_epoch);
+            assert!(*server.0.remote_state.is_running.read());
+            assert_eq!(server.0.remote_state.bound_address.read().as_deref(), Some(address.to_string().as_str()));
+            assert_listener(address, &token).await;
+        }
+    }
+}
 
 fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
     let norm_repo = repo_root.replace('\\', "/");
