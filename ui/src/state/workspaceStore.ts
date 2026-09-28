@@ -787,7 +787,7 @@ export function useWorkspaceStore({
     [dispatch, services, workspaceId],
   );
 
-  const ensureTabForWorktree = useCallback(
+  const ensureTabForWorktreeOnce = useCallback(
     async (worktree: Worktree, options?: { allowCreate?: boolean }) => {
       const allowCreate = options?.allowCreate ?? true;
       const restoreStatus = getWorkspaceRestoreStatus(workspaceId);
@@ -919,6 +919,26 @@ export function useWorkspaceStore({
       return openTab(worktree);
     },
     [dispatch, openTab, workspaceId],
+  );
+
+  // A click and a refresh can ensure the same worktree before the first spawn lands its tab;
+  // share the in-flight result instead of spawning a second backend session and tab.
+  const ensureInFlightRef = useRef(new Map<string, Promise<string | null>>());
+  const ensureTabForWorktree = useCallback(
+    (worktree: Worktree, options?: { allowCreate?: boolean }): Promise<string | null> => {
+      const key = `${workspaceId}\u0000${worktree.path}\u0000${options?.allowCreate ?? true}`;
+      const inFlight = ensureInFlightRef.current;
+      const existing = inFlight.get(key);
+      if (existing) return existing;
+      const pending = ensureTabForWorktreeOnce(worktree, options);
+      inFlight.set(key, pending);
+      const release = () => {
+        if (inFlight.get(key) === pending) inFlight.delete(key);
+      };
+      void pending.then(release, release);
+      return pending;
+    },
+    [ensureTabForWorktreeOnce, workspaceId],
   );
 
   const splitPane = useCallback(
