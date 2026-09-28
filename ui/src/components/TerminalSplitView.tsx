@@ -206,6 +206,8 @@ type TerminalSplitViewProps = {
   onClosePane?: (tabId: string, leafId: string) => void;
   onSetRatio?: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onSetGroupRatio?: (path: string, ratio: number) => void;
+  onEqualizeGroupRun?: (path: string) => void;
+  onEqualizePaneRun?: (tabId: string, path: string) => void;
   onSwapPanes?: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane?: (tabId: string, leafId: string) => void;
   unreadTabIds?: Record<string, boolean>;
@@ -260,6 +262,8 @@ export function TerminalSplitView({
   onClosePane = () => undefined,
   onSetRatio = () => undefined,
   onSetGroupRatio = () => undefined,
+  onEqualizeGroupRun = () => undefined,
+  onEqualizePaneRun = () => undefined,
   onSwapPanes = () => undefined,
   onFocusPane = () => undefined,
   unreadTabIds,
@@ -493,6 +497,7 @@ export function TerminalSplitView({
     onMoveTabToSplit,
     onClosePane,
     onSetRatio,
+    onEqualizePaneRun,
     onSwapPanes,
     onFocusPane,
     unreadTabIds,
@@ -539,6 +544,7 @@ export function TerminalSplitView({
             firstGroupId={firstGroupId}
             leadingSpacer={leadingSpacer}
             onSetGroupRatio={onSetGroupRatio}
+            onEqualizeGroupRun={onEqualizeGroupRun}
             groupProps={sharedGroupProps}
           />
         ) : (
@@ -589,10 +595,11 @@ type TabGroupLayoutRendererProps = {
   firstGroupId: string | null;
   leadingSpacer: number;
   onSetGroupRatio: (path: string, ratio: number) => void;
+  onEqualizeGroupRun: (path: string) => void;
   groupProps: Omit<TabGroupViewProps, "groupId" | "leadingSpacer">;
 };
 
-function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSetGroupRatio, groupProps }: TabGroupLayoutRendererProps) {
+function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSetGroupRatio, onEqualizeGroupRun, groupProps }: TabGroupLayoutRendererProps) {
   if (node.type === "group") {
     return (
       <TabGroupView
@@ -618,6 +625,7 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
           firstGroupId={firstGroupId}
           leadingSpacer={leadingSpacer}
           onSetGroupRatio={onSetGroupRatio}
+          onEqualizeGroupRun={onEqualizeGroupRun}
           groupProps={groupProps}
         />
       </div>
@@ -626,6 +634,7 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
         ratio={ratio}
         ariaLabel="Resize tab groups"
         onRatioChange={(newRatio) => onSetGroupRatio(path, newRatio)}
+        onEqualize={() => onEqualizeGroupRun(path)}
       />
       <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden" style={{ flexBasis: `${(1 - ratio) * 100}%`, flexGrow: 1, flexShrink: 1 }}>
         <TabGroupLayoutRenderer
@@ -634,6 +643,7 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
           firstGroupId={firstGroupId}
           leadingSpacer={leadingSpacer}
           onSetGroupRatio={onSetGroupRatio}
+          onEqualizeGroupRun={onEqualizeGroupRun}
           groupProps={groupProps}
         />
       </div>
@@ -675,6 +685,7 @@ type TabGroupViewProps = {
   ) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
+  onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
   unreadTabIds?: Record<string, boolean>;
@@ -726,6 +737,7 @@ function TabGroupView({
   onMoveTabToSplit,
   onClosePane,
   onSetRatio,
+  onEqualizePaneRun,
   onSwapPanes,
   onFocusPane,
   unreadTabIds,
@@ -863,6 +875,7 @@ function TabGroupView({
                     onSplitPane={onSplitPane}
                     onClosePane={onClosePane}
                     onSetRatio={onSetRatio}
+                    onEqualizePaneRun={onEqualizePaneRun}
                     onSwapPanes={onSwapPanes}
                     onFocusPane={onFocusPane}
                   />
@@ -914,6 +927,7 @@ type PaneRendererProps = {
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
+  onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
 };
@@ -972,6 +986,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         ratio={ratio}
         ariaLabel="Resize terminal panes"
         onDragStart={() => resolveSeam(tabLayout.root, path)}
+        onEqualize={() => props.onEqualizePaneRun(tab.id, path)}
         onRatioChange={(newRatio, options) => {
           props.onSetRatio(tab.id, path, newRatio, options);
         }}
@@ -1342,6 +1357,7 @@ type PaneResizeDividerProps = {
   direction: PaneDirection;
   ratio: number;
   onDragStart?: () => ResolvedSeam | null;
+  onEqualize?: () => void;
   onRatioChange: (ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   ariaLabel?: string;
 };
@@ -1350,6 +1366,7 @@ function PaneResizeDivider({
   direction,
   ratio,
   onDragStart,
+  onEqualize,
   onRatioChange,
   ariaLabel = "Resize terminal panes",
 }: PaneResizeDividerProps) {
@@ -1475,10 +1492,8 @@ function PaneResizeDivider({
       cleanup();
 
       if (equalize) {
-        // Two clicks in the same spot snap the panes back to an even division of the current
-        // container, keeping collinear splits on the same line. Recognizing the pair on release
-        // (not on the second press) lets a drag that starts on the second press resize normally.
-        onRatioChange(0.5, { isolated: false, seam: seamRef.current });
+        if (onEqualize) onEqualize();
+        else onRatioChange(0.5, { isolated: false, seam: seamRef.current });
       }
     };
 

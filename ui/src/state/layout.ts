@@ -28,8 +28,10 @@ import {
   setRatioAtPath,
   splitLeaf,
   swapLeaves,
+  type PaneNode,
   type ResolvedSeam,
 } from "./paneTree";
+import { equalizeSplitRun } from "./splitEqualization";
 
 export type LayoutAction =
   | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
@@ -73,6 +75,7 @@ export type LayoutAction =
       targetIndex?: number;
     }
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
+  | { type: "EQUALIZE_TAB_GROUP_RUN"; path: string }
   | { type: "CLOSE_PANE"; tabId: string; leafId: string; replacementSessionId?: string }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
   | {
@@ -85,7 +88,8 @@ export type LayoutAction =
     }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "TOGGLE_PANE_EXPANDED"; tabId: string; leafId: string }
-  | { type: "EQUALIZE_PANES"; tabId: string };
+  | { type: "EQUALIZE_PANES"; tabId: string }
+  | { type: "EQUALIZE_PANE_RUN"; tabId: string; path: string };
 
 export function createLayoutState(tabs: WorkspaceTab[] = [], activeTabId?: string | null): LayoutState {
   const layoutsByTabId: Record<string, TabPaneLayout> = {};
@@ -536,6 +540,12 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (nextLayout === state.tabGroupLayout) return state;
       return normalizeLayoutInternal({ ...state, tabGroupLayout: nextLayout }, true);
     }
+    case "EQUALIZE_TAB_GROUP_RUN": {
+      if (!state.tabGroupLayout) return state;
+      const nextLayout = equalizeSplitRun(state.tabGroupLayout, action.path, (node): node is Extract<TabGroupLayoutNode, { type: "split" }> => node.type === "split");
+      if (nextLayout === state.tabGroupLayout) return state;
+      return normalizeLayoutInternal({ ...state, tabGroupLayout: nextLayout }, true);
+    }
     case "CLOSE_PANE": {
       const tabLayout = state.layoutsByTabId[action.tabId];
       if (!tabLayout) return state;
@@ -608,6 +618,16 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         },
         true,
       );
+    }
+    case "EQUALIZE_PANE_RUN": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      const root = equalizeSplitRun(tabLayout.root, action.path, (node): node is Extract<PaneNode, { type: "split" }> => node.type === "split");
+      if (root === tabLayout.root) return state;
+      return normalizeLayoutInternal({
+        ...state,
+        layoutsByTabId: { ...state.layoutsByTabId, [action.tabId]: { ...tabLayout, root } },
+      }, true);
     }
     case "SWAP_PANES": {
       const tabLayout = state.layoutsByTabId[action.tabId];

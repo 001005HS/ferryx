@@ -214,6 +214,8 @@ export type WorkspaceAction =
       seam?: ResolvedSeam | null;
     }
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
+  | { type: "EQUALIZE_TAB_GROUP_RUN"; path: string }
+  | { type: "EQUALIZE_PANE_RUN"; tabId: string; path: string }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
   | {
@@ -1247,6 +1249,14 @@ export function useWorkspaceStore({
     (path: string, ratio: number) => dispatch({ type: "SET_TAB_GROUP_RATIO", path, ratio }),
     [dispatch],
   );
+  const equalizeTabGroupRun = useCallback(
+    (path: string) => dispatch({ type: "EQUALIZE_TAB_GROUP_RUN", path }),
+    [dispatch],
+  );
+  const equalizePaneRun = useCallback(
+    (tabId: string, path: string) => dispatch({ type: "EQUALIZE_PANE_RUN", tabId, path }),
+    [dispatch],
+  );
   const swapPanes = useCallback(
     (tabId: string, sourceLeafId: string, targetLeafId: string) => dispatch({ type: "SWAP_PANES", tabId, sourceLeafId, targetLeafId }),
     [dispatch],
@@ -1564,7 +1574,9 @@ export function useWorkspaceStore({
     setTabPinned,
     focusPane,
     setPaneRatio,
+    equalizePaneRun,
     setTabGroupRatio,
+    equalizeTabGroupRun,
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
@@ -2350,6 +2362,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "SET_TAB_GROUP_RATIO": {
       const layout = layoutReducer(state.layout, { type: "SET_TAB_GROUP_RATIO", path: action.path, ratio: action.ratio });
+      return layout === state.layout ? state : { ...state, layout };
+    }
+    case "EQUALIZE_TAB_GROUP_RUN": {
+      const layout = layoutReducer(state.layout, action);
+      return layout === state.layout ? state : { ...state, layout };
+    }
+    case "EQUALIZE_PANE_RUN": {
+      const layout = layoutReducer(state.layout, action);
       return layout === state.layout ? state : { ...state, layout };
     }
     case "SWAP_PANES": {

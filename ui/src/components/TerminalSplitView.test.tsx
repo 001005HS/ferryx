@@ -421,8 +421,9 @@ describe("TerminalSplitView group and pane rendering", () => {
   });
 
   describe("divider double-click equalize", () => {
-    it("splits the panes evenly on a divider double-click and forwards the resolved seam", () => {
+    it("splits the panes evenly on a divider double-click", () => {
       const onSetRatio = vi.fn();
+      const onEqualizePaneRun = vi.fn();
       const layout = splitLayout();
       layout.layoutsByTabId["tab-1"].root = {
         type: "split",
@@ -432,7 +433,7 @@ describe("TerminalSplitView group and pane rendering", () => {
         ratio: 0.8,
       };
 
-      render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSetRatio={onSetRatio} onEqualizePaneRun={onEqualizePaneRun} />);
       const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
       const now = vi.spyOn(Date, "now");
 
@@ -443,16 +444,8 @@ describe("TerminalSplitView group and pane rendering", () => {
       fireEvent.pointerDown(divider, { clientX: 252, clientY: 101 });
       fireEvent.pointerUp(window);
 
-      expect(onSetRatio).toHaveBeenCalledTimes(1);
-      expect(onSetRatio).toHaveBeenCalledWith(
-        "tab-1",
-        "",
-        0.5,
-        expect.objectContaining({
-          isolated: false,
-          seam: expect.objectContaining({ direction: "horizontal", targetPath: "" }),
-        }),
-      );
+      expect(onSetRatio).not.toHaveBeenCalled();
+      expect(onEqualizePaneRun).toHaveBeenCalledExactlyOnceWith("tab-1", "");
       now.mockRestore();
     });
 
@@ -528,7 +521,8 @@ describe("TerminalSplitView group and pane rendering", () => {
 
     it("keeps the even division when the second press jitters within the slop", () => {
       const onSetRatio = vi.fn();
-      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const onEqualizePaneRun = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} onEqualizePaneRun={onEqualizePaneRun} />);
       const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
       const parent = divider.parentElement as HTMLElement;
       vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
@@ -552,8 +546,8 @@ describe("TerminalSplitView group and pane rendering", () => {
       fireEvent.pointerMove(window, { clientX: 252, clientY: 100 });
       fireEvent.pointerUp(window);
 
-      const ratios = onSetRatio.mock.calls.map((call) => call[2]);
-      expect(ratios.at(-1)).toBe(0.5);
+      expect(onSetRatio).toHaveBeenCalledWith("tab-1", "", 0.504, expect.anything());
+      expect(onEqualizePaneRun).toHaveBeenCalledExactlyOnceWith("tab-1", "");
       now.mockRestore();
     });
 
@@ -590,6 +584,7 @@ describe("TerminalSplitView group and pane rendering", () => {
 
     it("equalizes split tab groups from the group divider", () => {
       const onSetGroupRatio = vi.fn();
+      const onEqualizeGroupRun = vi.fn();
       const layout: LayoutState = {
         tabs: [tab("tab-a", "session-1"), tab("tab-b", "session-2")],
         activeTabId: "tab-a",
@@ -622,7 +617,7 @@ describe("TerminalSplitView group and pane rendering", () => {
       };
 
       render(
-        <TerminalSplitView layout={layout} sessions={splitSessions()} onSetGroupRatio={onSetGroupRatio} />,
+        <TerminalSplitView layout={layout} sessions={splitSessions()} onSetGroupRatio={onSetGroupRatio} onEqualizeGroupRun={onEqualizeGroupRun} />,
       );
       const divider = screen.getByRole("separator", { name: "Resize tab groups" });
       const now = vi.spyOn(Date, "now");
@@ -634,8 +629,8 @@ describe("TerminalSplitView group and pane rendering", () => {
       fireEvent.pointerDown(divider, { clientX: 251, clientY: 100 });
       fireEvent.pointerUp(window);
 
-      expect(onSetGroupRatio).toHaveBeenCalledTimes(1);
-      expect(onSetGroupRatio).toHaveBeenCalledWith("", 0.5);
+      expect(onSetGroupRatio).not.toHaveBeenCalled();
+      expect(onEqualizeGroupRun).toHaveBeenCalledExactlyOnceWith("");
       now.mockRestore();
     });
   });

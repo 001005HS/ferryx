@@ -1,12 +1,80 @@
 import { describe, expect, it } from "vitest";
 
-import type { BrowserTab, FileTab, TerminalTab } from "../lib/types";
+import type { BrowserTab, FileTab, TabGroupLayoutNode, TerminalTab } from "../lib/types";
 import { createLayoutState, defaultContentForTab, focusedPaneSessionId, layoutReducer } from "./layout";
-import { resolveSeam } from "./paneTree";
+import { computeLeafRects, resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
 }
+
+describe("divider run equalization", () => {
+  it("gives five nested horizontal tab groups equal widths from any divider", () => {
+    const groups: TabGroupLayoutNode = {
+      type: "split", direction: "horizontal", ratio: 0.32,
+      first: { type: "group", groupId: "a" },
+      second: {
+        type: "split", direction: "horizontal", ratio: 0.44,
+        first: { type: "group", groupId: "b" },
+        second: {
+          type: "split", direction: "horizontal", ratio: 0.55,
+          first: { type: "group", groupId: "c" },
+          second: {
+            type: "split", direction: "horizontal", ratio: 0.7,
+            first: { type: "group", groupId: "d" },
+            second: { type: "group", groupId: "e" },
+          },
+        },
+      },
+    };
+    const initial = createLayoutState(["a", "b", "c", "d", "e"].map((id) => tab(id, id)), "a");
+    for (const path of ["", "second", "second.second", "second.second.second"]) {
+      const state = layoutReducer({
+        ...initial,
+        tabGroups: Object.fromEntries(["a", "b", "c", "d", "e"].map((id) => [id, { id, tabIds: [id], activeTabId: id }])),
+        tabGroupLayout: groups,
+      }, { type: "EQUALIZE_TAB_GROUP_RUN", path });
+      const widths: number[] = [];
+      const visit = (node: TabGroupLayoutNode, width: number) => {
+        if (node.type === "group") { widths.push(width); return; }
+        visit(node.first, width * node.ratio);
+        visit(node.second, width * (1 - node.ratio));
+      };
+      if (!state.tabGroupLayout) throw new Error("missing groups");
+      visit(state.tabGroupLayout, 1);
+      expect(widths).toHaveLength(5);
+      for (const width of widths) expect(width).toBeCloseTo(0.2, 6);
+    }
+    expect(groups.ratio).toBe(0.32);
+  });
+
+  it("equalizes only the selected axis run inside perpendicular splits", () => {
+    const initial = createLayoutState([tab("a", "a")], "a");
+    const root = {
+      type: "split" as const, direction: "vertical" as const, ratio: 0.65,
+      first: {
+        type: "split" as const, direction: "horizontal" as const, ratio: 0.7,
+        first: { type: "leaf" as const, leafId: "a" },
+        second: { type: "leaf" as const, leafId: "b" },
+      },
+      second: {
+        type: "split" as const, direction: "horizontal" as const, ratio: 0.2,
+        first: { type: "leaf" as const, leafId: "c" },
+        second: { type: "leaf" as const, leafId: "d" },
+      },
+    };
+    const state = layoutReducer({
+      ...initial,
+      layoutsByTabId: { a: { ...initial.layoutsByTabId.a, root } },
+    }, { type: "EQUALIZE_PANE_RUN", tabId: "a", path: "first" });
+    const next = state.layoutsByTabId.a.root;
+    const rects = computeLeafRects(next);
+    expect(rects.get("a")?.w).toBeCloseTo(0.5);
+    expect(rects.get("b")?.w).toBeCloseTo(0.5);
+    expect(rects.get("c")?.w).toBeCloseTo(0.2);
+    expect(next.type === "split" ? next.ratio : null).toBe(0.65);
+  });
+});
 
 describe("file preview tabs", () => {
   it("returns to the previously active tab after closing a newly opened file tab", () => {

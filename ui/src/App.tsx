@@ -734,6 +734,8 @@ function WorkspaceApp({
     focusPane,
     setPaneRatio,
     setTabGroupRatio,
+    equalizePaneRun,
+    equalizeTabGroupRun,
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
@@ -3230,6 +3232,8 @@ function WorkspaceApp({
             onClosePane={handleClosePane}
             onSetRatio={setPaneRatio}
             onSetGroupRatio={setTabGroupRatio}
+            onEqualizePaneRun={equalizePaneRun}
+            onEqualizeGroupRun={equalizeTabGroupRun}
             onSwapPanes={swapPanes}
             onFocusPane={focusPane}
             searchLeafId={searchLeafId}
