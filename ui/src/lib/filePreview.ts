@@ -16,6 +16,7 @@ import { openExternalUrl } from "./browserTauri";
 import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 
 import { loadFileLinkEditor } from "./fileLinkSettings";
+import { resolveMarkdownDocumentPath } from "./markdownDocLink";
 import {
   FILE_PREVIEW_COMMANDS,
   FILE_PREVIEW_LIMITS,
@@ -331,6 +332,24 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
         if (capabilityGeneration !== generation) return;
         const live = state;
         if (live.status !== "ready" || live.generation !== capabilityGeneration) return;
+        const resolvedPath = (live.payload as { resolvedPath?: string | null }).resolvedPath;
+        if (typeof resolvedPath === "string" && resolvedPath.length > 0) {
+          const target = resolveMarkdownDocumentPath(resolvedPath, relativePath);
+          window.dispatchEvent(
+            new CustomEvent("ferryx:open-file-preview", {
+              detail: {
+                source: live.source,
+                request: {
+                  path: target,
+                  backendSessionId: live.request.backendSessionId,
+                  line: null,
+                  col: null,
+                },
+              },
+            }),
+          );
+          return;
+        }
         // Containment over convenience: no backend command opens a document
         // under the parent handle's boundary, so the request is reported, not
         // rerouted through the unbounded open command.

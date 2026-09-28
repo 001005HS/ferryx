@@ -140,6 +140,8 @@ export type FilePreviewPayload = {
   readonly lineCount: number | null;
   /** Clamped caret target when the request carried line/col. */
   readonly target: FilePreviewTarget | null;
+  /** Canonical absolute path of the opened file (main window only). */
+  readonly resolvedPath: string | null;
 };
 
 /** `cmd_file_preview_open_child` result: a child capability with no document body. */

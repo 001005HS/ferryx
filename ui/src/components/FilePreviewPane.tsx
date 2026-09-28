@@ -2,11 +2,14 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { ExternalLink, RotateCcw } from "lucide-react";
 
 import { FilePreviewAudio } from "./FilePreviewAudio";
+import { FilePreviewCsv } from "./FilePreviewCsv";
 import { FilePreviewImage } from "./FilePreviewImage";
+import { FilePreviewNotebook } from "./FilePreviewNotebook";
 import { FilePreviewPdf } from "./FilePreviewPdf";
 import { FilePreviewText } from "./FilePreviewText";
 import { FilePreviewVideo } from "./FilePreviewVideo";
 import type { FilePreviewController, FilePreviewState } from "../lib/filePreview";
+import { checkFilePreviewChanged } from "../lib/filePreviewCommands";
 import { getFilePreview, retainFilePreview, subscribeFilePreviews } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
 
@@ -51,18 +54,55 @@ export function FilePreviewPane(props: FilePreviewPaneProps) {
   if (!controller) {
     return <div data-testid="file-preview-pane-missing" className="h-full w-full" />;
   }
-  return <FilePreviewPaneBody previewId={props.previewId} controller={controller} />;
+  return <FilePreviewPaneBody previewId={props.previewId} path={props.path} controller={controller} />;
 }
 
 function FilePreviewPaneBody({
   previewId,
+  path,
   controller,
 }: {
   previewId: string;
+  path: string;
   controller: FilePreviewController;
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const [sourceMode, setSourceMode] = useState(false);
+  const [hasDiskChange, setHasDiskChange] = useState(false);
+
+  useEffect(() => {
+    setHasDiskChange(false);
+  }, [state.status === "closed" ? 0 : state.generation]);
+
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    const handle = state.payload.handle;
+
+    const onCheckChange = () => {
+      checkFilePreviewChanged(handle)
+        .then((changed: boolean) => {
+          if (changed) {
+            setHasDiskChange(true);
+          }
+        })
+        .catch(() => {});
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        onCheckChange();
+      }
+    };
+
+    window.addEventListener("focus", onCheckChange);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onCheckChange);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [state.status === "ready" ? state.payload.handle : null]);
+
   if (state.status === "closed") {
     return <div data-testid="file-preview-pane-pending" data-status="closed" className="h-full w-full" />;
   }
@@ -78,19 +118,61 @@ function FilePreviewPaneBody({
       controller.reportFailure(state.generation, failure);
     },
   };
+  const filePath =
+    state.status === "ready"
+      ? ((state.payload as { resolvedPath?: string | null }).resolvedPath ?? path)
+      : path;
+
   return (
     <div data-testid="file-preview-pane" data-preview-id={previewId} className="flex h-full min-h-0 w-full flex-col bg-background">
-      <div className="flex h-8 shrink-0 items-center justify-end border-b border-border px-2">
-        <button
-          type="button"
-          data-testid="file-preview-open-external"
-          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
-          onClick={() => void controller.openExternal()}
+      <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2">
+        <span
+          data-testid="file-preview-path"
+          title={filePath}
+          className="truncate text-[11px] text-muted-foreground mr-2"
         >
-          <ExternalLink className="size-3" aria-hidden />
-          Open externally
-        </button>
+          {filePath}
+        </span>
+        <div className="flex items-center gap-2 shrink-0">
+          {state.status === "ready" && (
+            <button
+              type="button"
+              data-testid="file-preview-header-reload"
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => void controller.reload()}
+            >
+              <RotateCcw className="size-3" aria-hidden />
+              Reload
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="file-preview-open-external"
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={() => void controller.openExternal()}
+          >
+            <ExternalLink className="size-3" aria-hidden />
+            Open externally
+          </button>
+        </div>
       </div>
+      {hasDiskChange && state.status === "ready" && (
+        <div
+          data-testid="file-preview-changed-banner"
+          className="flex h-8 shrink-0 items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-3 text-[12px] text-amber-200"
+        >
+          <span>This file changed on disk.</span>
+          <button
+            type="button"
+            data-testid="file-preview-changed-reload"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+            onClick={() => void controller.reload()}
+          >
+            <RotateCcw className="size-3" aria-hidden />
+            Reload
+          </button>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-hidden">
         {state.status === "failed" ? (
           <div data-testid="file-preview-failure" data-reason={state.failure.reason ?? "unknown"} className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
@@ -129,6 +211,15 @@ function ReadyPreview({
   };
 }) {
   const payload = state.payload;
+  if (payload.kind === "text" && payload.text !== null) {
+    const lowerName = payload.displayName.toLowerCase();
+    if (lowerName.endsWith(".csv") || lowerName.endsWith(".tsv")) {
+      return <FilePreviewCsv text={payload.text} displayName={payload.displayName} />;
+    }
+    if (lowerName.endsWith(".ipynb")) {
+      return <FilePreviewNotebook text={payload.text} />;
+    }
+  }
   if (payload.kind === "text" || payload.kind === "markdown") {
     return (
       <FilePreviewText

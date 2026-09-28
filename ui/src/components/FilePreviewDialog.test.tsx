@@ -59,6 +59,7 @@ function payload(overrides: Partial<FilePreviewPayload> = {}): FilePreviewPayloa
     text: "첫 줄\n두 번째 줄",
     lineCount: 2,
     target: { line: 4, col: null },
+    resolvedPath: null,
     ...overrides,
   };
 }

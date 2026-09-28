@@ -57,6 +57,7 @@ function textPayload(handle: string): FilePreviewPayload {
     text: "hello",
     lineCount: 1,
     target: { line: 1, col: null },
+    resolvedPath: null,
   };
 }
 
@@ -426,5 +427,41 @@ describe("filePreview controller", () => {
     const before = listener.mock.calls.length;
     await h.controller.close();
     expect(listener.mock.calls.length).toBe(before);
+  });
+
+  it("dispatches ferryx:open-file-preview with resolved document path when resolvedPath is present", async () => {
+    const h = harness();
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === FILE_PREVIEW_COMMANDS.open) {
+        return {
+          ...markdownPayload("handle-md"),
+          resolvedPath: "/repo/docs/a.md",
+        };
+      }
+      return null;
+    });
+    await h.controller.open(SOURCE, { ...REQUEST, path: "/tmp/readme.md" });
+
+    const openEvents: CustomEvent[] = [];
+    const onOpen = (event: Event) => {
+      openEvents.push(event as CustomEvent);
+    };
+    window.addEventListener("ferryx:open-file-preview", onOpen);
+    try {
+      h.controller.markdownCapability()!.requestDocument("b.md");
+
+      expect(openEvents).toHaveLength(1);
+      expect(openEvents[0]?.detail).toEqual({
+        source: SOURCE,
+        request: {
+          path: "/repo/docs/b.md",
+          backendSessionId: REQUEST.backendSessionId,
+          line: null,
+          col: null,
+        },
+      });
+    } finally {
+      window.removeEventListener("ferryx:open-file-preview", onOpen);
+    }
   });
 });

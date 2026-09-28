@@ -26,6 +26,7 @@ function payloadOf(over: Partial<FilePreviewPayload> = {}): FilePreviewPayload {
     text,
     lineCount: text.split("\n").length,
     target: null,
+    resolvedPath: null,
     ...over,
     // `text` is resolved above so callers can override it without recomputing bytes.
   };
@@ -351,4 +352,20 @@ describe("FilePreviewText Markdown source toggle", () => {
     expect(screen.getByTestId("file-preview-location")).toHaveTextContent("Ln 3, Col 2");
     expect(screen.getByTestId("file-preview-caret")).toHaveAttribute("data-offset", "1");
   });
+
+  it("renders a .ts text payload with syntax highlighting token classes", () => {
+    const props = propsOf({
+      payload: payloadOf({
+        displayName: "example.ts",
+        kind: "text",
+        text: "export const answer = 42;\n",
+      }),
+    });
+    const { container } = render(<FilePreviewText {...props} />);
+
+    const keyword = container.querySelector(".hljs-keyword");
+    expect(keyword).not.toBeNull();
+    expect(keyword).toHaveTextContent("export");
+  });
 });
+

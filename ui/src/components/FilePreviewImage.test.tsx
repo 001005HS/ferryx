@@ -294,3 +294,75 @@ describe("FilePreviewImage failure handling", () => {
     expect(screen.queryByTestId("file-preview-image-dimensions")).toBeNull();
   });
 });
+
+describe("FilePreviewImage expanded lightbox view", () => {
+  it("expand opens dialog showing an img with the same src", () => {
+    const payload = imagePayload({ mediaUrl: "http://127.0.0.1:52341/preview/screenshot.png" });
+    renderImage(payload);
+
+    const expandButton = screen.getByTestId("file-preview-image-expand");
+    expect(expandButton).toBeDisabled();
+
+    const img = screen.getByRole("img") as HTMLImageElement;
+    loadImage(img, 1920, 1080);
+
+    expect(expandButton).toBeEnabled();
+    fireEvent.click(expandButton);
+
+    const dialog = screen.getByRole("dialog", { name: "Expanded image" });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveAttribute("data-testid", "file-preview-image-lightbox");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+
+    const lightboxClose = screen.getByTestId("file-preview-image-lightbox-close");
+    expect(lightboxClose).toBeInTheDocument();
+    expect(lightboxClose).toHaveFocus();
+
+    const dialogImg = dialog.querySelector("img") as HTMLImageElement;
+    expect(dialogImg).not.toBeNull();
+    expect(dialogImg.getAttribute("src")).toBe(payload.mediaUrl);
+    expect(dialogImg.getAttribute("alt")).toBe(payload.displayName);
+  });
+
+  it("Escape closes the expanded dialog and restores focus to expand button", () => {
+    renderImage(imagePayload());
+    loadImage(screen.getByRole("img") as HTMLImageElement, 1200, 800);
+
+    const expandButton = screen.getByTestId("file-preview-image-expand");
+    fireEvent.click(expandButton);
+    expect(screen.getByTestId("file-preview-image-lightbox")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByTestId("file-preview-image-lightbox")).toBeNull();
+    expect(expandButton).toHaveFocus();
+  });
+
+  it("backdrop click closes the expanded dialog and restores focus", () => {
+    renderImage(imagePayload());
+    loadImage(screen.getByRole("img") as HTMLImageElement, 1200, 800);
+
+    const expandButton = screen.getByTestId("file-preview-image-expand");
+    fireEvent.click(expandButton);
+    const dialog = screen.getByTestId("file-preview-image-lightbox");
+
+    fireEvent.click(dialog);
+
+    expect(screen.queryByTestId("file-preview-image-lightbox")).toBeNull();
+    expect(expandButton).toHaveFocus();
+  });
+
+  it("close button closes the expanded dialog and restores focus", () => {
+    renderImage(imagePayload());
+    loadImage(screen.getByRole("img") as HTMLImageElement, 1200, 800);
+
+    const expandButton = screen.getByTestId("file-preview-image-expand");
+    fireEvent.click(expandButton);
+
+    const closeButton = screen.getByTestId("file-preview-image-lightbox-close");
+    fireEvent.click(closeButton);
+
+    expect(screen.queryByTestId("file-preview-image-lightbox")).toBeNull();
+    expect(expandButton).toHaveFocus();
+  });
+});

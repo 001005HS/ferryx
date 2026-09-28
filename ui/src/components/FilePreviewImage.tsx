@@ -1,4 +1,4 @@
-import { ExternalLink, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Scan } from "lucide-react";
+import { ExternalLink, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Scan, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode, SyntheticEvent } from "react";
 
@@ -78,8 +78,11 @@ export function FilePreviewImage({
   const [natural, setNatural] = useState<Natural | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [attempt, setAttempt] = useState(0);
+  const [isExpanded, setIsExpanded] = useState(false);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const reportedRef = useRef<string | null>(null);
+  const expandButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const mediaUrl = payload.mediaUrl;
   const supported =
@@ -102,6 +105,7 @@ export function FilePreviewImage({
     setNatural(null);
     setStatus("loading");
     setAttempt(0);
+    setIsExpanded(false);
     dragRef.current = null;
   }, [requestKey]);
 
@@ -180,6 +184,35 @@ export function FilePreviewImage({
     setNatural(null);
     setAttempt((value) => value + 1);
   }, []);
+
+  const openExpanded = useCallback(() => {
+    if (status === "ready") {
+      setIsExpanded(true);
+    }
+  }, [status]);
+
+  const closeExpanded = useCallback(() => {
+    setIsExpanded(false);
+    expandButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!isExpanded) return;
+
+    closeButtonRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        closeExpanded();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isExpanded, closeExpanded]);
 
   if (!supported) {
     return (
@@ -305,10 +338,62 @@ export function FilePreviewImage({
         >
           <Scan className="size-3.5" />
         </IconButton>
+        <button
+          ref={expandButtonRef}
+          type="button"
+          aria-label="Expand image"
+          title="Expand image"
+          data-testid="file-preview-image-expand"
+          disabled={status !== "ready"}
+          onClick={openExpanded}
+          className={cn(
+            "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors",
+            "hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "disabled:pointer-events-none disabled:opacity-40",
+          )}
+        >
+          <Maximize2 className="size-3.5" />
+        </button>
         <IconButton label="Reset view" size="sm" onClick={() => setView(INITIAL_VIEW)}>
           <RotateCcw className="size-3.5" />
         </IconButton>
       </div>
+
+      {isExpanded && mediaUrl ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Expanded image"
+          data-testid="file-preview-image-lightbox"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeExpanded();
+            }
+          }}
+        >
+          <button
+            ref={closeButtonRef}
+            type="button"
+            aria-label="Close expanded image"
+            data-testid="file-preview-image-lightbox-close"
+            onClick={closeExpanded}
+            className={cn(
+              "absolute right-4 top-4 z-10 flex size-8 items-center justify-center rounded-md",
+              "bg-black/50 text-white transition-colors hover:bg-black/80",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white",
+            )}
+          >
+            <X className="size-4" />
+          </button>
+          <img
+            src={mediaUrl}
+            alt={payload.displayName}
+            draggable={false}
+            className="max-h-full max-w-full select-none object-contain"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

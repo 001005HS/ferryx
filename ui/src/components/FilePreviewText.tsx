@@ -1,4 +1,4 @@
-import { Copy, Search, ChevronDown, ChevronUp, FileText, Image as ImageIcon, Link2 } from "lucide-react";
+import { Copy, Search, ChevronDown, ChevronUp, Columns, FileText, Image as ImageIcon, Link2, List, Minus, Plus, WrapText } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Markdown from "react-markdown";
@@ -23,6 +23,16 @@ import {
   type PreviewMatch,
   type PreviewRejectionReason,
 } from "../lib/previewMarkdown";
+import { highlightLines, languageForPath } from "../lib/previewHighlight";
+import { extractMarkdownHeadings, type MarkdownHeading } from "../lib/markdownToc";
+import {
+  loadFilePreviewWordWrap,
+  loadMarkdownFontSize,
+  loadMarkdownWide,
+  saveFilePreviewWordWrap,
+  saveMarkdownFontSize,
+  saveMarkdownWide,
+} from "../lib/filePreviewReadingSettings";
 
 /**
  * Read-only text and Markdown renderer for the file-preview modal (plan task 3).
@@ -49,6 +59,16 @@ export function FilePreviewText({
   const lines = useMemo(() => splitPreviewLines(text), [text]);
   const caret = useMemo(() => (target ? clampPreviewTarget(target, lines) : null), [target, lines]);
 
+  const highlightLanguage = useMemo(() => {
+    if (payload.kind !== "text") return null;
+    return languageForPath(payload.displayName);
+  }, [payload.kind, payload.displayName]);
+
+  const highlightedLines = useMemo(() => {
+    if (!highlightLanguage) return null;
+    return highlightLines(text, highlightLanguage);
+  }, [text, highlightLanguage]);
+
   const [query, setQuery] = useState("");
   const [requestedMatch, setRequestedMatch] = useState(0);
   const matches = useMemo(() => findPreviewMatches(lines, query), [lines, query]);
@@ -58,6 +78,37 @@ export function FilePreviewText({
   const documentRef = useRef<HTMLDivElement | null>(null);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [wordWrap, setWordWrap] = useState<boolean>(() => loadFilePreviewWordWrap());
+
+  const handleWordWrapToggle = useCallback(() => {
+    setWordWrap((prev) => {
+      const next = !prev;
+      saveFilePreviewWordWrap(next);
+      return next;
+    });
+  }, []);
+
+  const [markdownFontSize, setMarkdownFontSize] = useState<number>(() => loadMarkdownFontSize());
+
+  const handleFontSizeChange = useCallback((next: number) => {
+    const clamped = Math.max(11, Math.min(22, next));
+    setMarkdownFontSize(clamped);
+    saveMarkdownFontSize(clamped);
+  }, []);
+
+  const [markdownWide, setMarkdownWide] = useState<boolean>(() => loadMarkdownWide());
+
+  const handleWideToggle = useCallback(() => {
+    setMarkdownWide((prev) => {
+      const next = !prev;
+      saveMarkdownWide(next);
+      return next;
+    });
+  }, []);
+
+  const [showToc, setShowToc] = useState<boolean>(false);
+  const headings = useMemo(() => (isMarkdown ? extractMarkdownHeadings(text) : []), [isMarkdown, text]);
 
   useEffect(() => {
     setRequestedMatch(0);
@@ -166,10 +217,52 @@ export function FilePreviewText({
             ) : null}
           </div>
         ) : (
-          <span className="truncate text-[11px] text-muted-foreground">Rendered Markdown</span>
+          <div className="flex min-w-0 items-center gap-1">
+            <span className="truncate text-[11px] text-muted-foreground mr-1">Rendered Markdown</span>
+            <ToolbarButton
+              label="Table of contents"
+              testId="file-preview-md-toc-toggle"
+              onClick={() => setShowToc((v) => !v)}
+            >
+              <List aria-hidden className="size-3.5" />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Decrease font size"
+              testId="file-preview-md-font-dec"
+              disabled={markdownFontSize <= 11}
+              onClick={() => handleFontSizeChange(markdownFontSize - 1)}
+            >
+              <Minus aria-hidden className="size-3.5" />
+            </ToolbarButton>
+            <span className="text-[11px] tabular-nums text-muted-foreground">{markdownFontSize}px</span>
+            <ToolbarButton
+              label="Increase font size"
+              testId="file-preview-md-font-inc"
+              disabled={markdownFontSize >= 22}
+              onClick={() => handleFontSizeChange(markdownFontSize + 1)}
+            >
+              <Plus aria-hidden className="size-3.5" />
+            </ToolbarButton>
+            <ToolbarButton
+              label={markdownWide ? "Reading width" : "Full width"}
+              testId="file-preview-md-width-toggle"
+              onClick={handleWideToggle}
+            >
+              <Columns aria-hidden className="size-3.5" />
+            </ToolbarButton>
+          </div>
         )}
 
         <div className="ml-auto flex items-center gap-2">
+          {showSource ? (
+            <ToolbarButton
+              label="Toggle word wrap"
+              testId="file-preview-wrap-toggle"
+              onClick={handleWordWrapToggle}
+            >
+              <WrapText aria-hidden className="size-3.5" />
+            </ToolbarButton>
+          ) : null}
           {showSource && caret ? (
             <span
               data-testid="file-preview-location"
@@ -229,26 +322,70 @@ export function FilePreviewText({
             <SourceLine
               key={index}
               line={line}
+              highlightedHtml={query.trim().length === 0 ? highlightedLines?.[index] : undefined}
               number={index + 1}
               caret={caret && caret.line === index + 1 ? caret : null}
               matches={matchesByLine.get(index) ?? []}
               activeMatch={activeMatch}
               matchOffset={firstIndexByLine.get(index) ?? -1}
+              wordWrap={wordWrap}
             />
           ))}
         </div>
       ) : (
-        <div
-          ref={documentRef}
-          data-testid="file-preview-markdown"
-          className="min-h-0 flex-1 overflow-auto px-4 py-3 text-[13px] leading-6 [overflow-wrap:anywhere]"
-        >
-          <PreviewMarkdownDocument
-            source={text}
-            capability={markdown}
-            generation={generation}
-            containerRef={documentRef}
-          />
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {showToc ? (
+            <aside
+              data-testid="file-preview-md-toc"
+              className="w-56 shrink-0 overflow-y-auto border-r border-worktree-sidebar-border p-3 text-[12px]"
+            >
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Table of Contents
+              </div>
+              {headings.length === 0 ? (
+                <div className="text-[11px] text-muted-foreground">No headings</div>
+              ) : (
+                <nav className="flex flex-col gap-1">
+                  {headings.map((heading, index) => (
+                    <button
+                      key={`${heading.slug}-${index}`}
+                      type="button"
+                      data-testid={`file-preview-md-toc-item-${heading.slug}`}
+                      onClick={() => {
+                        document.getElementById(heading.slug)?.scrollIntoView({ block: "start" });
+                      }}
+                      className={cn(
+                        "text-left text-muted-foreground hover:text-foreground hover:underline transition-colors truncate",
+                        heading.level === 1 && "font-medium text-foreground",
+                        heading.level === 2 && "pl-3 text-[12px]",
+                        heading.level === 3 && "pl-6 text-[11px]",
+                      )}
+                      title={heading.text}
+                    >
+                      {heading.text}
+                    </button>
+                  ))}
+                </nav>
+              )}
+            </aside>
+          ) : null}
+          <div
+            ref={documentRef}
+            data-testid="file-preview-markdown"
+            style={{ fontSize: `${markdownFontSize}px` }}
+            className={cn(
+              "min-h-0 flex-1 overflow-auto px-4 py-3 leading-6 [overflow-wrap:anywhere]",
+              markdownWide ? "w-full" : "max-w-[72ch] mx-auto",
+            )}
+          >
+            <PreviewMarkdownDocument
+              source={text}
+              capability={markdown}
+              generation={generation}
+              containerRef={documentRef}
+              headings={headings}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -320,23 +457,39 @@ function ToolbarButton({ label, testId, onClick, children, disabled, wide }: Too
 
 type SourceLineProps = {
   line: string;
+  highlightedHtml?: string;
   number: number;
   caret: PreviewCaret | null;
   matches: readonly PreviewMatch[];
   activeMatch: number;
   matchOffset: number;
+  wordWrap: boolean;
 };
 
 /**
  * One document line: a fixed gutter number plus wrapped literal content. React
  * escapes the content, so `<script>` is text and can never become an element.
  */
-function SourceLine({ line, number, caret, matches, activeMatch, matchOffset }: SourceLineProps) {
+function SourceLine({
+  line,
+  highlightedHtml,
+  number,
+  caret,
+  matches,
+  activeMatch,
+  matchOffset,
+  wordWrap,
+}: SourceLineProps) {
+  const contentClass = cn(
+    "min-w-0 flex-1",
+    wordWrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
+  );
+
   return (
     <div
       data-testid={`file-preview-line-${number}`}
       data-target={caret ? "true" : undefined}
-      className={cn("flex items-start gap-3 rounded-sm", caret && "bg-accent/60")}
+      className={cn("flex items-start gap-3 rounded-sm", !wordWrap && "min-w-fit", caret && "bg-accent/60")}
     >
       <span
         data-testid={`file-preview-line-number-${number}`}
@@ -346,11 +499,11 @@ function SourceLine({ line, number, caret, matches, activeMatch, matchOffset }: 
         {number}
       </span>
       {matches.length > 0 ? (
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+        <span className={contentClass}>
           {renderMatchSegments(line, matches, activeMatch, matchOffset)}
         </span>
       ) : caret ? (
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+        <span className={contentClass}>
           {line.slice(0, caret.offset)}
           <span
             data-testid="file-preview-caret"
@@ -361,8 +514,13 @@ function SourceLine({ line, number, caret, matches, activeMatch, matchOffset }: 
           />
           {line.slice(caret.offset)}
         </span>
+      ) : highlightedHtml ? (
+        <span
+          className={cn(contentClass, "hljs-line")}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
       ) : (
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{line}</span>
+        <span className={contentClass}>{line}</span>
       )}
     </div>
   );
@@ -404,6 +562,7 @@ type PreviewMarkdownDocumentProps = {
   capability: FilePreviewMarkdownCapability | null;
   generation: number;
   containerRef: { current: HTMLDivElement | null };
+  headings: readonly MarkdownHeading[];
 };
 
 function PreviewMarkdownDocument({
@@ -411,6 +570,7 @@ function PreviewMarkdownDocument({
   capability,
   generation,
   containerRef,
+  headings,
 }: PreviewMarkdownDocumentProps) {
   const scrollToFragment = useCallback(
     (id: string) => {
@@ -422,6 +582,9 @@ function PreviewMarkdownDocument({
     },
     [containerRef],
   );
+
+  const headingCursorRef = useRef(0);
+  headingCursorRef.current = 0;
 
   const components = useMemo<Components>(
     () => ({
@@ -448,9 +611,18 @@ function PreviewMarkdownDocument({
           {checked ? "[x]" : "[ ]"}
         </span>
       ),
-      h1: (props) => <PreviewHeading level={1} {...props} />,
-      h2: (props) => <PreviewHeading level={2} {...props} />,
-      h3: (props) => <PreviewHeading level={3} {...props} />,
+      h1: (props) => {
+        const slug = headings[headingCursorRef.current++]?.slug;
+        return <PreviewHeading level={1} slug={slug} {...props} />;
+      },
+      h2: (props) => {
+        const slug = headings[headingCursorRef.current++]?.slug;
+        return <PreviewHeading level={2} slug={slug} {...props} />;
+      },
+      h3: (props) => {
+        const slug = headings[headingCursorRef.current++]?.slug;
+        return <PreviewHeading level={3} slug={slug} {...props} />;
+      },
       h4: (props) => <PreviewHeading level={4} {...props} />,
       h5: (props) => <PreviewHeading level={5} {...props} />,
       h6: (props) => <PreviewHeading level={6} {...props} />,
@@ -492,7 +664,7 @@ function PreviewMarkdownDocument({
       ),
       hr: () => <hr className="my-4 border-worktree-sidebar-border" />,
     }),
-    [capability, generation, scrollToFragment],
+    [capability, generation, scrollToFragment, headings],
   );
 
   return (
@@ -519,10 +691,18 @@ const HEADING_CLASS: Record<number, string> = {
   6: "mt-2 mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground",
 };
 
-function PreviewHeading({ level, children }: { level: number; children?: ReactNode }) {
+function PreviewHeading({
+  level,
+  slug,
+  children,
+}: {
+  level: number;
+  slug?: string;
+  children?: ReactNode;
+}) {
   const Tag = `h${level}` as "h1";
   return (
-    <Tag id={previewAnchorId(nodeText(children))} className={HEADING_CLASS[level]}>
+    <Tag id={slug ?? previewAnchorId(nodeText(children))} className={HEADING_CLASS[level]}>
       {children}
     </Tag>
   );
