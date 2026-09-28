@@ -2247,7 +2247,6 @@ pub fn relay_router_with_account(
         .fallback(axum::routing::get(
             crate::remote::server::serve_static_or_index,
         ))
-        .layer(axum::middleware::from_fn(relay_cors_middleware))
         .with_state(state)
         .merge(crate::remote::account_grants::grant_gate_router(grant_gate));
 
@@ -2255,7 +2254,12 @@ pub fn relay_router_with_account(
         router = router.merge(crate::account::service::router(account));
     }
 
-    router
+    // Applied last on purpose: `Router::layer` only wraps the routes that exist at
+    // the moment it is called, so layering before the account and grant routers are
+    // merged leaves their preflights unanswered and their responses without CORS
+    // headers. That blocks every account call from the desktop app (origin
+    // `tauri://localhost`) and from the remote client the app serves.
+    router.layer(axum::middleware::from_fn(relay_cors_middleware))
 }
 
 /// Back-compat wrapper: relay-only router with no embedded account service.
@@ -5939,6 +5943,95 @@ mod tests {
                 .get("access-control-max-age")
                 .and_then(|v| v.to_str().ok()),
             Some("86400")
+        );
+
+        server.abort();
+    }
+
+    /// The account and grant routers are merged into the relay router *after*
+    /// `Router::layer` is called, and axum only wraps the routes that exist at
+    /// that moment. If the CORS middleware misses them, a browser client served
+    /// from another origin (the desktop app, or the remote client hosted by the
+    /// app) has every account request blocked by the preflight, so this check
+    /// must fail whenever the merged routers stop receiving the layer.
+    #[tokio::test]
+    async fn test_merged_account_and_grant_routes_carry_cors_headers() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        for endpoint in [
+            "/api/account/v1/login/request",
+            "/api/account/v1/login/consume",
+            "/api/account/v1/machines",
+            "/api/account/v1/machines/enroll",
+            "/api/v1/attach/grant",
+        ] {
+            let res = client
+                .request(reqwest::Method::OPTIONS, format!("{http_base}{endpoint}"))
+                .header("Origin", "tauri://localhost")
+                .header("Access-Control-Request-Method", "POST")
+                .header(
+                    "Access-Control-Request-Headers",
+                    "authorization, content-type",
+                )
+                .send()
+                .await
+                .expect("preflight request should complete");
+            assert_eq!(
+                res.status(),
+                reqwest::StatusCode::OK,
+                "OPTIONS {endpoint} must be answered by the CORS middleware"
+            );
+            assert_eq!(
+                res.headers()
+                    .get("access-control-allow-origin")
+                    .and_then(|value| value.to_str().ok()),
+                Some("*"),
+                "OPTIONS {endpoint} must carry access-control-allow-origin"
+            );
+            let allow_headers = res
+                .headers()
+                .get("access-control-allow-headers")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert!(
+                allow_headers.contains("content-type"),
+                "OPTIONS {endpoint} must allow the content-type request header"
+            );
+        }
+
+        // A real (non-preflight) account response must carry the header too,
+        // otherwise the browser discards a response the server did produce.
+        let res = client
+            .post(format!("{http_base}/api/account/v1/login/request"))
+            .header("Origin", "tauri://localhost")
+            .json(&serde_json::json!({ "email": "not-an-email" }))
+            .send()
+            .await
+            .expect("login request should complete");
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("*"),
+            "an account response must carry access-control-allow-origin"
         );
 
         server.abort();
