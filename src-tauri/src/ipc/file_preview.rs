@@ -27,7 +27,7 @@ use crate::ipc::error::{IpcError, IpcErrorCode};
 pub use crate::ipc::file_preview_contract::FilePreviewTarget;
 use crate::ipc::file_preview_contract::{
     limits, preview_error, FilePreviewChildAsset, FilePreviewEncoding, FilePreviewErrorReason,
-    FilePreviewKind, FilePreviewPayload,
+    FilePreviewKind, FilePreviewPayload, FilePreviewResolved,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
@@ -38,12 +38,13 @@ use axum::Router;
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Desktop window label allowed to hold preview capabilities.
@@ -171,6 +172,21 @@ pub fn classify_extension(name: &str) -> Option<FilePreviewKind> {
     }
 }
 
+/// Returns true if the file name has an extension that matches an explicit arm in
+/// [`classify_extension`] (including explicitly unsupported extensions).
+/// Fallback extensions that default to [`FilePreviewKind::Text`] return false.
+pub fn is_explicit_classify_extension(name: &str) -> bool {
+    let ext = extension_of(name);
+    matches!(
+        ext.as_str(),
+        "md" | "markdown"
+            | "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg"
+            | "mp4" | "m4v" | "mov" | "webm" | "ogv"
+            | "mp3" | "m4a" | "wav" | "flac" | "aac" | "ogg" | "opus" | "oga"
+            | "pdf"
+    ) || UNSUPPORTED_EXTENSIONS.contains(&ext.as_str())
+}
+
 /// Allowlisted video MIME for a recognised container. Recognising a container is
 /// not a codec guarantee; playback support stays a runtime question.
 pub fn video_media_type(name: &str) -> Option<&'static str> {
@@ -287,6 +303,18 @@ pub fn image_signature(bytes: &[u8]) -> Option<ImageSignature> {
     None
 }
 
+/// Sniffs content prefix for Image or PDF signatures when the file extension
+/// does not identify a specific preview kind.
+pub fn sniff_kind(prefix: &[u8]) -> Option<FilePreviewKind> {
+    if image_signature(prefix).is_some() {
+        Some(FilePreviewKind::Image)
+    } else if prefix.starts_with(b"%PDF-") {
+        Some(FilePreviewKind::Pdf)
+    } else {
+        None
+    }
+}
+
 fn svg_probe(bytes: &[u8]) -> bool {
     let end = bytes.len().min(512);
     let text = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
@@ -360,10 +388,18 @@ fn jpeg_signature(bytes: &[u8]) -> Option<ImageSignature> {
     None
 }
 
+/// True when the first 8 bytes match the Apple binary property list header `bplist00`.
+pub fn is_binary_plist(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"bplist00")
+}
+
 /// Strict text decoding: UTF-8 (with or without BOM) and BOM-tagged UTF-16
 /// LE/BE. Anything else - other encodings, malformed sequences, NUL bytes or
 /// control-heavy binary - is refused rather than lossily decoded.
 pub fn decode_text(bytes: &[u8]) -> Option<(String, FilePreviewEncoding)> {
+    if is_binary_plist(bytes) {
+        return None;
+    }
     let (text, encoding) = if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         (
             decode_utf16(rest, u16::from_le_bytes)?,
@@ -513,6 +549,8 @@ struct HandleRecord {
     stream_lock: Arc<tokio::sync::Mutex<()>>,
     /// Milliseconds since service start of the last capability request.
     last_access_ms: AtomicU64,
+    resolved_path: PathBuf,
+    modified: Option<std::time::SystemTime>,
 }
 
 #[derive(Default)]
@@ -554,6 +592,8 @@ struct OpenedFile {
     encoding: Option<FilePreviewEncoding>,
     line_count: Option<usize>,
     target: Option<FilePreviewTarget>,
+    resolved_path: PathBuf,
+    modified: Option<std::time::SystemTime>,
 }
 
 /// Arguments for [`FilePreviewService::open`]. `cwd` is the live terminal
@@ -830,6 +870,36 @@ impl FilePreviewService {
         }
     }
 
+    /// Evaluates whether the underlying file has changed on disk since it was opened.
+    pub async fn changed(&self, window_label: &str, handle: &str) -> Result<bool, IpcError> {
+        ensure_trusted_window(window_label)?;
+        let (path, byte_length, modified) = {
+            let registry = self.registry.lock();
+            let is_owned = registry.windows.iter().any(|(key, slot)| {
+                window_owns_key(window_label, key)
+                    && (slot.main.as_deref() == Some(handle)
+                        || slot.children.iter().any(|c| c == handle))
+            });
+            let record = registry.handles.get(handle);
+            match (is_owned, record) {
+                (true, Some(record)) if !record.revoked.load(Ordering::SeqCst) => (
+                    record.resolved_path.clone(),
+                    record.byte_length,
+                    record.modified,
+                ),
+                _ => {
+                    return Err(preview_error(
+                        FilePreviewErrorReason::ExpiredHandle,
+                        "preview handle is unknown or has been revoked",
+                        None,
+                    ));
+                }
+            }
+        };
+
+        crate::ipc::run_blocking(move || Ok(file_changed_since(&path, byte_length, modified))).await
+    }
+
     fn parent_slot_key(&self, window_label: &str, parent_handle: &str) -> Result<String, IpcError> {
         let registry = self.registry.lock();
         registry
@@ -944,6 +1014,7 @@ impl FilePreviewService {
             text: opened.text.clone(),
             line_count: opened.line_count,
             target: opened.target,
+            resolved_path: Some(opened.resolved_path.to_string_lossy().into_owned()),
         };
 
         let mut registry = self.registry.lock();
@@ -1050,6 +1121,8 @@ fn record_of(opened: OpenedFile, started_at: std::time::Instant) -> Arc<HandleRe
         revoked: Arc::new(AtomicBool::new(false)),
         stream_lock: Arc::new(tokio::sync::Mutex::new(())),
         last_access_ms: AtomicU64::new(started_at.elapsed().as_millis() as u64),
+        resolved_path: opened.resolved_path,
+        modified: opened.modified,
     })
 }
 
@@ -1122,6 +1195,41 @@ fn io_failure(error: &std::io::Error, path: &Path) -> IpcError {
     )
 }
 
+/// Resolves a terminal token against the live cwd, canonicalizes when possible,
+/// and reports whether the target exists and whether it is a directory.
+pub fn resolve_preview_target(
+    token: &str,
+    cwd: Option<&Path>,
+    home: Option<PathBuf>,
+) -> FilePreviewResolved {
+    let Ok(sanitized) = crate::ipc::file_link::sanitize_path_token(token) else {
+        return FilePreviewResolved {
+            resolved_path: token.to_string(),
+            exists: false,
+            is_directory: false,
+        };
+    };
+    if crate::ipc::file_link::reject_remote_path_spec(sanitized).is_err() {
+        return FilePreviewResolved {
+            resolved_path: sanitized.to_string(),
+            exists: false,
+            is_directory: false,
+        };
+    }
+    let cwd_str = cwd.map(|c| c.to_string_lossy().into_owned());
+    let resolved = crate::ipc::file_link::resolve_file_link(sanitized, cwd_str.as_deref(), home);
+    let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    let metadata = std::fs::metadata(&canonical).ok();
+    let exists = metadata.is_some();
+    let is_directory = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+
+    FilePreviewResolved {
+        resolved_path: canonical.to_string_lossy().into_owned(),
+        exists,
+        is_directory,
+    }
+}
+
 /// Resolves a terminal token against the live cwd, then opens it.
 fn open_blocking(
     token: &str,
@@ -1171,14 +1279,46 @@ fn open_blocking_path(
         return Err(not_regular_file(&display_name));
     }
     let byte_length = metadata.len();
+    let modified = metadata.modified().ok();
+    let resolved_path = canonical.clone();
 
-    let kind = classify_extension(&display_name).ok_or_else(|| {
+    let mut kind = classify_extension(&display_name).ok_or_else(|| {
         preview_error(
             FilePreviewErrorReason::UnsupportedFormat,
             "this file format cannot be previewed",
             Some(json!({ "displayName": display_name })),
         )
     })?;
+
+    if !is_explicit_classify_extension(&display_name) {
+        let probe_len = byte_length.min(limits::IMAGE_HEADER_PROBE as u64) as usize;
+        let mut probe_buf = vec![0u8; probe_len];
+        let mut filled = 0usize;
+        while filled < probe_len {
+            let read = file
+                .read(&mut probe_buf[filled..])
+                .map_err(|error| io_failure(&error, &canonical))?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        probe_buf.truncate(filled);
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| io_failure(&error, &canonical))?;
+
+        if is_binary_plist(&probe_buf) {
+            return Err(preview_error(
+                FilePreviewErrorReason::UnsupportedFormat,
+                "this file format cannot be previewed",
+                Some(json!({ "displayName": display_name })),
+            ));
+        }
+
+        if let Some(sniffed) = sniff_kind(&probe_buf) {
+            kind = sniffed;
+        }
+    }
 
     match kind {
         FilePreviewKind::Text | FilePreviewKind::Markdown => {
@@ -1202,6 +1342,13 @@ fn open_blocking_path(
                     &display_name,
                     bytes.len() as u64,
                     limits::TEXT_MAX_BYTES,
+                ));
+            }
+            if is_binary_plist(&bytes) {
+                return Err(preview_error(
+                    FilePreviewErrorReason::UnsupportedFormat,
+                    "this file format cannot be previewed",
+                    Some(json!({ "displayName": display_name })),
                 ));
             }
             let (text, encoding) = decode_text(&bytes).ok_or_else(|| {
@@ -1246,6 +1393,8 @@ fn open_blocking_path(
                 encoding: Some(encoding),
                 line_count: Some(line_count),
                 target,
+                resolved_path,
+                modified,
             })
         }
         FilePreviewKind::Image => {
@@ -1320,6 +1469,8 @@ fn open_blocking_path(
                 encoding: None,
                 line_count: None,
                 target: None,
+                resolved_path,
+                modified,
             })
         }
         FilePreviewKind::Video | FilePreviewKind::Audio | FilePreviewKind::Pdf => {
@@ -1348,6 +1499,8 @@ fn open_blocking_path(
                 encoding: None,
                 line_count: None,
                 target: None,
+                resolved_path,
+                modified,
             })
         }
     }
@@ -1745,6 +1898,20 @@ pub async fn cmd_file_preview_open_child_document<R: tauri::Runtime>(
         .await
 }
 
+/// Pure helper evaluating whether file metadata on disk has changed since open.
+pub fn file_changed_since(path: &Path, byte_length: u64, modified: Option<SystemTime>) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return true;
+    };
+    if metadata.len() != byte_length {
+        return true;
+    }
+    if metadata.modified().ok() != modified {
+        return true;
+    }
+    false
+}
+
 /// Idempotent revocation of one capability owned by the calling window.
 #[tauri::command]
 pub async fn cmd_file_preview_close<R: tauri::Runtime>(
@@ -1754,6 +1921,45 @@ pub async fn cmd_file_preview_close<R: tauri::Runtime>(
 ) -> Result<(), IpcError> {
     service.close(webview.label(), &handle);
     Ok(())
+}
+
+/// Resolves a file preview target token and reports canonical path and status.
+#[tauri::command]
+pub async fn cmd_file_preview_resolve<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    daemon_client: tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
+    path: String,
+    backend_session_id: String,
+) -> Result<FilePreviewResolved, IpcError> {
+    let window_label = webview.label().to_string();
+    ensure_trusted_window(&window_label)?;
+    let cwd = crate::ipc::file_preview_contract::resolve_local_session_cwd(
+        Some(daemon_client.inner()),
+        &backend_session_id,
+    )
+    .await
+    .map_err(map_session_error)?;
+    if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
+        return Err(preview_error(
+            FilePreviewErrorReason::MissingFile,
+            "The terminal's current directory could not be read. Use an absolute file path.",
+            None,
+        ));
+    }
+    crate::ipc::run_blocking(move || {
+        Ok(resolve_preview_target(&path, cwd.as_deref(), home_dir()))
+    })
+    .await
+}
+
+/// Checks whether an opened file preview has changed on disk since it was opened.
+#[tauri::command]
+pub async fn cmd_file_preview_changed<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    service: tauri::State<'_, Arc<FilePreviewService>>,
+    handle: String,
+) -> Result<bool, IpcError> {
+    service.changed(webview.label(), &handle).await
 }
 
 #[cfg(test)]

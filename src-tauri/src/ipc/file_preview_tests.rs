@@ -1519,3 +1519,174 @@ async fn image_exceeding_per_axis_bound_is_rejected() {
     assert_eq!(err.code, IpcErrorCode::Unsupported);
     assert_eq!(err.details.unwrap()["reason"], "TooLarge");
 }
+
+#[test]
+fn resolve_preview_target_relative_and_canonical() {
+    let dir = TempDir::new().expect("tempdir");
+    let file_path = write_file(dir.path(), "nested/doc.txt", b"hello world");
+    let resolved = resolve_preview_target("nested/doc.txt", Some(dir.path()), None);
+
+    assert!(resolved.exists);
+    assert!(!resolved.is_directory);
+    let canonical_expected = std::fs::canonicalize(&file_path).unwrap();
+    assert_eq!(
+        resolved.resolved_path,
+        canonical_expected.to_string_lossy()
+    );
+}
+
+#[test]
+fn resolve_preview_target_directory() {
+    let dir = TempDir::new().expect("tempdir");
+    let sub = dir.path().join("subdir");
+    std::fs::create_dir_all(&sub).expect("create dir");
+
+    let resolved = resolve_preview_target("subdir", Some(dir.path()), None);
+    assert!(resolved.exists);
+    assert!(resolved.is_directory);
+    let canonical_expected = std::fs::canonicalize(&sub).unwrap();
+    assert_eq!(
+        resolved.resolved_path,
+        canonical_expected.to_string_lossy()
+    );
+}
+
+#[test]
+fn resolve_preview_target_missing_file() {
+    let dir = TempDir::new().expect("tempdir");
+    let resolved = resolve_preview_target("nonexistent.txt", Some(dir.path()), None);
+
+    assert!(!resolved.exists);
+    assert!(!resolved.is_directory);
+    assert_eq!(
+        resolved.resolved_path,
+        dir.path().join("nonexistent.txt").to_string_lossy()
+    );
+}
+
+#[test]
+fn file_changed_since_evaluates_changes_and_deletion() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = write_file(dir.path(), "change_target.txt", b"initial content");
+
+    let meta = std::fs::metadata(&path).expect("metadata");
+    let initial_len = meta.len();
+    let initial_mod = meta.modified().ok();
+
+    // 1. Unchanged file -> false
+    assert!(!file_changed_since(&path, initial_len, initial_mod));
+
+    // 2. Length differs -> true
+    assert!(file_changed_since(&path, initial_len + 10, initial_mod));
+
+    // 3. Append bytes -> true
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open append");
+        file.write_all(b" more data").expect("append data");
+    }
+    assert!(file_changed_since(&path, initial_len, initial_mod));
+
+    // 4. Deletion -> true
+    std::fs::remove_file(&path).expect("remove file");
+    assert!(file_changed_since(&path, initial_len, initial_mod));
+}
+
+#[test]
+fn is_binary_plist_identifies_signature() {
+    assert!(is_binary_plist(b"bplist00"));
+    assert!(is_binary_plist(b"bplist00\x00\x01\x02\x03\x04"));
+    assert!(!is_binary_plist(b"bplist0"));
+    assert!(!is_binary_plist(b""));
+    assert!(!is_binary_plist(b"hello world"));
+    assert!(!is_binary_plist(b"%PDF-1.7"));
+    assert!(!is_binary_plist(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+}
+
+#[test]
+fn sniff_kind_identifies_image_and_pdf_signatures() {
+    let png = png_bytes(16, 16);
+    assert_eq!(sniff_kind(&png), Some(FilePreviewKind::Image));
+
+    let png_header = [
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A,
+        0x00, 0x00, 0x00, 0x0D,
+        b'I', b'H', b'D', b'R',
+        0x00, 0x00, 0x00, 0x10,
+        0x00, 0x00, 0x00, 0x10,
+        0x08, 0x06, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(sniff_kind(&png_header), Some(FilePreviewKind::Image));
+
+    assert_eq!(sniff_kind(b"%PDF-1.7\n%obj\n"), Some(FilePreviewKind::Pdf));
+    assert_eq!(sniff_kind(b"%PDF-1.4"), Some(FilePreviewKind::Pdf));
+
+    assert_eq!(sniff_kind(b"plain text content"), None);
+    assert_eq!(sniff_kind(b"bplist00\x00\x01"), None);
+    assert_eq!(sniff_kind(b""), None);
+}
+
+#[tokio::test]
+async fn unknown_extension_reclassifies_image_and_pdf_and_rejects_binary_plist() {
+    let dir = TempDir::new().expect("tempdir");
+    let service = service().await;
+
+    // 1. Unknown extension with PNG content -> Image
+    let _png_path = write_file(dir.path(), "image_no_ext", &png_bytes(16, 16));
+    let payload = service
+        .open(request(dir.path(), "image_no_ext"))
+        .await
+        .expect("open image without extension");
+    assert_eq!(payload.kind, FilePreviewKind::Image);
+    assert_eq!(payload.media_type.as_deref(), Some("image/png"));
+
+    // 2. Unknown extension with PDF content -> Pdf
+    let pdf_bytes = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+    let _pdf_path = write_file(dir.path(), "document_no_ext", pdf_bytes);
+    let payload = service
+        .open(request(dir.path(), "document_no_ext"))
+        .await
+        .expect("open pdf without extension");
+    assert_eq!(payload.kind, FilePreviewKind::Pdf);
+    assert_eq!(payload.media_type.as_deref(), Some("application/pdf"));
+
+    // 3. Unknown extension with binary property list -> UnsupportedFormat
+    let bplist_bytes = b"bplist00\x00\x01\x02\x03\x04\x05\x06\x07";
+    let _bplist_path = write_file(dir.path(), "plist_no_ext", bplist_bytes);
+    let err = service
+        .open(request(dir.path(), "plist_no_ext"))
+        .await
+        .expect_err("binary plist must be refused");
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    assert_eq!(reason_of(&err), "UnsupportedFormat");
+
+    // 4. Fallback extension (e.g. .txt) with binary property list -> UnsupportedFormat
+    let _bplist_txt = write_file(dir.path(), "fake.txt", bplist_bytes);
+    let err = service
+        .open(request(dir.path(), "fake.txt"))
+        .await
+        .expect_err("binary plist .txt must be refused");
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    assert_eq!(reason_of(&err), "UnsupportedFormat");
+
+    // 5. Unknown extension with plain text -> Text
+    let _text_path = write_file(dir.path(), "plain_no_ext", b"hello plain text");
+    let payload = service
+        .open(request(dir.path(), "plain_no_ext"))
+        .await
+        .expect("open plain text without extension");
+    assert_eq!(payload.kind, FilePreviewKind::Text);
+    assert_eq!(payload.text.as_deref(), Some("hello plain text"));
+
+    // 6. Explicit match arm (e.g. .md) is not reclassified by sniff_kind
+    let _md_path = write_file(dir.path(), "test.md", b"%PDF-1.7\n# Markdown Heading\n");
+    let payload = service
+        .open(request(dir.path(), "test.md"))
+        .await
+        .expect("open explicit markdown file");
+    assert_eq!(payload.kind, FilePreviewKind::Markdown);
+}
+
+

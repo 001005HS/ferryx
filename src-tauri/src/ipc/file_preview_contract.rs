@@ -156,6 +156,18 @@ pub struct FilePreviewPayload {
     pub line_count: Option<usize>,
     /// Clamped caret target when the request carried line/col.
     pub target: Option<FilePreviewTarget>,
+    /// Canonical absolute path of the opened file (main window only).
+    #[serde(default)]
+    pub resolved_path: Option<String>,
+}
+
+/// Resolved file preview target metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreviewResolved {
+    pub resolved_path: String,
+    pub exists: bool,
+    pub is_directory: bool,
 }
 
 /// `cmd_file_preview_open_child` result: a Markdown child capability, no body.

@@ -21,6 +21,7 @@ fn sample_payload() -> FilePreviewPayload {
             line: 3,
             col: Some(7),
         }),
+        resolved_path: Some("/tmp/notes.md".into()),
     }
 }
 
@@ -41,6 +42,7 @@ fn payload_serializes_camel_case_keys() {
             "lineCount",
             "mediaType",
             "mediaUrl",
+            "resolvedPath",
             "target",
             "text",
         ]

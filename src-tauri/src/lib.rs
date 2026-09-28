@@ -1417,6 +1417,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,
         crate::ipc::file_preview::cmd_file_preview_close,
+        crate::ipc::file_preview::cmd_file_preview_resolve,
+        crate::ipc::file_preview::cmd_file_preview_changed,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
         cmd_switch_debug_log,
