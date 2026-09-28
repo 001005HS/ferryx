@@ -1762,7 +1762,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         })
         .await?;
 
-        let (host_id, remote_workspace_id, repo_root): (String, String, std::path::PathBuf) =
+        let (host_id, mut remote_workspace_id, repo_root): (String, String, std::path::PathBuf) =
             match &request.startup {
                 Some(TerminalStartup::PairedDaemon {
                     host_id,
@@ -1770,6 +1770,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 }) => {
                     let repo_root = stored_project
                         .as_ref()
+                        .filter(|p| matches!(&p.target,
+                            crate::scoped_contracts::RunTarget::PairedDaemon { host_id: stored_host }
+                                if stored_host == host_id))
                         .map(|p| std::path::PathBuf::from(&p.metadata.repo_root))
                         .unwrap_or_default();
                     (host_id.clone(), remote_workspace_id.clone(), repo_root)
@@ -1810,6 +1813,23 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             return Err(IpcError::internal(
                 "Machine authorization required for paired host",
             ));
+        }
+
+        let inventory = daemon_client
+            .paired_host_operation(crate::paired_host::client::OperationRequest {
+                host_id: host_id.clone(),
+                generation: host.generation,
+                operation: crate::paired_host::client::Operation::Projects,
+            })
+            .await
+            .map_err(|e| map_client_error(&e, Some(&host_id), Some(host.generation)))?;
+        let crate::paired_host::client::OperationResult::Projects(projects) = inventory.result else {
+            return Err(IpcError::internal("Unexpected paired project inventory response"));
+        };
+        if let Some(current_id) = crate::paired_host::projects::recover_remote_id(
+            &projects, &host_id, &remote_workspace_id, &repo_root.to_string_lossy(),
+        ) {
+            remote_workspace_id = current_id.to_owned();
         }
 
         // The paired host journal only accepts bare hyphenated UUIDs as request
@@ -1870,12 +1890,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     (remote_workspace_id.clone(), None, None)
                 }
             } else if is_absolute {
-                static REGISTERED_WORKTREES: std::sync::OnceLock<
-                    std::sync::Mutex<std::collections::HashMap<String, String>>,
-                > = std::sync::OnceLock::new();
-                let cache_mutex = REGISTERED_WORKTREES
-                    .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-                let cached_id = { cache_mutex.lock().unwrap().get(cwd_str.as_ref()).cloned() };
+                let cached_id = projects.projects.iter().find(|p| {
+                    p.metadata.repo_root == cwd_str
+                        && p.metadata.availability == crate::remote::machine_protocol::Availability::Ready
+                }).map(|p| p.remote_workspace_id.clone());
 
                 if let Some(cached_id) = cached_id {
                     tracing::info!(
@@ -1939,10 +1957,6 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                                 remote_ws = %data.remote_workspace_id,
                                 "Registered worktree workspace on paired host"
                             );
-                            cache_mutex
-                                .lock()
-                                .unwrap()
-                                .insert(cwd_str.to_string(), data.remote_workspace_id.clone());
                             (data.remote_workspace_id, None, None)
                         }
                         Ok(other) => {

@@ -48,6 +48,30 @@ pub fn projects(host: &str, rows: m::Projects) -> Projects {
     }
 }
 
+/// Recover only a uniquely registered path from a complete inventory of the same host.
+pub fn recover_remote_id<'a>(
+    rows: &'a Projects,
+    host: &str,
+    remote_id: &str,
+    repo_root: &str,
+) -> Option<&'a str> {
+    if rows.completeness != m::Completeness::Complete || repo_root.is_empty() {
+        return None;
+    }
+    let same_host = |p: &&Project| matches!(&p.target,
+        RunTarget::PairedDaemon { host_id } if host_id == host);
+    if rows.projects.iter().filter(same_host).any(|p| p.remote_workspace_id == remote_id) {
+        return None;
+    }
+    let mut matches = rows.projects.iter().filter(same_host).filter(|p| {
+        p.metadata.repo_root == repo_root
+            && p.metadata.availability == m::Availability::Ready
+            && !rows.unavailable_workspace_ids.contains(&p.metadata.workspace_id)
+    });
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found.remote_workspace_id.as_str())
+}
+
 pub fn store_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("paired_projects.json")
 }
