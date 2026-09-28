@@ -36,6 +36,7 @@ import type {
 } from "../lib/types";
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
 import {
   isRedundantSplit as isRedundantPaneSplit,
   resolveSeam,
@@ -792,6 +793,11 @@ function TabGroupView({
         onTogglePin={onToggleTabPin}
         onResetAgentState={onResetAgentState}
         sessionIdForLifecycle={(tab) => focusedPaneSessionId(layout, tab)}
+        debugInfoForTab={(tab) => {
+          const sessionId = focusedPaneSessionId(layout, tab);
+          if (!sessionId) return null;
+          return formatPaneDebugInfo(getTabPaneLayout(layout, tab).activeLeafId ?? null, sessions[sessionId]);
+        }}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
         onMoveTabToSplit={moveTabToSplitEdge}

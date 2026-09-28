@@ -275,6 +275,51 @@ describe("TabBar", () => {
     expect(onResetAgentState).toHaveBeenCalledWith("tab-a");
   });
 
+  it("copies the focused pane debug info from the terminal tab menu", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const debugInfoForTab = vi.fn(() => '{"backendSessionId":"backend-a"}');
+    try {
+      render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main")]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          debugInfoForTab={debugInfoForTab}
+          onAdd={vi.fn()}
+        />,
+      );
+
+      fireEvent.contextMenu(getTab("main"));
+      expect(menuItem("copy-debug-info").label).toBe("Copy Debug Info");
+      expect(debugInfoForTab).toHaveBeenCalledWith(expect.objectContaining({ id: "tab-a" }));
+
+      clickMenuItem("copy-debug-info");
+      expect(writeText).toHaveBeenCalledWith('{"backendSessionId":"backend-a"}');
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+
+  it("omits Copy Debug Info when the tab has no focused terminal session", () => {
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        debugInfoForTab={() => null}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    fireEvent.contextMenu(getTab("main"));
+    expect(findEntryRecursively(menuItems(), "copy-debug-info")).toBeUndefined();
+  });
+
   it("keeps pin state controlled by the workspace model and blocks pinned-tab close", () => {
     const onTogglePin = vi.fn();
     const onClose = vi.fn();
