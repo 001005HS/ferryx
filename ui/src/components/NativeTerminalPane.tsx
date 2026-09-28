@@ -49,6 +49,27 @@ export {
   resetTerminalInputDropCountsForTest,
 };
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
+import {
+  terminalLinkOpenHint,
+  isMacPlatform,
+  isTerminalLinkActionClick,
+  type TerminalLinkHintKind,
+} from "../lib/terminalLinkHints";
+import { createPathExistenceCache } from "../lib/pathExistenceCache";
+import { resolveFilePreviewPath } from "../lib/filePreviewCommands";
+import { loadBrowserSettings } from "../lib/browserSettings";
+import type { TerminalToken } from "../lib/linkRouting";
+import {
+  tokenFromHyperlink,
+  readLinkLine,
+  openRemoteFileToken,
+  isSessionMouseTrackingEnabled,
+  setSessionMouseTracking,
+  TERMINAL_FILE_LINK_ACTION_EVENT,
+  type TerminalFileLinkActionDetail,
+} from "../lib/terminalLinkTarget";
+
+const terminalLinkPathCache = createPathExistenceCache(resolveFilePreviewPath);
 
 export interface TerminalBounds {
   x: number;
@@ -546,7 +567,12 @@ export function NativeTerminalPane({
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
   const [isCmdHeld, setIsCmdHeld] = useState(false);
-  const [linkHover, setLinkHover] = useState<{ left: number; top: number; width: number } | null>(null);
+  const [linkHover, setLinkHover] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    kind?: TerminalLinkHintKind;
+  } | null>(null);
   const linkHoverRevision = useRef(0);
   const [linkPointer, setLinkPointer] = useState<{ x: number; y: number } | null>(null);
   const cmdClickDownRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(null);
@@ -736,7 +762,12 @@ export function NativeTerminalPane({
   }, [targetSessionId, visible]);
 
   const handleTerminalClick = useCallback(
-    async (clientX: number, clientY: number, shiftKey: boolean) => {
+    async (
+      clientX: number,
+      clientY: number,
+      shiftKey: boolean,
+      mode: "direct" | "actions" = "direct",
+    ) => {
       if (!visible || !isTauri() || !targetSessionId) return;
       const geoViewport = viewportRef.current;
       if (!geoViewport) return;
@@ -750,31 +781,41 @@ export function NativeTerminalPane({
 
       const col = Math.max(0, Math.floor((clientX - geoRect.left) / cellW));
       const row = Math.max(0, Math.floor((clientY - geoRect.top) / cellH));
+      const cols = Math.max(1, Math.floor(geoRect.width / cellW));
+      const rows = Math.max(1, Math.floor(geoRect.height / cellH));
 
       try {
-        const receipt = await invoke<{ text: string; col: number; row: number }>(
-          "cmd_native_terminal_line_at",
-          {
+        let token: TerminalToken | null = null;
+        try {
+          const uri = await invoke<string | null>("cmd_native_terminal_hyperlink_at", {
             sessionId: targetSessionId,
             col,
             row,
-          },
-        );
-        if (receipt && receipt.text) {
-          const token = resolveTokenAtCol(receipt.text, receipt.col);
-          if (token) {
-            if (token.type === "file" && session?.workspaceId && isRemoteWorkspaceId(session.workspaceId)) {
-              toast.error("Remote files cannot be opened on this machine.");
-              return;
-            }
-            const container = containerRef.current;
-            const leafId =
-              container?.closest("[data-leaf-id]")?.getAttribute("data-leaf-id") ??
-              session?.id ??
-              targetSessionId;
-            const opened = await openTerminalToken(token, {
-              shiftKey,
-              preview: !shiftKey,
+          });
+          if (uri) {
+            token = tokenFromHyperlink(uri);
+          }
+        } catch {
+        }
+
+        if (!token) {
+          const line = await readLinkLine(invoke, targetSessionId, col, row, rows, cols);
+          if (line && line.text) {
+            token = resolveTokenAtCol(line.text, line.col);
+          }
+        }
+
+        if (token) {
+          const container = containerRef.current;
+          const leafId =
+            container?.closest("[data-leaf-id]")?.getAttribute("data-leaf-id") ??
+            session?.id ??
+            targetSessionId;
+
+          const openAction = async (actionShiftKey: boolean) => {
+            const tokenOptions = {
+              shiftKey: actionShiftKey,
+              preview: !actionShiftKey,
               source: {
                 leafId,
                 sessionId: session?.id ?? targetSessionId,
@@ -784,15 +825,56 @@ export function NativeTerminalPane({
               cwd: session?.cwd || session?.worktreePath,
               sessionId: targetSessionId,
               editor: loadFileLinkEditor(),
-            });
+            };
+
+            if (token.type === "file" && session?.workspaceId && isRemoteWorkspaceId(session.workspaceId)) {
+              try {
+                const opened = await openRemoteFileToken(token, {
+                  workspaceId: session.workspaceId,
+                  cwd: session.cwd || session.worktreePath || null,
+                  shiftKey: actionShiftKey,
+                  openLocal: (localToken) => openTerminalToken(localToken, tokenOptions),
+                  invokeFn: invoke,
+                });
+                if (!opened) toast.error("This file could not be opened in the current client.");
+              } catch (error) {
+                toast.error(extractIpcErrorMessage(error, "Could not download the remote file."));
+              }
+              return;
+            }
+
+            const opened = await openTerminalToken(token, tokenOptions);
             if (!opened) toast.error("This file could not be opened in the current client.");
+          };
+
+          if (mode === "actions") {
+            const settings = loadBrowserSettings();
+            if (settings.showTerminalLinkActions && typeof window !== "undefined") {
+              let actionToken: TerminalToken & { absolutePath?: string } = token;
+              const isRemote = Boolean(session?.workspaceId && isRemoteWorkspaceId(session.workspaceId));
+              if (token.type === "file" && !isRemote) {
+                const resolved = await resolveFilePreviewPath(token.path, targetSessionId).catch(() => null);
+                actionToken = { ...token, absolutePath: resolved?.resolvedPath };
+              }
+              window.dispatchEvent(
+                new CustomEvent<TerminalFileLinkActionDetail>(TERMINAL_FILE_LINK_ACTION_EVENT, {
+                  detail: {
+                    token: actionToken,
+                    open: openAction,
+                  },
+                }),
+              );
+            }
+            return;
           }
+
+          await openAction(shiftKey);
         }
       } catch (error) {
         toast.error(extractIpcErrorMessage(error, "Could not open terminal link."));
       }
     },
-    [session?.cwd, session?.worktreePath, session?.workspaceId, targetSessionId, visible],
+    [session?.cwd, session?.id, session?.workspaceId, session?.worktreePath, targetSessionId, visible],
   );
 
   useEffect(() => {
@@ -808,23 +890,96 @@ export function NativeTerminalPane({
     const col = Math.floor((point.x - rect.left) / width);
     const row = Math.floor((point.y - rect.top) / height);
     if (col < 0 || row < 0 || point.x >= rect.right || point.y >= rect.bottom) return;
-    void invoke<{ text: string; col: number; row: number }>("cmd_native_terminal_line_at", {
-      sessionId: targetSessionId, col, row,
-    }).then((receipt) => {
-      if (revision !== linkHoverRevision.current) return;
-      const token = resolveTokenAtCol(receipt.text, receipt.col);
-      if (!token) return;
-      const key = JSON.stringify(token);
-      let start = receipt.col;
-      let end = start + 1;
-      while (start > 0 && JSON.stringify(resolveTokenAtCol(receipt.text, start - 1)) === key) start--;
-      while (end < receipt.text.length * 2 && JSON.stringify(resolveTokenAtCol(receipt.text, end)) === key) end++;
-      const host = containerRef.current?.getBoundingClientRect();
-      if (host) setLinkHover({ left: rect.left - host.left + start * width,
-        top: rect.top - host.top + (row + 1) * height - 1, width: (end - start) * width });
-    }).catch(() => { if (revision === linkHoverRevision.current) setLinkHover(null); });
-    return () => { linkHoverRevision.current++; };
-  }, [isCmdHeld, visible, targetSessionId, linkPointer]);
+
+    void (async () => {
+      try {
+        let token: TerminalToken | null = null;
+        try {
+          const uri = await invoke<string | null>("cmd_native_terminal_hyperlink_at", {
+            sessionId: targetSessionId,
+            col,
+            row,
+          });
+          if (uri) {
+            token = tokenFromHyperlink(uri);
+          }
+        } catch {
+        }
+
+        let receipt: { text: string; col: number; row: number } | null = null;
+        try {
+          receipt = await invoke<{ text: string; col: number; row: number }>("cmd_native_terminal_line_at", {
+            sessionId: targetSessionId,
+            col,
+            row,
+          });
+        } catch {
+        }
+
+        if (revision !== linkHoverRevision.current) return;
+        if (!token) {
+          if (!receipt || !receipt.text) return;
+          token = resolveTokenAtCol(receipt.text, receipt.col);
+          if (!token) return;
+        }
+
+        let start = col;
+        let end = col + 1;
+        if (receipt && receipt.text) {
+          const lineToken = resolveTokenAtCol(receipt.text, receipt.col);
+          if (lineToken && JSON.stringify(lineToken) === JSON.stringify(token)) {
+            const key = JSON.stringify(lineToken);
+            start = receipt.col;
+            end = start + 1;
+            while (start > 0 && JSON.stringify(resolveTokenAtCol(receipt.text, start - 1)) === key) start--;
+            while (end < receipt.text.length * 2 && JSON.stringify(resolveTokenAtCol(receipt.text, end)) === key) end++;
+          } else {
+            const txt = receipt.text;
+            start = Math.min(receipt.col, txt.length > 0 ? txt.length - 1 : 0);
+            while (start > 0 && !/\s/.test(txt[start - 1])) start--;
+            end = Math.min(receipt.col + 1, txt.length);
+            while (end < txt.length && !/\s/.test(txt[end])) end++;
+            if (end <= start) end = start + 1;
+          }
+        }
+
+        let kind: TerminalLinkHintKind;
+        if (token.type === "url") {
+          kind = "url";
+        } else {
+          const isRemote = Boolean(session?.workspaceId && isRemoteWorkspaceId(session.workspaceId));
+          if (isRemote) {
+            kind = "file";
+          } else {
+            const resolved = await terminalLinkPathCache.check(token.path, targetSessionId);
+            if (revision !== linkHoverRevision.current) return;
+            const exists = resolved === undefined ? true : Boolean(resolved?.exists);
+            if (!exists) {
+              setLinkHover(null);
+              return;
+            }
+            kind = resolved?.isDirectory ? "directory" : "file";
+          }
+        }
+
+        const host = containerRef.current?.getBoundingClientRect();
+        if (host && revision === linkHoverRevision.current) {
+          setLinkHover({
+            left: rect.left - host.left + start * width,
+            top: rect.top - host.top + (row + 1) * height - 1,
+            width: (end - start) * width,
+            kind,
+          });
+        }
+      } catch {
+        if (revision === linkHoverRevision.current) setLinkHover(null);
+      }
+    })();
+
+    return () => {
+      linkHoverRevision.current++;
+    };
+  }, [isCmdHeld, linkPointer, session?.workspaceId, targetSessionId, visible]);
 
   const sendFocus = useCallback((focused: boolean) => {
     if (!visible || !isTauri() || !targetSessionId) {
@@ -1374,6 +1529,7 @@ export function NativeTerminalPane({
         ),
       )
       .then((receipt: { readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt } | undefined) => {
+        if (receipt && typeof receipt.mouseTrackingEnabled === "boolean" && targetSessionId) setSessionMouseTracking(targetSessionId, receipt.mouseTrackingEnabled);
         if (action !== "Motion") {
           updateImeAnchor(receipt?.receipt);
         }
@@ -1444,6 +1600,17 @@ export function NativeTerminalPane({
   }, [targetSessionId, updateScrollbar, visible]);
 
   useEffect(() => {
+    let plainDown: { clientX: number; clientY: number } | null = null;
+    const onDown = (event: PointerEvent) => {
+      if (
+        isTerminalLinkActionClick(event) &&
+        (!event.target || containerRef.current?.contains(event.target as Node))
+      ) {
+        plainDown = { clientX: event.clientX, clientY: event.clientY };
+      } else {
+        plainDown = null;
+      }
+    };
     const move = (event: PointerEvent) => {
       const drag = scrollbarDragRef.current;
       if (drag && drag.pointerId === event.pointerId) {
@@ -1483,6 +1650,22 @@ export function NativeTerminalPane({
           void handleTerminalClick(event.clientX, event.clientY, down.shiftKey || event.shiftKey);
         }
       }
+      if (plainDown) {
+        const down = plainDown;
+        plainDown = null;
+        if (event.type !== "pointercancel") {
+          const dist = Math.hypot(event.clientX - down.clientX, event.clientY - down.clientY);
+          const hasSelection = typeof window !== "undefined" && Boolean(window.getSelection?.()?.toString());
+          if (
+            isTerminalLinkActionClick(event) &&
+            dist < 6 &&
+            !isSessionMouseTrackingEnabled(targetSessionId) &&
+            !hasSelection
+          ) {
+            void handleTerminalClick(event.clientX, event.clientY, false, "actions");
+          }
+        }
+      }
       if (scrollbarDragRef.current?.pointerId === event.pointerId) {
         scrollbarDragRef.current = null;
         document.body.style.cursor = "";
@@ -1501,10 +1684,12 @@ export function NativeTerminalPane({
         sendMouse(event, "Release", null);
       }
     };
+    window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
     return () => {
+      window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
@@ -1515,7 +1700,7 @@ export function NativeTerminalPane({
       pendingMotionRef.current = null;
       document.body.style.cursor = "";
     };
-  }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse]);
+  }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse, targetSessionId]);
 
   useEffect(() => {
     const handleKeyChange = (event: globalThis.KeyboardEvent) => {
@@ -2530,8 +2715,26 @@ export function NativeTerminalPane({
           });
       }}
     >
-      {isCmdHeld && linkHover && <div aria-hidden="true" data-testid="terminal-link-underline"
-        className="pointer-events-none absolute z-10 h-px bg-foreground" style={linkHover} />}
+      {isCmdHeld && linkHover && (
+        <>
+          <div
+            aria-hidden="true"
+            data-testid="terminal-link-underline"
+            className="pointer-events-none absolute z-10 h-px bg-foreground"
+            style={{ left: linkHover.left, top: linkHover.top, width: linkHover.width }}
+          />
+          {linkHover.kind && (
+            <div
+              data-testid="terminal-link-hint"
+              role="tooltip"
+              className="pointer-events-none absolute z-20 rounded bg-popover px-1.5 py-0.5 text-[10px] text-popover-foreground shadow"
+              style={{ left: linkHover.left, top: linkHover.top + 4 }}
+            >
+              {terminalLinkOpenHint(linkHover.kind, isMacPlatform())}
+            </div>
+          )}
+        </>
+      )}
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"

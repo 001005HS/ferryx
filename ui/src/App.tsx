@@ -22,6 +22,7 @@ import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "./fea
 import type { AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
+import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
@@ -30,6 +31,8 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { listen } from "@tauri-apps/api/event";
+import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -2756,6 +2759,67 @@ function WorkspaceApp({
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    void listen<unknown>(CLI_OPEN_FILE_EVENT, (event) => {
+      const parsed = parseCliOpenFilePayload(event.payload);
+      if (!parsed) return;
+
+      const currentState = stateRef.current;
+      const activeWorkspaceId =
+        currentState.workspaceId ?? activeProjectRef.current?.workspaceId ?? null;
+      const focusedGroup = currentState.layout.focusedGroupId
+        ? currentState.layout.tabGroups?.[currentState.layout.focusedGroupId]
+        : undefined;
+      const activeTabId =
+        focusedGroup?.activeTabId ?? currentState.layout.activeTabId ?? currentState.layout.tabs[0]?.id ?? null;
+      const focusedCandidate = activeTabId
+        ? currentState.layout.tabs.find((tab) => tab.id === activeTabId)
+        : undefined;
+      const focusedTab =
+        focusedCandidate && isTerminalTab(focusedCandidate) ? focusedCandidate : null;
+      const tabLayout = focusedTab ? currentState.layout.layoutsByTabId?.[focusedTab.id] : undefined;
+      const activeLeafId =
+        tabLayout?.activeLeafId ?? (tabLayout?.root ? collectLeafIds(tabLayout.root)[0] : null);
+      const localSessionId = focusedTab
+        ? (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || focusedTab.sessionId
+        : null;
+      const session = localSessionId ? currentState.sessions[localSessionId] : undefined;
+
+      const source: Parameters<typeof openFilePreviewTab>[0] =
+        focusedTab && activeLeafId && localSessionId && session?.backendSessionId
+          ? {
+              leafId: activeLeafId,
+              sessionId: localSessionId,
+              backendSessionId: session.backendSessionId,
+              workspaceId: session.workspaceId ?? activeWorkspaceId,
+            }
+          : {
+              leafId: "cli",
+              sessionId: "cli",
+              backendSessionId: "cli",
+              workspaceId: activeWorkspaceId ?? null,
+            };
+
+      const request: Parameters<typeof openFilePreviewTab>[1] = {
+        path: parsed.path,
+        backendSessionId: source.backendSessionId,
+        line: parsed.line ?? null,
+        col: parsed.col ?? null,
+      };
+
+      openFilePreviewTab(source, request);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openFilePreviewTab, reportRuntimeError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     void onBrowserSessionCreated((payload) => {
       if (activeRemoteHostRef.current) {
         toast.warning("Browser tab was not shown because a remote host is active.");
@@ -3232,6 +3296,7 @@ function WorkspaceApp({
         }}
       />
       <TerminalLinkActions />
+      <TerminalFileLinkActions />
       {isSidebarOpen ? (
         <Sidebar
           open={true}
