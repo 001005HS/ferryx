@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AccountLoginPage } from "./AccountLoginPage";
 import * as accountSessionModule from "./accountSession";
 
@@ -13,6 +13,11 @@ describe("AccountLoginPage", () => {
   });
 
   afterEach(() => {
+    // React Testing Library auto-cleanup is not enabled in this suite, so every
+    // test must unmount explicitly; otherwise renders leak into the next test
+    // and duplicate data-testid lookups.
+    cleanup();
+    vi.useRealTimers();
     Object.defineProperty(window, "location", {
       configurable: true,
       value: originalLocation,
@@ -160,5 +165,156 @@ describe("AccountLoginPage", () => {
       />
     );
     expect(queryByTestId("use-legacy-pin-btn")).toBeNull();
+  });
+
+  describe("magic link auto sign-in polling", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      cleanup();
+      vi.useRealTimers();
+    });
+
+    it("CASE C: auto signs in when magic link is approved and stops polling", async () => {
+      const loginHandle = "c".repeat(64);
+      const resolveSpy = vi
+        .spyOn(accountSessionModule, "resolveAccountOrigin")
+        .mockResolvedValue(relayUrl);
+      const requestSpy = vi
+        .spyOn(accountSessionModule, "requestLogin")
+        .mockResolvedValue({ loginHandle });
+      const pollSpy = vi
+        .spyOn(accountSessionModule, "pollLogin")
+        .mockResolvedValueOnce({ status: "pending" })
+        .mockResolvedValueOnce({
+          status: "approved",
+          token: "tok-remote-1",
+          email: "user@example.com",
+        });
+      const storeSpy = vi
+        .spyOn(accountSessionModule, "storeAccountSessionToken")
+        .mockImplementation(() => {});
+      const onLoginSuccess = vi.fn();
+
+      render(
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccess}
+        />
+      );
+
+      fireEvent.change(screen.getByTestId("account-email-input"), {
+        target: { value: "user@example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+
+      expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
+      expect(requestSpy).toHaveBeenCalledWith(relayUrl, "user@example.com");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(1);
+      expect(pollSpy).toHaveBeenCalledWith(relayUrl, loginHandle);
+      expect(storeSpy).not.toHaveBeenCalled();
+      expect(onLoginSuccess).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(2);
+      expect(storeSpy).toHaveBeenCalledWith("tok-remote-1");
+      expect(onLoginSuccess).toHaveBeenCalledWith("tok-remote-1", "user@example.com");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("CASE C: stops polling and displays expiry error when TTL expires", async () => {
+      const loginHandle = "e".repeat(64);
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle });
+      const pollSpy = vi
+        .spyOn(accountSessionModule, "pollLogin")
+        .mockResolvedValue({ status: "pending" });
+      const storeSpy = vi
+        .spyOn(accountSessionModule, "storeAccountSessionToken")
+        .mockImplementation(() => {});
+      const onLoginSuccess = vi.fn();
+
+      render(
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccess}
+        />
+      );
+
+      fireEvent.change(screen.getByTestId("account-email-input"), {
+        target: { value: "user-expire@example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      });
+
+      const errorBanner = screen.getByTestId("account-login-error");
+      expect(errorBanner).not.toBeNull();
+      expect(errorBanner.textContent).toContain("The login link has expired. Please request a new link.");
+
+      const pollCallsBefore = pollSpy.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(pollCallsBefore);
+      expect(storeSpy).not.toHaveBeenCalled();
+      expect(onLoginSuccess).not.toHaveBeenCalled();
+    });
+
+    it("CASE D: cleans up polling interval on unmount without leaking timer", async () => {
+      const loginHandle = "f".repeat(64);
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle });
+      const pollSpy = vi
+        .spyOn(accountSessionModule, "pollLogin")
+        .mockResolvedValue({ status: "pending" });
+      const onLoginSuccess = vi.fn();
+
+      const { unmount } = render(
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccess}
+        />
+      );
+
+      fireEvent.change(screen.getByTestId("account-email-input"), {
+        target: { value: "user-unmount@example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        unmount();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   requestLogin,
+  pollLogin,
   consumeLogin,
   listMachines,
   requestGrant,
@@ -28,6 +29,10 @@ describe("accountSession client module", () => {
   const origin = "https://relay.example.com";
   const sessionToken = "account-token-secret-7788";
   const pairingToken = "pairing-token-secret-9944";
+  const loginHandle =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const approvedLoginHandle =
+    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
   let fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
 
   function clearAccountOriginProbeCache() {
@@ -48,7 +53,40 @@ describe("accountSession client module", () => {
       fetchCalls.push({ url, init });
 
       if (url.endsWith("/api/account/v1/login/request")) {
-        return Promise.resolve(new Response(JSON.stringify({ status: "accepted" }), { status: 202 }));
+        return Promise.resolve(
+          new Response(JSON.stringify({ loginHandle }), { status: 202 }),
+        );
+      }
+
+      if (url.endsWith("/api/account/v1/login/poll")) {
+        const body = init?.body ? JSON.parse(init.body as string) : {};
+        if (body.loginHandle === approvedLoginHandle) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                status: "approved",
+                token: sessionToken,
+                accountId: "acc-user-1",
+                email: "user@example.com",
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (body.loginHandle === loginHandle) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ status: "pending" }), { status: 200 }),
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              code: "LOGIN_HANDLE_INVALID",
+              message: "unknown login handle",
+            }),
+            { status: 401 },
+          ),
+        );
       }
 
       if (url.endsWith("/api/account/v1/login/consume")) {
@@ -143,7 +181,8 @@ describe("accountSession client module", () => {
   });
 
   it("requestLogin sends POST to /api/account/v1/login/request with email body", async () => {
-    await requestLogin(origin, "user@example.com");
+    const res = await requestLogin(origin, "user@example.com");
+    expect(res.loginHandle).toBe(loginHandle);
     expect(fetchCalls.length).toBe(1);
     const call = fetchCalls[0];
     expect(call.url).toBe("https://relay.example.com/api/account/v1/login/request");
@@ -151,6 +190,91 @@ describe("accountSession client module", () => {
     expect(call.init?.headers).toEqual({ "Content-Type": "application/json" });
     expect(JSON.parse(call.init?.body as string)).toEqual({ email: "user@example.com" });
     expect(call.url).not.toContain("token");
+  });
+
+  it("requestLogin throws AccountSessionError with INVALID_RESPONSE when response lacks loginHandle", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+      if (url.endsWith("/api/account/v1/login/request")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "accepted" }), { status: 202 }),
+        );
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    await expect(requestLogin(origin, "user@example.com")).rejects.toThrowError(AccountSessionError);
+    try {
+      await requestLogin(origin, "user@example.com");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err instanceof AccountSessionError).toBe(true);
+      expect((err as AccountSessionError).code).toBe("INVALID_RESPONSE");
+      expect((err as AccountSessionError).status).toBe(202);
+      expect((err as AccountSessionError).message).toContain("Malformed login request response");
+    }
+
+    expect(fetchCalls.length).toBe(2);
+    const call = fetchCalls[0];
+    expect(call.url).toBe("https://relay.example.com/api/account/v1/login/request");
+    expect(call.init?.method).toBe("POST");
+    expect(call.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(call.init?.body as string)).toEqual({ email: "user@example.com" });
+  });
+
+  it("pollLogin sends POST to /api/account/v1/login/poll and returns status pending", async () => {
+    const res = await pollLogin(origin, loginHandle);
+    expect(res.status).toBe("pending");
+    expect(res.token).toBeUndefined();
+
+    expect(fetchCalls.length).toBe(1);
+    const call = fetchCalls[0];
+    expect(call.url).toBe("https://relay.example.com/api/account/v1/login/poll");
+    expect(call.init?.method).toBe("POST");
+    expect(call.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(call.init?.body as string)).toEqual({ loginHandle });
+    expect(call.url).not.toContain(loginHandle);
+    expect(getStoredAccountSessionToken()).toBeNull();
+  });
+
+  it("pollLogin returns status approved with session token for approved handle", async () => {
+    const res = await pollLogin(origin, approvedLoginHandle);
+    expect(res.status).toBe("approved");
+    expect(res.token).toBe(sessionToken);
+    expect(res.accountId).toBe("acc-user-1");
+    expect(res.email).toBe("user@example.com");
+
+    expect(fetchCalls.length).toBe(1);
+    const call = fetchCalls[0];
+    expect(call.url).toBe("https://relay.example.com/api/account/v1/login/poll");
+    expect(call.init?.method).toBe("POST");
+    expect(call.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(call.init?.body as string)).toEqual({ loginHandle: approvedLoginHandle });
+    expect(call.url).not.toContain(approvedLoginHandle);
+    expect(call.url).not.toContain(sessionToken);
+    expect(getStoredAccountSessionToken()).toBeNull();
+  });
+
+  it("pollLogin throws typed AccountSessionError on unknown login handle", async () => {
+    const unknownHandle = "0000000000000000000000000000000000000000000000000000000000000000";
+    await expect(pollLogin(origin, unknownHandle)).rejects.toThrowError(AccountSessionError);
+    try {
+      await pollLogin(origin, unknownHandle);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err instanceof AccountSessionError).toBe(true);
+      expect((err as AccountSessionError).code).toBe("LOGIN_HANDLE_INVALID");
+      expect((err as AccountSessionError).status).toBe(401);
+      expect((err as AccountSessionError).message).toBe("unknown login handle");
+    }
+
+    const call = fetchCalls.find((c) => c.url.endsWith("/api/account/v1/login/poll"));
+    expect(call).toBeDefined();
+    expect(call!.url).toBe("https://relay.example.com/api/account/v1/login/poll");
+    expect(call!.init?.method).toBe("POST");
+    expect(call!.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(call!.init?.body as string)).toEqual({ loginHandle: unknownHandle });
   });
 
   it("consumeLogin sends POST to /api/account/v1/login/consume and stores session token", async () => {
@@ -394,8 +518,10 @@ describe("accountSession client module", () => {
     expect(mockTransport.fetchLike).toHaveBeenCalledTimes(1);
   });
 
-  it("pairing token and account session token never appear in any request URL", async () => {
-    await requestLogin(origin, "user@example.com");
+  it("pairing token, account session token, and login handle never appear in any request URL", async () => {
+    const loginRes = await requestLogin(origin, "user@example.com");
+    await pollLogin(origin, loginRes.loginHandle);
+    await pollLogin(origin, approvedLoginHandle);
     await consumeLogin(origin, "valid-code");
     await listMachines(origin, sessionToken);
     await requestGrant(
@@ -420,8 +546,12 @@ describe("accountSession client module", () => {
     for (const call of fetchCalls) {
       expect(call.url).not.toContain(sessionToken);
       expect(call.url).not.toContain(pairingToken);
+      expect(call.url).not.toContain(loginHandle);
+      expect(call.url).not.toContain(approvedLoginHandle);
       expect(call.url).not.toContain("token=");
       expect(call.url).not.toContain("ticket=");
+      expect(call.url).not.toContain("handle=");
+      expect(call.url).not.toContain("loginHandle=");
     }
   });
 
@@ -480,7 +610,7 @@ describe("accountSession client module", () => {
       }
       if (url.endsWith("/api/account/v1/login/request")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ status: "accepted" }), { status: 202 }),
+          new Response(JSON.stringify({ loginHandle }), { status: 202 }),
         );
       }
       return Promise.resolve(new Response("Not Found", { status: 404 }));

@@ -35,6 +35,17 @@ export class AccountSessionError extends Error {
   }
 }
 
+export interface LoginRequestResponse {
+  loginHandle: string;
+}
+
+export interface LoginPollResponse {
+  status: "pending" | "approved";
+  token?: string;
+  accountId?: string;
+  email?: string;
+}
+
 export interface LoginConsumeResponse {
   token: string;
   accountId: string;
@@ -233,7 +244,10 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
   return probe;
 }
 
-export async function requestLogin(origin: string, email: string): Promise<void> {
+export async function requestLogin(
+  origin: string,
+  email: string,
+): Promise<LoginRequestResponse> {
   const url = `${cleanOrigin(origin)}/api/account/v1/login/request`;
   const res = await fetch(url, {
     method: "POST",
@@ -261,6 +275,91 @@ export async function requestLogin(origin: string, email: string): Promise<void>
     } catch {}
     throw new AccountSessionError(code, message, res.status);
   }
+
+  const data = (await res.json()) as LoginRequestResponse;
+  if (!data?.loginHandle || typeof data.loginHandle !== "string") {
+    throw new AccountSessionError(
+      "INVALID_RESPONSE",
+      "Malformed login request response from server",
+      res.status,
+    );
+  }
+
+  return data;
+}
+
+export async function pollLogin(
+  origin: string,
+  loginHandle: string,
+): Promise<LoginPollResponse> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/login/poll`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ loginHandle: loginHandle.trim() }),
+  });
+
+  if (!res.ok) {
+    let code = "LOGIN_POLL_FAILED";
+    let message = `Failed to poll login status (${res.status})`;
+    try {
+      const data = await res.json();
+      if (data?.code) code = data.code;
+      if (data?.message) message = data.message;
+    } catch {}
+    throw new AccountSessionError(code, message, res.status);
+  }
+
+  const data = (await res.json()) as LoginPollResponse;
+  // Note: Callers decide whether and when to store the session token.
+  return data;
+}
+
+export const TERMINAL_LOGIN_POLL_ERROR_CODES = new Set([
+  "LOGIN_HANDLE_INVALID",
+  "LOGIN_CODE_USED",
+  "LOGIN_CODE_EXPIRED",
+  "LOGIN_CODE_EXPIRED_OR_UNKNOWN",
+]);
+
+export const TERMINAL_LOGIN_POLL_HTTP_STATUSES = new Set([400, 401, 403, 404]);
+
+/**
+ * Distinguishes terminal poll errors (invalid handle, expired or already-used code, 4xx)
+ * from transient failures (network failures, fetch TypeError, 5xx server errors).
+ *
+ * Why this matters: once the user opens the magic link in their email or browser,
+ * the login code may already be consumed server-side. Stopping the poll loop on
+ * a transient network blip would abandon an already-approved/consumed login and
+ * force the user to request a whole new link.
+ */
+export function isTerminalLoginPollError(err: unknown): boolean {
+  if (err instanceof AccountSessionError) {
+    if (TERMINAL_LOGIN_POLL_ERROR_CODES.has(err.code)) {
+      return true;
+    }
+    if (err.status !== undefined && TERMINAL_LOGIN_POLL_HTTP_STATUSES.has(err.status)) {
+      return true;
+    }
+    return false;
+  }
+  if (err && typeof err === "object") {
+    const code =
+      "code" in err && typeof (err as { code: unknown }).code === "string"
+        ? (err as { code: string }).code
+        : undefined;
+    if (code && TERMINAL_LOGIN_POLL_ERROR_CODES.has(code)) {
+      return true;
+    }
+    const status =
+      "status" in err && typeof (err as { status: unknown }).status === "number"
+        ? (err as { status: number }).status
+        : undefined;
+    if (status !== undefined && TERMINAL_LOGIN_POLL_HTTP_STATUSES.has(status)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function consumeLogin(

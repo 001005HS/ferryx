@@ -57,6 +57,10 @@ pub struct SessionRecord {
 pub struct LoginCodeRecord {
     pub email: String,
     pub expires_at: u64,
+    #[serde(default)]
+    pub consumed_at: Option<u64>,
+    #[serde(default)]
+    pub login_handle_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +254,8 @@ mod tests {
             .insert(token_hash(&token), LoginCodeRecord {
                 email: "a@b.co".into(),
                 expires_at: now_secs() + 600,
+                consumed_at: None,
+                login_handle_hash: None,
             });
         store.save(dir.path()).expect("save");
         let raw = std::fs::read_to_string(store_path(dir.path())).expect("raw");
@@ -261,6 +267,8 @@ mod tests {
         store.login_codes.insert(token_hash("expired"), LoginCodeRecord {
             email: "a@b.co".into(),
             expires_at: now_secs() - 1,
+            consumed_at: None,
+            login_handle_hash: None,
         });
         store.sessions.insert(
             "session-hash".into(),

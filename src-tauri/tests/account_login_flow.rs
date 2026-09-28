@@ -162,6 +162,8 @@ async fn account_login_expired_code_is_rejected() {
         LoginCodeRecord {
             email: "a@b.co".into(),
             expires_at: now_secs() - 1,
+            consumed_at: None,
+            login_handle_hash: None,
         },
     );
     store.save(data_dir.path()).expect("save");

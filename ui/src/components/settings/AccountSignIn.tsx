@@ -1,8 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AlertCircle, CheckCircle2, Mail } from "lucide-react";
 import {
   AccountSessionError,
   consumeLogin,
+  isTerminalLoginPollError,
+  pollLogin,
   requestLogin,
   storeAccountSessionToken,
 } from "../../remote/accountSession";
@@ -17,6 +19,9 @@ export interface AccountSignInProps {
   className?: string;
 }
 
+const LOGIN_POLL_INTERVAL_MS = 2000;
+const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
+
 export function AccountSignIn({
   origin = DEFAULT_RELAY_ORIGIN,
   onSignIn,
@@ -29,6 +34,91 @@ export function AccountSignIn({
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isMountedRef = useRef(true);
+  const originRef = useRef(origin);
+  originRef.current = origin;
+  const onSignInRef = useRef(onSignIn);
+  onSignInRef.current = onSignIn;
+
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopPolling();
+    };
+  }, []);
+
+  const startPolling = (loginHandle: string) => {
+    stopPolling();
+    const startTime = Date.now();
+    let inFlight = false;
+
+    pollTimerRef.current = setInterval(async () => {
+      if (!isMountedRef.current) return;
+      if (inFlight) return;
+
+      if (Date.now() - startTime >= LOGIN_POLL_TIMEOUT_MS) {
+        stopPolling();
+        if (!isMountedRef.current) return;
+        setError("The sign-in link has expired. Please request a new link.");
+        setErrorCode("EXPIRED");
+        setInfoMessage(null);
+        return;
+      }
+
+      inFlight = true;
+      try {
+        const res = await pollLogin(originRef.current, loginHandle);
+        if (!isMountedRef.current) return;
+
+        if (res.status === "approved" && res.token) {
+          stopPolling();
+          storeAccountSessionToken(res.token);
+          onSignInRef.current?.(res.token, res.email ?? "");
+        }
+      } catch (err: unknown) {
+        if (!isMountedRef.current) return;
+
+        // Distinguish terminal from transient errors: if transient (network failure,
+        // fetch TypeError, 5xx server error), leave the timer running and retry silently.
+        // Stopping on a transient error would abandon a login code that may already be
+        // consumed server-side once the user opened the magic link.
+        if (isTerminalLoginPollError(err)) {
+          stopPolling();
+          if (err instanceof AccountSessionError) {
+            setErrorCode(err.code);
+            setError(err.message);
+          } else if (
+            err &&
+            typeof err === "object" &&
+            "code" in err &&
+            typeof (err as { code: string }).code === "string"
+          ) {
+            const typed = err as { code: string; message?: string };
+            setErrorCode(typed.code);
+            setError(typed.message || typed.code);
+          } else if (err instanceof Error) {
+            setError(err.message);
+          } else {
+            setError("Failed to check sign-in status");
+          }
+        }
+        // Transient errors do NOT stop polling and do NOT set error state,
+        // preserving infoMessage so the automatic sign-in status remains visible.
+      } finally {
+        inFlight = false;
+      }
+    }, LOGIN_POLL_INTERVAL_MS);
+  };
 
   useEffect(() => {
     let tokenFromUrl: string | null = null;
@@ -47,6 +137,7 @@ export function AccountSignIn({
     }
 
     if (tokenFromUrl && tokenFromUrl.trim()) {
+      stopPolling();
       const trimmed = tokenFromUrl.trim();
       setLoading(true);
       setError(null);
@@ -94,15 +185,17 @@ export function AccountSignIn({
     const cleanEmail = email.trim();
     if (!cleanEmail || loading) return;
 
+    stopPolling();
     setLoading(true);
     setError(null);
     setErrorCode(null);
     try {
-      await requestLogin(origin, cleanEmail);
+      const res = await requestLogin(origin, cleanEmail);
       setCodeRequested(true);
       setInfoMessage(
-        `Magic sign-in link sent to ${cleanEmail}. Click the link in your email or enter the code below.`,
+        `Magic sign-in link sent to ${cleanEmail}. This window will sign in automatically once the link is opened, or you can enter the code below.`,
       );
+      startPolling(res.loginHandle);
     } catch (err: unknown) {
       if (err instanceof AccountSessionError) {
         setErrorCode(err.code);
@@ -136,6 +229,7 @@ export function AccountSignIn({
     setErrorCode(null);
     try {
       const res = await consumeLogin(origin, cleanCode);
+      stopPolling();
       storeAccountSessionToken(res.token);
       onSignIn?.(res.token, res.email);
     } catch (err: unknown) {
@@ -257,6 +351,7 @@ export function AccountSignIn({
               size="sm"
               disabled={loading}
               onClick={() => {
+                stopPolling();
                 setCodeRequested(false);
                 setCode("");
                 setError(null);

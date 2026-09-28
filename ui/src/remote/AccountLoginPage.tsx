@@ -1,14 +1,21 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  AccountSessionError,
   consumeLogin,
+  isTerminalLoginPollError,
+  pollLogin,
   requestLogin,
   resolveAccountOrigin,
+  storeAccountSessionToken,
 } from "./accountSession";
 
 interface AccountLoginPageProps {
   relayUrl: string;
   onLoginSuccess: (token: string, email: string) => void;
 }
+
+const LOGIN_POLL_INTERVAL_MS = 2000;
+const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
 
 export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   relayUrl,
@@ -19,6 +26,84 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   const [codeRequested, setCodeRequested] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isMountedRef = useRef(true);
+  const onLoginSuccessRef = useRef(onLoginSuccess);
+  onLoginSuccessRef.current = onLoginSuccess;
+
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopPolling();
+    };
+  }, []);
+
+  const startPolling = (origin: string, loginHandle: string) => {
+    stopPolling();
+    const startTime = Date.now();
+    let inFlight = false;
+
+    pollTimerRef.current = setInterval(async () => {
+      if (!isMountedRef.current) return;
+      if (inFlight) return;
+
+      if (Date.now() - startTime >= LOGIN_POLL_TIMEOUT_MS) {
+        stopPolling();
+        if (!isMountedRef.current) return;
+        setError("The login link has expired. Please request a new link.");
+        return;
+      }
+
+      inFlight = true;
+      try {
+        const res = await pollLogin(origin, loginHandle);
+        if (!isMountedRef.current) return;
+
+        if (res.status === "approved" && res.token) {
+          stopPolling();
+          storeAccountSessionToken(res.token);
+          onLoginSuccessRef.current(res.token, res.email ?? "");
+        }
+      } catch (err: unknown) {
+        if (!isMountedRef.current) return;
+
+        // Distinguish terminal from transient errors: if transient (network failure,
+        // fetch TypeError, 5xx server error), leave the timer running and retry silently.
+        // Stopping on a transient error would abandon a login code that may already be
+        // consumed server-side once the user opened the magic link.
+        if (isTerminalLoginPollError(err)) {
+          stopPolling();
+          if (err instanceof AccountSessionError) {
+            setError(err.message);
+          } else if (
+            err &&
+            typeof err === "object" &&
+            "code" in err &&
+            typeof (err as { code: string }).code === "string"
+          ) {
+            const typed = err as { code: string; message?: string };
+            setError(typed.message || typed.code);
+          } else if (err instanceof Error) {
+            setError(err.message);
+          } else {
+            setError("Failed to check login status");
+          }
+        }
+        // Transient errors do NOT stop polling and do NOT set error state.
+      } finally {
+        inFlight = false;
+      }
+    }, LOGIN_POLL_INTERVAL_MS);
+  };
 
   useEffect(() => {
     let code: string | null = null;
@@ -39,6 +124,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     }
 
     if (code && code.trim()) {
+      stopPolling();
       const trimmedCode = code.trim();
       setLoading(true);
       setError(null);
@@ -70,14 +156,22 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     e.preventDefault();
     if (!email.trim() || loading) return;
 
+    stopPolling();
     setLoading(true);
     setError(null);
     try {
       const origin = await resolveAccountOrigin(relayUrl);
-      await requestLogin(origin, email.trim());
+      const res = await requestLogin(origin, email.trim());
       setCodeRequested(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to request login link");
+      startPolling(origin, res.loginHandle);
+    } catch (err: unknown) {
+      if (err instanceof AccountSessionError) {
+        setError(err.message);
+      } else if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Failed to request login link");
+      }
     } finally {
       setLoading(false);
     }
@@ -92,9 +186,16 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     try {
       const origin = await resolveAccountOrigin(relayUrl);
       const res = await consumeLogin(origin, tokenInput.trim());
+      stopPolling();
       onLoginSuccess(res.token, res.email);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid or expired login code");
+    } catch (err: unknown) {
+      if (err instanceof AccountSessionError) {
+        setError(err.message);
+      } else if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Invalid or expired login code");
+      }
     } finally {
       setLoading(false);
     }
@@ -153,7 +254,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
         ) : (
           <form onSubmit={handleConsumeCode} className="space-y-4">
             <p className="text-xs text-muted-foreground">
-              A login link was sent to <strong className="text-foreground">{email}</strong>. Enter the code from your email below:
+              A login link was sent to <strong className="text-foreground">{email}</strong>. This page will sign in automatically once the link is opened, or you can enter the code from your email below:
             </p>
             <div className="space-y-1.5">
               <label htmlFor="account-code-input" className="text-xs font-medium text-foreground">
@@ -166,7 +267,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
                 required
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
-                placeholder="Enter 6-digit or login code"
+                placeholder="Paste the code from your email"
                 disabled={loading}
                 className="w-full px-3 py-2 text-sm bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-ring font-mono"
               />
@@ -183,7 +284,12 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
 
             <button
               type="button"
-              onClick={() => setCodeRequested(false)}
+              onClick={() => {
+                stopPolling();
+                setCodeRequested(false);
+                setTokenInput("");
+                setError(null);
+              }}
               className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
               Use a different email

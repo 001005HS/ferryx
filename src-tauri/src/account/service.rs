@@ -334,13 +334,37 @@ pub struct LoginRequestBody {
     pub email: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginRequestResponse {
+    pub login_handle: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LoginPollBody {
+    pub login_handle: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginPollResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginConsumeBody {
     pub code: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginConsumeResponse {
     pub token: String,
@@ -674,7 +698,7 @@ pub async fn device_approve_get(
 pub async fn login_request(
     State(state): State<Arc<AccountState>>,
     body: Bytes,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<LoginRequestResponse>), ApiError> {
     let request: LoginRequestBody = parse_json(body).await?;
     let email = normalize_email(&request.email);
     if email.is_empty() || !email.contains('@') {
@@ -693,6 +717,8 @@ pub async fn login_request(
     }
 
     let code = random_token();
+    let login_handle = random_token();
+    let login_handle_hash = token_hash(&login_handle);
     let url = format!("{}/login?code={}", state.origin.trim_end_matches('/'), code);
     let delivered = state.mailer.send_magic_link(&email, &url);
     if let Err(error) = delivered {
@@ -711,11 +737,94 @@ pub async fn login_request(
             LoginCodeRecord {
                 email: email.clone(),
                 expires_at,
+                consumed_at: None,
+                login_handle_hash: Some(login_handle_hash),
             },
         );
         Ok(())
     })?;
-    Ok(StatusCode::ACCEPTED)
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(LoginRequestResponse { login_handle }),
+    ))
+}
+
+/// Polls for completion of a magic link sign-in request.
+///
+/// When the user opens the emailed link in a browser, that browser hits `/login?code=...`
+/// which calls `login_consume`, minting a session for the browser and marking the code
+/// as consumed (`consumed_at = Some(now)`).
+///
+/// That consumption serves as the approval signal for this endpoint: while `consumed_at`
+/// is none, `login_poll` returns `{ status: "pending" }`. Once consumed, `login_poll`
+/// mints a session for the requesting app and removes the record so both sides
+/// (browser and app) mint at most one session each, and subsequent polls fail.
+pub async fn login_poll(
+    State(state): State<Arc<AccountState>>,
+    body: Bytes,
+) -> Result<Json<LoginPollResponse>, ApiError> {
+    let request: LoginPollBody = parse_json(body).await?;
+    let now = now_secs();
+    let handle_hash = token_hash(request.login_handle.trim());
+
+    let maybe_session = state.mutate(|store| {
+        let found = store
+            .login_codes
+            .iter()
+            .find(|(_, r)| r.login_handle_hash.as_deref() == Some(&handle_hash))
+            .map(|(k, r)| (k.clone(), r.email.clone(), r.expires_at, r.consumed_at));
+        let (key, email, expires_at, consumed_at) = found.ok_or_else(|| {
+            ApiError::unauthorized("LOGIN_HANDLE_INVALID", "login handle is invalid")
+        })?;
+        if expires_at <= now {
+            store.login_codes.remove(&key);
+            return Err(ApiError::unauthorized(
+                "LOGIN_CODE_EXPIRED",
+                "login code has expired",
+            ));
+        }
+        if consumed_at.is_none() {
+            return Ok(None);
+        }
+
+        // The browser consumed the code; now mint a session for this polling app
+        // and remove the record so this poll handle cannot be used again.
+        store.login_codes.remove(&key);
+        let user = store
+            .user_by_email(&email)
+            .cloned()
+            .unwrap_or_else(|| UserRecord {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                email: email.clone(),
+                created_at: now,
+            });
+        store.users.insert(user.user_id.clone(), user.clone());
+        let bearer_token = random_token();
+        store.sessions.insert(
+            token_hash(&bearer_token),
+            SessionRecord {
+                user_id: user.user_id.clone(),
+                expires_at: now + SESSION_TTL.as_secs(),
+            },
+        );
+        Ok(Some((bearer_token, user)))
+    })?;
+
+    if let Some((token, user)) = maybe_session {
+        Ok(Json(LoginPollResponse {
+            status: "approved".into(),
+            token: Some(token),
+            account_id: Some(user.user_id),
+            email: Some(user.email),
+        }))
+    } else {
+        Ok(Json(LoginPollResponse {
+            status: "pending".into(),
+            token: None,
+            account_id: None,
+            email: None,
+        }))
+    }
 }
 
 pub async fn login_consume(
@@ -726,18 +835,33 @@ pub async fn login_consume(
     let now = now_secs();
     let (bearer_token, user) = state.mutate(|store| {
         let key = token_hash(&request.code);
-        let record = store.login_codes.get(&key).ok_or_else(|| {
-            ApiError::unauthorized("LOGIN_CODE_USED", "login code is unknown or already used")
-        })?;
-        if record.expires_at <= now {
+        let (email, expires_at, consumed_at) = match store.login_codes.get(&key) {
+            Some(r) => (r.email.clone(), r.expires_at, r.consumed_at),
+            None => {
+                return Err(ApiError::unauthorized(
+                    "LOGIN_CODE_USED",
+                    "login code is unknown or already used",
+                ));
+            }
+        };
+        if consumed_at.is_some() {
+            return Err(ApiError::unauthorized(
+                "LOGIN_CODE_USED",
+                "login code is unknown or already used",
+            ));
+        }
+        if expires_at <= now {
             store.login_codes.remove(&key);
             return Err(ApiError::unauthorized(
                 "LOGIN_CODE_EXPIRED",
                 "login code has expired",
             ));
         }
-        let email = record.email.clone();
-        store.login_codes.remove(&key);
+
+        if let Some(record) = store.login_codes.get_mut(&key) {
+            record.consumed_at = Some(now);
+        }
+
         let user = store
             .user_by_email(&email)
             .cloned()
@@ -1199,6 +1323,7 @@ pub fn router(state: Arc<AccountState>) -> Router {
     Router::new()
         .route("/api/account/v1/public-key", get(get_public_key))
         .route("/api/account/v1/login/request", post(login_request))
+        .route("/api/account/v1/login/poll", post(login_poll))
         .route("/api/account/v1/health", get(health_check))
         .route("/api/account/v1/login/consume", post(login_consume))
         .route("/api/account/v1/device/request", post(device_request))
@@ -1321,6 +1446,69 @@ mod tests {
         let approved = device_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap().0;
         assert_eq!(approved.status, "approved");
         assert!(approved.enrollment_code.is_some());
+    }
+
+    #[tokio::test]
+    async fn login_poll_returns_pending_until_the_browser_consumes_the_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mail_dir = tmp.path().join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir.clone()));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
+
+        let req_body = serde_json::to_vec(&serde_json::json!({
+            "email": "user@test.local"
+        })).unwrap();
+        let (status, resp) = login_request(State(state.clone()), Bytes::from(req_body)).await.unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(!resp.login_handle.is_empty());
+
+        let mail_url = read_magic_link(&mail_dir);
+        assert!(
+            mail_url.contains("/login?code="),
+            "mailed url must be browser flow /login?code=: {mail_url}"
+        );
+        assert!(
+            !mail_url.contains(&resp.login_handle),
+            "mailed url must never contain loginHandle: {mail_url}"
+        );
+        let code = mail_url
+            .split("code=")
+            .nth(1)
+            .expect("code in mail url")
+            .to_string();
+
+        // 1. Poll before browser consumption -> pending, no token
+        let poll_body = serde_json::to_vec(&serde_json::json!({
+            "loginHandle": resp.login_handle
+        })).unwrap();
+        let pending = login_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        assert_eq!(pending.status, "pending");
+        assert!(pending.token.is_none());
+
+        // 2. Browser consumes the code -> returns a token
+        let consume_body = serde_json::to_vec(&serde_json::json!({
+            "code": code
+        })).unwrap();
+        let browser_session = login_consume(State(state.clone()), Bytes::from(consume_body.clone())).await.unwrap().0;
+        assert!(!browser_session.token.is_empty());
+        assert_eq!(browser_session.email, "user@test.local");
+
+        // 3. Poll after browser consumption -> approved, mints session for app
+        let approved = login_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        assert_eq!(approved.status, "approved");
+        assert!(approved.token.is_some());
+        assert_eq!(approved.email.as_deref(), Some("user@test.local"));
+        assert_eq!(approved.account_id.as_deref(), Some(browser_session.account_id.as_str()));
+
+        // 4. Poll third time -> fails with 401 LOGIN_HANDLE_INVALID (record was removed)
+        let third_poll_err = login_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap_err();
+        assert_eq!(third_poll_err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(third_poll_err.code, "LOGIN_HANDLE_INVALID");
+
+        // 5. Second consume with same code -> fails with 401 LOGIN_CODE_USED
+        let second_consume_err = login_consume(State(state.clone()), Bytes::from(consume_body)).await.unwrap_err();
+        assert_eq!(second_consume_err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(second_consume_err.code, "LOGIN_CODE_USED");
     }
 
     #[tokio::test]
