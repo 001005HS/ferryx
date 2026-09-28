@@ -392,3 +392,97 @@ describe("openTerminalToken", () => {
     }
   });
 });
+
+describe("Orca location suffix parsing", () => {
+  it("resolves path with parenthesized line and column on error line", () => {
+    const line = "error at src/app.ts(12,3): boom";
+    const token = resolveTokenAtCol(line, 12);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: 3,
+      raw: "src/app.ts(12,3)",
+    });
+  });
+
+  it("resolves path with parenthesized line and spaced column", () => {
+    const line = "error at src/app.ts(12, 3): boom";
+    const token = resolveTokenAtCol(line, 12);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: 3,
+      raw: "src/app.ts(12, 3)",
+    });
+  });
+
+  it("resolves path with parenthesized line only", () => {
+    const line = "error at src/app.ts(12): boom";
+    const token = resolveTokenAtCol(line, 12);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: undefined,
+      raw: "src/app.ts(12)",
+    });
+  });
+
+  it("resolves path with #Lline-Lend range suffix", () => {
+    const line = "see src/app.ts#L12-L20";
+    const token = resolveTokenAtCol(line, 8);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: undefined,
+      raw: "src/app.ts#L12-L20",
+    });
+  });
+
+  it("resolves path with #Lline suffix", () => {
+    const line = "see src/app.ts#L12";
+    const token = resolveTokenAtCol(line, 8);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: undefined,
+      raw: "src/app.ts#L12",
+    });
+  });
+
+  it("resolves path with #LlineCcol suffix", () => {
+    const line = "see src/app.ts#L12C3";
+    const token = resolveTokenAtCol(line, 8);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 12,
+      col: 3,
+      raw: "src/app.ts#L12C3",
+    });
+  });
+
+  it("preserves standard :line:col parsing", () => {
+    const line = "src/app.ts:5:2";
+    const token = resolveTokenAtCol(line, 5);
+    expect(token).toEqual({
+      type: "file",
+      path: "src/app.ts",
+      line: 5,
+      col: 2,
+      raw: "src/app.ts:5:2",
+    });
+  });
+
+  it("guards against IP addresses and version strings with Orca suffixes", () => {
+    expect(resolveTokenAtCol("error at 127.0.0.1(8080): boom", 12)).toBeNull();
+    expect(resolveTokenAtCol("see 127.0.0.1#L12-L20", 8)).toBeNull();
+    expect(resolveTokenAtCol("version v1.2.3(4) released", 10)).toBeNull();
+    expect(resolveTokenAtCol("version v1.2.3#L12 released", 10)).toBeNull();
+  });
+});
+

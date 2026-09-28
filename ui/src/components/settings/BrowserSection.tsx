@@ -25,6 +25,12 @@ import {
   setBrowserZoom,
 } from "../../lib/browserTauri";
 import { isInstalledBrowserCookieImportSupported, isMacHost } from "../../lib/platform";
+import {
+  loadFileOpenTargets,
+  saveFileOpenTargets,
+  type FileOpenCategory,
+  type FileOpenTarget,
+} from "../../lib/fileOpenTargets";
 import type { BrowserSessionSummary } from "../../lib/types";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -53,6 +59,13 @@ export function BrowserSection() {
   const [focusErrors, setFocusErrors] = useState<Record<string, string>>({});
   const namedProfilesSupported = browserNamedProfilesSupported();
   const visibleProfiles = supportedBrowserProfiles(settings);
+  const [fileOpenTargets, setFileOpenTargets] = useState(loadFileOpenTargets);
+
+  const updateFileOpenTarget = (category: FileOpenCategory, target: FileOpenTarget) => {
+    const next = { ...fileOpenTargets, [category]: target };
+    setFileOpenTargets(next);
+    saveFileOpenTargets(next);
+  };
 
   useEffect(() => setHomeDraft(settings.homePage), [settings.homePage]);
 
@@ -357,6 +370,81 @@ export function BrowserSection() {
               checked={settings.localhostWorktreeLabels}
               onCheckedChange={(checked) => void update({ localhostWorktreeLabels: checked })}
             />
+          </SettingRow>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup title="File Links">
+        <div className="border-b border-border">
+          <SettingRow label="Markdown" description="Where Command/Ctrl-click on a terminal file path opens.">
+            <Select
+              value={fileOpenTargets.markdown}
+              onValueChange={(value) => updateFileOpenTarget("markdown", value as FileOpenTarget)}
+            >
+              <SelectTrigger id="file-open-target-markdown" aria-label="Open Markdown files in" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="in-app">Ferryx tab</SelectItem>
+                <SelectItem value="external">External app</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow label="Images">
+            <Select
+              value={fileOpenTargets.image}
+              onValueChange={(value) => updateFileOpenTarget("image", value as FileOpenTarget)}
+            >
+              <SelectTrigger id="file-open-target-image" aria-label="Open Image files in" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="in-app">Ferryx tab</SelectItem>
+                <SelectItem value="external">External app</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow label="PDF">
+            <Select
+              value={fileOpenTargets.pdf}
+              onValueChange={(value) => updateFileOpenTarget("pdf", value as FileOpenTarget)}
+            >
+              <SelectTrigger id="file-open-target-pdf" aria-label="Open PDF files in" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="in-app">Ferryx tab</SelectItem>
+                <SelectItem value="external">External app</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow label="Video & audio">
+            <Select
+              value={fileOpenTargets.media}
+              onValueChange={(value) => updateFileOpenTarget("media", value as FileOpenTarget)}
+            >
+              <SelectTrigger id="file-open-target-media" aria-label="Open Video & audio files in" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="in-app">Ferryx tab</SelectItem>
+                <SelectItem value="external">External app</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow label="Other text files">
+            <Select
+              value={fileOpenTargets.text}
+              onValueChange={(value) => updateFileOpenTarget("text", value as FileOpenTarget)}
+            >
+              <SelectTrigger id="file-open-target-text" aria-label="Open Other text files in" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="in-app">Ferryx tab</SelectItem>
+                <SelectItem value="external">External app</SelectItem>
+              </SelectContent>
+            </Select>
           </SettingRow>
         </div>
       </SettingsGroup>

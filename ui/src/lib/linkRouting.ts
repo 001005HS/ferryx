@@ -1,7 +1,11 @@
 import type { FilePreviewSource } from "./filePreviewTypes";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
 import { openExternalUrl } from "./browserTauri";
+import { resolveFilePreviewPath } from "./filePreviewCommands";
+import { fileOpenTargetFor } from "./fileOpenTargets";
+import { revealPath } from "./tauri";
 
 export const TERMINAL_LINK_ACTION_EVENT = "ferryx:terminal-link-actions";
 
@@ -36,6 +40,16 @@ export function registerBuiltInBrowserLinkOpener(opener: BuiltInBrowserOpener): 
   builtInBrowserOpener = opener;
   return () => {
     if (builtInBrowserOpener === opener) builtInBrowserOpener = null;
+  };
+}
+
+export type WorktreePathOpener = (path: string) => boolean;
+let worktreePathOpener: WorktreePathOpener | null = null;
+
+export function registerWorktreePathOpener(opener: WorktreePathOpener): () => void {
+  worktreePathOpener = opener;
+  return () => {
+    if (worktreePathOpener === opener) worktreePathOpener = null;
   };
 }
 
@@ -136,11 +150,40 @@ function parseFilePathCandidate(raw: string): TerminalToken | null {
     return null;
   }
 
-  // Parse :line:col or :line suffix
-  const match = trimmed.match(/^(.*?):(\d+)(?::(\d+))?$/);
-  const pathPart = match ? match[1] : trimmed;
-  const line = match ? parseInt(match[2], 10) : undefined;
-  const col = match && match[3] ? parseInt(match[3], 10) : undefined;
+  // Parse location suffixes:
+  // 1. :line:col or :line
+  // 2. (line) or (line,col) or (line, col)
+  // 3. #Lline, #Lline-Lend, or #LlineCcol
+  let pathPart = trimmed;
+  let line: number | undefined;
+  let col: number | undefined;
+
+  const colonMatch = trimmed.match(/^(.*?):(\d+)(?::(\d+))?$/);
+  const parenMatch = !colonMatch
+    ? trimmed.match(/^(.*?)\((\d+)(?:,\s*(\d+))?\)$/)
+    : null;
+  const hashMatch =
+    !colonMatch && !parenMatch
+      ? trimmed.match(/^(.*?)#[Ll](\d+)(?:-[Ll]?\d+|[Cc](\d+))?$/)
+      : null;
+
+  if (colonMatch) {
+    pathPart = colonMatch[1];
+    line = parseInt(colonMatch[2], 10);
+    col = colonMatch[3] ? parseInt(colonMatch[3], 10) : undefined;
+  } else if (parenMatch) {
+    pathPart = parenMatch[1];
+    line = parseInt(parenMatch[2], 10);
+    col = parenMatch[3] ? parseInt(parenMatch[3], 10) : undefined;
+  } else if (hashMatch) {
+    pathPart = hashMatch[1];
+    line = parseInt(hashMatch[2], 10);
+    col = hashMatch[3] ? parseInt(hashMatch[3], 10) : undefined;
+  }
+
+  if (!pathPart || isIpAddress(pathPart) || isNumericOrVersion(pathPart)) {
+    return null;
+  }
 
   // Single file name without slash must have a known file extension or filename
   if (!pathPart.includes("/") && !pathPart.includes("\\")) {
@@ -200,7 +243,8 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   // 2. Check quoted paths: '...', "...", `...` (supporting spaces and quotes inside or outside :line)
-  const QUOTED_PATTERN = /['"`]([^\r\n'"`]+)['"`](?::\d+(?::\d+)?)?/g;
+  const QUOTED_PATTERN =
+    /['"`]([^\r\n'"`]+)['"`](?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/g;
   let quotedMatch: RegExpExecArray | null;
   while ((quotedMatch = QUOTED_PATTERN.exec(line)) !== null) {
     const full = quotedMatch[0];
@@ -231,7 +275,7 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
 
   // 4. Check unquoted paths with slashes (supports apostrophes and escaped spaces)
   const PATH_PATTERN =
-    /(?:[a-zA-Z]:[\\/]|\\\\|~[\\/]|\.\.?[\\/]|\/|[\p{L}\p{N}_-]+[\\/])(?:[\p{L}\p{N}\p{M}_.'-]|\\ |[\\/])+[\p{L}\p{N}\p{M}_.-]+(?::\d+(?::\d+)?)?/gu;
+    /(?:[a-zA-Z]:[\\/]|\\\\|~[\\/]|\.\.?[\\/]|\/|[\p{L}\p{N}_-]+[\\/])(?:[\p{L}\p{N}\p{M}_.'-]|\\ |[\\/])+[\p{L}\p{N}\p{M}_.-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
   let pathMatch: RegExpExecArray | null;
   while ((pathMatch = PATH_PATTERN.exec(line)) !== null) {
     const full = pathMatch[0];
@@ -245,7 +289,8 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   // 5. Fallback: single file names with known extensions (e.g. package.json:12)
-  const SINGLE_FILE_PATTERN = /[\p{L}\p{N}\p{M}_.'-]+\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?)?/gu;
+  const SINGLE_FILE_PATTERN =
+    /[\p{L}\p{N}\p{M}_.'-]+\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
   let fileMatch: RegExpExecArray | null;
   while ((fileMatch = SINGLE_FILE_PATTERN.exec(line)) !== null) {
     const full = fileMatch[0];
@@ -258,6 +303,32 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   return null;
+}
+
+export function filePathToFileUrl(path: string): string {
+  // Normalize Windows backslashes to forward slashes
+  const normalized = path.replace(/\\/g, "/");
+
+  // Check if it's a Windows drive path (e.g. C:/... or c:/...)
+  const windowsMatch = /^([a-zA-Z]:)(.*)$/.exec(normalized);
+  if (windowsMatch) {
+    const drive = windowsMatch[1];
+    const rest = windowsMatch[2];
+    const encodedSegments = rest
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    return `file:///${drive}${encodedSegments}`;
+  }
+
+  // POSIX path
+  // If it starts with "/", split("/") gives ["", "a b", "x.html"]
+  const encodedSegments = normalized
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  return `file://${encodedSegments.startsWith("/") ? "" : "/"}${encodedSegments}`;
 }
 
 export type OpenTerminalTokenOptions = {
@@ -295,18 +366,47 @@ export async function openTerminalToken(
         backendSessionId: options.sessionId ?? "default-session",
         workspaceId: null,
       };
-      window.dispatchEvent(new CustomEvent("ferryx:open-file-preview", {
-        detail: {
-          source,
-          request: {
-            path: token.path,
-            backendSessionId: source.backendSessionId,
-            line: token.line ?? null,
-            col: token.col ?? null,
+
+      let resolved;
+      try {
+        resolved = await resolveFilePreviewPath(token.path, source.backendSessionId);
+      } catch {
+        // If it throws, fall back to the current dispatch unchanged.
+      }
+
+      if (resolved && typeof resolved === "object" && typeof resolved.exists === "boolean") {
+        if (!resolved.exists) {
+          toast.error(`File not found: ${token.path}`);
+          return true;
+        }
+
+        if (resolved.isDirectory) {
+          if (worktreePathOpener?.(resolved.resolvedPath)) return true;
+          await revealPath(resolved.resolvedPath);
+          return true;
+        }
+
+        const ext = resolved.resolvedPath.slice(resolved.resolvedPath.lastIndexOf(".")).toLowerCase();
+        if ((ext === ".html" || ext === ".htm") && builtInBrowserOpener) {
+          await builtInBrowserOpener(filePathToFileUrl(resolved.resolvedPath));
+          return true;
+        }
+      }
+
+      if (fileOpenTargetFor(resolved?.resolvedPath ?? token.path) !== "external") {
+        window.dispatchEvent(new CustomEvent("ferryx:open-file-preview", {
+          detail: {
+            source,
+            request: {
+              path: token.path,
+              backendSessionId: source.backendSessionId,
+              line: token.line ?? null,
+              col: token.col ?? null,
+            },
           },
-        },
-      }));
-      return true;
+        }));
+        return true;
+      }
     }
 
     return invoke<boolean>("cmd_open_file_path", {
