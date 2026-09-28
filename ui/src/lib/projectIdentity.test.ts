@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutState } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
-import { hasValidProjectTarget, projectRootWorktree } from "./projectIdentity";
+import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./projectIdentity";
 import { serializeWorkspaceState, deserializeWorkspaceState } from "./sessionPersistence";
 import { resolveWorktreeOwnerId } from "./worktreeOwnership";
 import type { RegisteredProject } from "./types";
@@ -55,6 +55,44 @@ describe("project target identity", () => {
     expect(resolveWorktreeOwnerId(projectRootWorktree(remote), projects)).toBe(remote.workspaceId);
     expect(resolveWorktreeOwnerId(projectRootWorktree(otherHost), projects)).toBe(otherHost.workspaceId);
     expect(resolveWorktreeOwnerId(projectRootWorktree(local), projects, remote.workspaceId)).toBe(local.workspaceId);
+  });
+
+  it("keeps an SSH folder under a parent Git repository as its own project root", () => {
+    const project: RegisteredProject = {
+      workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
+      gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "maho-win" },
+    };
+    const parent = {
+      path: "C:/Users/sook", head: "0000000000000000000000000000000000000000",
+      branch: "master", bare: false, detached: false, locked: null, prunable: null,
+    };
+    const rows = sshProjectWorktrees(project, [parent]);
+
+    expect(rows).toEqual([expect.objectContaining({
+      workspaceId: project.workspaceId, path: project.repoRoot, branch: null,
+    })]);
+    expect(resolveWorktreeOwnerId(rows[0], [local, project], local.workspaceId)).toBe(project.workspaceId);
+  });
+
+  it("retains only worktrees within the SSH folder and tags every row with its host-qualified owner", () => {
+    const project: RegisteredProject = {
+      workspaceId: "ssh:repo", repoRoot: "C:\\work\\repo", gitRoot: "C:/work/repo",
+      target: { kind: "ssh", hostId: "maho-win" },
+    };
+    const row = {
+      path: "C:/work/repo", head: "abc", branch: "main",
+      bare: false, detached: false, locked: null, prunable: null,
+    };
+    const rows = sshProjectWorktrees(project, [
+      { ...row, path: "C:/work" }, row,
+      { ...row, path: "C:/work/repo/.orca-worktrees/wt-feature", branch: "orca/ssh-repo/feature" },
+      { ...row, path: "C:/work/repo-sibling" },
+    ]);
+
+    expect(rows.map(({ path, workspaceId }) => [path, workspaceId])).toEqual([
+      [project.repoRoot, project.workspaceId],
+      ["C:/work/repo/.orca-worktrees/wt-feature", project.workspaceId],
+    ]);
   });
 
   it("preserves remote metadata through session serialization, local merges, and restored root ownership", () => {

@@ -8,7 +8,7 @@ import {
 } from "../lib/tauri";
 import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
 import { switchDebug } from "../lib/switchDebug";
-import { projectRootWorktree as plainRootWorktree } from "../lib/projectIdentity";
+import { projectRootWorktree as plainRootWorktree, sshProjectWorktrees } from "../lib/projectIdentity";
 import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import { listPairedProjectWorktrees } from "./pairedProjectWorktrees";
 import { remoteHostStore } from "./remoteHostStore";
@@ -215,7 +215,9 @@ export function useInactiveProjectWorktrees(
         .listWorktrees(workspaceId)
         .then((listed) => {
           if (cancelled) return;
-          const worktrees = !target || listed.length > 0 || target.gitRoot !== null ? listed : [plainRootWorktree(target)];
+          const worktrees = target?.target?.kind === "ssh"
+            ? sshProjectWorktrees(target, listed)
+            : !target || listed.length > 0 || target.gitRoot !== null ? listed : [plainRootWorktree(target)];
           setWorktreesByProject((current) => ({ ...current, [workspaceId]: worktrees }));
         })
         .catch((error: unknown) => {
@@ -271,7 +273,7 @@ export function useInactiveProjectWorktrees(
             try {
               const listed = await services.listWorktrees(project.workspaceId);
               listedIds.push(project.workspaceId);
-              const worktrees = listed.length > 0 ? listed : [plainRootWorktree(project)];
+              const worktrees = sshProjectWorktrees(project, listed);
               return [project.workspaceId, worktrees] as const;
             } catch (error) {
               switchDebug("inactive-worktrees.error", { workspaceId: project.workspaceId, error: String(error) });

@@ -486,7 +486,7 @@ export function Sidebar({
                   ? hosts.find((h) => h.id === standaloneRemote.hostId)
                   : null;
                 const standaloneHostLabel = standaloneHost?.label ?? project.hostLabel ?? standaloneRemote?.hostId;
-                const standaloneRootWorktree = projectWorktrees[0] ?? projectRootWorktree(project, standaloneHostLabel);
+                const standaloneRootWorktree = projectRootWorktree(project, standaloneHostLabel);
                 const standaloneDisplayName = workspaceName(standaloneRootWorktree);
                 const isLocal =
                   !isRemoteWorkspaceId(project.workspaceId) &&
@@ -1013,8 +1013,11 @@ function groupWorktreesByProject(
           bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" } : {}) });
         } else {
           const row = bucket[existingIndex];
-          const newBranch = member.gitBranch !== undefined ? member.gitBranch : row.branch;
-          const newHead = member.gitHead !== undefined ? (member.gitHead ?? "") : row.head;
+          const remoteFolder = target.kind === "ssh" && member.gitRoot !== null && member.gitRoot !== undefined &&
+            member.gitRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() !==
+              member.repoRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+          const newBranch = remoteFolder ? null : member.gitBranch !== undefined ? member.gitBranch : row.branch;
+          const newHead = remoteFolder ? "" : member.gitHead !== undefined ? (member.gitHead ?? "") : row.head;
           const newDetached = Boolean(newHead && !newBranch);
           bucket[existingIndex] = {
             ...row,

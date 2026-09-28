@@ -69,6 +69,7 @@ import {
   getInitialProject,
   getSystemPermissionsStatus,
   isTauriRuntime,
+  listWorktrees,
   loadSession,
   onWorktreeChanged,
   onCloseTabMenu,
@@ -107,7 +108,7 @@ import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
-import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
+import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessionLifecycle";
@@ -957,6 +958,13 @@ function WorkspaceApp({
             const listed = await listPairedProjectWorktrees(activeProject);
             return listed ?? [];
           },
+          onWorktreeChanged,
+          isTauriRuntime,
+        }
+      : activeProject.target?.kind === "ssh"
+      ? {
+          ensureTerminalEvents,
+          listWorktrees: async (workspaceId: string) => sshProjectWorktrees(activeProject, await listWorktrees(workspaceId)),
           onWorktreeChanged,
           isTauriRuntime,
         }

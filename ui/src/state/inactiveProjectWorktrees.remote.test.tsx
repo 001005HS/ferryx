@@ -5,6 +5,27 @@ import type { RegisteredProject, WorktreeChangedPayload } from "../lib/types";
 
 afterEach(cleanup);
 
+it("uses the selected SSH folder when Git lists a parent worktree", async () => {
+  const project: RegisteredProject = {
+    workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
+    gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "maho-win" },
+  };
+  const services = {
+    registerProject: vi.fn(),
+    listWorktrees: vi.fn(async () => [{
+      path: "C:/Users/sook", head: "", branch: "master", bare: false,
+      detached: false, locked: null, prunable: null,
+    }]),
+  };
+  const hook = renderHook(() => useInactiveProjectWorktrees([project], "local", [], services));
+  await act(async () => {});
+
+  expect(hook.result.current[project.workspaceId]).toEqual([expect.objectContaining({
+    workspaceId: project.workspaceId, path: project.repoRoot, branch: null,
+  })]);
+  expect(services.registerProject).not.toHaveBeenCalled();
+});
+
 it("initially lists an inactive git-backed SSH project's worktrees", async () => {
   const project: RegisteredProject = {
     workspaceId: "ssh:build",

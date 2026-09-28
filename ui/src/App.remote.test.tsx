@@ -238,6 +238,31 @@ describe("App SSH project lifecycle", () => {
     }));
   });
 
+  it("opens an SSH folder inside a parent Git repository without selecting the local project", async () => {
+    const folder: RegisteredProject = {
+      workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
+      gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "build" },
+    };
+    seed([{ workspaceId: "project", repoRoot: "/Users/indo/code/project", gitRoot: null }, folder], "project");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+    native.registerRemoteProject.mockResolvedValue({
+      workspaceId: folder.workspaceId, repoRoot: folder.repoRoot, gitRoot: folder.gitRoot,
+      gitBranch: "master", hostId: "build", hostLabel: "Build machine",
+    });
+    native.listWorktrees.mockImplementation(async (workspaceId: string) => workspaceId === folder.workspaceId
+      ? [{ path: "C:/Users/sook", head: "", branch: "master", bare: false, detached: false, locked: null, prunable: null }]
+      : []);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand roblox-game-forge (build)" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "roblox-game-forge build" })); });
+
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(folder.workspaceId);
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: folder.workspaceId, cwd: folder.repoRoot,
+    }));
+    expect(native.spawnTerminal.mock.calls.some(([request]) => request.workspaceId === "project" && request.cwd === "C:/Users/sook")).toBe(false);
+  });
+
   it("handles the chooser's registered remote project through actual App registration", async () => {
     seed([]); hosts.current = [{ id: "build", label: "Build machine", hostname: "build.example" }];
     const registration = deferred<RegisteredRemoteProject>();

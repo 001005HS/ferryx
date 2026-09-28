@@ -7,6 +7,29 @@ import { groupProjects } from "../lib/projectGrouping";
 import type { RegisteredProject } from "../lib/types";
 vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }) }));
 afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); });
+it("opens the registered SSH folder rather than its parent Git worktree", () => {
+  const local: RegisteredProject = { workspaceId: "project", repoRoot: "/Users/indo/code/project", gitRoot: null };
+  const remote: RegisteredProject = {
+    workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
+    gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "ssh" },
+  };
+  const select = vi.fn();
+  localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+  render(<Sidebar
+    projects={[local, remote]} activeProjectId={local.workspaceId}
+    worktrees={[projectRootWorktree(local)]} agents={[]} activePath={local.repoRoot}
+    inactiveProjectWorktrees={{ [remote.workspaceId]: [{
+      path: "C:/Users/sook", head: "", branch: "master", bare: false,
+      detached: false, locked: null, prunable: null,
+    }] }}
+    onSelectWorktree={select}
+    onCreateWorktree={() => undefined}
+  />);
+  fireEvent.click(screen.getByRole("button", { name: "roblox-game-forge SSH machine" }));
+  expect(select).toHaveBeenCalledWith(expect.objectContaining({
+    workspaceId: remote.workspaceId, path: remote.repoRoot, branch: null,
+  }));
+});
 it("keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status", () => {
   const base = { repoRoot: "/srv/repo", gitRoot: "/srv/repo", gitCommonDir: "/srv/repo/.git", gitBranch: "main" };
   const local: RegisteredProject = { ...base, workspaceId: "repo" };
