@@ -73,19 +73,14 @@ const Toaster = ({ ...props }: ToasterProps) => {
         theme={theme}
         position="bottom-right"
         closeButton
-        offset={
-          hasToasts
-            ? { bottom: TOAST_EDGE_OFFSET_PX + TOAST_CLEAR_ROW_PX, right: TOAST_EDGE_OFFSET_PX }
-            : undefined
-        }
-        mobileOffset={
-          hasToasts
-            ? {
-                bottom: TOAST_EDGE_OFFSET_MOBILE_PX + TOAST_CLEAR_ROW_PX,
-                right: TOAST_EDGE_OFFSET_MOBILE_PX,
-              }
-            : undefined
-        }
+        offset={{
+          bottom: TOAST_EDGE_OFFSET_PX + TOAST_CLEAR_ROW_PX,
+          right: TOAST_EDGE_OFFSET_PX,
+        }}
+        mobileOffset={{
+          bottom: TOAST_EDGE_OFFSET_MOBILE_PX + TOAST_CLEAR_ROW_PX,
+          right: TOAST_EDGE_OFFSET_MOBILE_PX,
+        }}
         toastOptions={{ className: "font-sans text-sm", ...props.toastOptions }}
         className="toaster group"
         icons={{

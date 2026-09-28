@@ -62,6 +62,34 @@ describe("sonner Toaster and useToastTheme", () => {
     expect(container.querySelector("[data-testid='toast-clear-all']")).toBeNull();
   });
 
+  it("reserves bottom offset for the clear-all row from the very first render in which a toast is shown", async () => {
+    render(<Toaster />);
+
+    let firstOffset: string | null = null;
+    const observer = new MutationObserver(() => {
+      const ol = document.querySelector<HTMLElement>("[data-sonner-toaster]");
+      if (ol && firstOffset === null) {
+        firstOffset = ol.style.getPropertyValue("--offset-bottom");
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+    try {
+      act(() => {
+        toast("link actions ready");
+      });
+      await waitFor(() => expect(firstOffset).not.toBeNull());
+      expect(firstOffset).toBe("60px");
+    } finally {
+      observer.disconnect();
+    }
+  });
+
   it("shows the clear-all control while toasts are visible and dismisses all of them on click", async () => {
     const { container } = render(<Toaster />);
 
