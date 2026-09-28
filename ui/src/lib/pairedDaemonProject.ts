@@ -77,7 +77,6 @@ const requiredCapability = {
   createWorktree: "managedWorktreesV1", deleteWorktree: "managedWorktreesV1", sessions: "terminalCreateV1",
   session: "terminalCreateV1", createSession: "terminalCreateV1", closeSession: "terminalCreateV1", operation: "machineWorkspaceV1",
 };
-const knownCapabilities = new Set([...Object.values(requiredCapability), "terminalStreamV1", "machineEventsV1"]);
 function safeError(value: unknown): PairedOperationError {
   try {
     const native = object(value);
@@ -154,7 +153,8 @@ export function createPairedDaemonProjectAdapter(
     context: Object.freeze({ hostId, generation }),
     capabilities: () => execute({ kind: "capabilities" }, value => {
       const result = capabilities(value);
-      if (result.accessScope !== "machine" || result.permission !== "control" || result.capabilities.some(c => !knownCapabilities.has(c))) return invalid("UNSUPPORTED_CAPABILITY");
+      // Unknown capabilities are additive host features; admission is enforced per operation above.
+      if (result.accessScope !== "machine" || result.permission !== "control") return invalid("UNSUPPORTED_CAPABILITY");
       negotiated = result;
       return result;
     }),

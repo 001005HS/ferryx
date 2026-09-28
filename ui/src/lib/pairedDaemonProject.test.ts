@@ -86,16 +86,42 @@ describe("paired desktop operation boundary", () => {
     await expect(browser.capabilities()).rejects.toMatchObject({ code: "NATIVE_CONTEXT_REQUIRED" });
     expect(s.invoke).not.toHaveBeenCalled();
   });
-  it.each(["generation", "hostId", "kind", "machineId", "unknownCapability"])("rejects invalid capability %s", async field => {
+  it.each(["generation", "hostId", "kind", "machineId", "accessScope", "permission"])("rejects invalid capability %s", async field => {
     const s = setup();
     const invoke = vi.fn(async () => ({ hostId: field === "hostId" ? s.hosts[1].hostId : s.hosts[0].hostId,
       generation: field === "generation" ? "8" : "7", result: {
         kind: field === "kind" ? "projects" : "capabilities", data: { ...fixture("capabilities"),
           ...(field === "machineId" ? { machineId: "machine-b" } : {}),
-          ...(field === "unknownCapability" ? { capabilities: ["futureV9"] } : {}) } } }));
+          ...(field === "accessScope" ? { accessScope: "mirror" } : {}),
+          ...(field === "permission" ? { permission: "view" } : {}) } } }));
     const a = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke, isNative: () => true });
     await expect(a.capabilities()).rejects.toThrow();
     await expect(a.projects()).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it("admits the live daas capability set, including capabilities this client does not use", async () => {
+    const s = setup();
+    const live = ["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1",
+      "terminalCreateV1", "terminalStreamV1", "dagStreamingV1"];
+    const invoke = vi.fn(async (_command: "paired_host_operation", { request }: { request: PairedHostOperationRequest }) => ({
+      hostId: request.hostId, generation: request.generation, result: { kind: request.operation.kind,
+        data: request.operation.kind === "capabilities"
+          ? { ...fixture("capabilities"), daemonEpoch: "1790412145003", capabilities: live }
+          : fixture(request.operation.kind) } }));
+    const a = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke, isNative: () => true });
+    await expect(a.capabilities()).resolves.toMatchObject({ capabilities: live });
+    expect(await a.worktrees("project-a")).toEqual(fixture("worktrees"));
+    expect(await a.sessions("project-a")).toEqual(fixture("sessions"));
+    expect(invoke).toHaveBeenCalledTimes(3);
+  });
+  it("still denies an operation whose required capability is not advertised", async () => {
+    const s = setup();
+    const invoke = vi.fn(async () => ({ hostId: s.hosts[0].hostId, generation: "7", result: { kind: "capabilities",
+      data: { ...fixture("capabilities"), capabilities: ["machineWorkspaceV1", "dagStreamingV1"] } } }));
+    const a = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke, isNative: () => true });
+    await a.capabilities();
+    await expect(a.worktrees("project-a")).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+    await expect(a.createSession({ requestId, workspaceId: "project-a", worktree: null, cols: 80, rows: 24, cwdRelative: null, inheritFromSessionId: null, startup: { kind: "shell" } })).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
     expect(invoke).toHaveBeenCalledTimes(1);
   });
   it.each(["", "../project", "daemon:" + "a".repeat(64), "project/a", "project\0a"])("rejects invalid remote ID %j before dispatch", async id => {
