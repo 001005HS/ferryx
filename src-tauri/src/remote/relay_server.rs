@@ -2619,10 +2619,7 @@ async fn data_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    if !state.admit(peer_ip(peer), Instant::now()) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    upgrade_half(ws, state, session_id, HalfKind::Data)
+    upgrade_half(ws, state, session_id, HalfKind::Data, peer_ip(peer))
 }
 
 /// `GET /tunnel/client/:session_id` - the remote client's channel for a
@@ -2633,10 +2630,7 @@ async fn client_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    if !state.admit(peer_ip(peer), Instant::now()) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    upgrade_half(ws, state, session_id, HalfKind::Client)
+    upgrade_half(ws, state, session_id, HalfKind::Client, peer_ip(peer))
 }
 
 /// `GET /tunnel/opaque/:session_id` - the account client's channel for a session whose
@@ -2649,10 +2643,7 @@ async fn opaque_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    if !state.admit(peer_ip(peer), Instant::now()) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    upgrade_half(ws, state, session_id, HalfKind::Opaque)
+    upgrade_half(ws, state, session_id, HalfKind::Opaque, peer_ip(peer))
 }
 
 fn upgrade_half(
@@ -2660,8 +2651,21 @@ fn upgrade_half(
     state: RelayState,
     session_id: String,
     kind: HalfKind,
+    ip: IpAddr,
 ) -> Result<Response, StatusCode> {
-    let (generation, outcome) = state.reserve_half(&session_id, kind)?;
+    // Issued session capabilities are already bounded by the pending-session
+    // capacity, expiry, generation and duplicate-half guards. Do not charge
+    // their redemption to the shared proxy IP's unauthenticated attempt limit.
+    let (generation, outcome) = match state.reserve_half(&session_id, kind) {
+        Ok(reservation) => reservation,
+        Err(status) => {
+            return Err(if state.admit(ip, Instant::now()) {
+                status
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            });
+        }
+    };
     let guard = SessionGuard {
         armed: true,
         state,
@@ -3230,6 +3234,12 @@ mod tests {
             let state = test_state(vec![]);
             let (base, server) = spawn_test_relay_with_state(state.clone()).await;
             let (generation, mut notices, _grants) = state.register_control_channel("load".into());
+            // Exhaust the proxy IP's unauthenticated budget before redeeming
+            // valid sessions. Invalid guesses stay limited; issued sessions work.
+            for _ in 0..30 {
+                assert_socket_rejected(&base, "/tunnel/data/missing", StatusCode::NOT_FOUND).await;
+            }
+            assert_socket_rejected(&base, "/tunnel/data/missing", StatusCode::TOO_MANY_REQUESTS).await;
             for window in 0..2 {
                 for request in 0..30 {
                     let http = proxy_http(&state, "load", Some(generation), Method::GET,
@@ -3245,16 +3255,7 @@ mod tests {
                     assert_eq!(response.unwrap().status(), StatusCode::OK, "window={window} request={request}");
                     assert!(state.inner.pending_sessions.lock().is_empty());
                 }
-                let mut pending = Box::pin(state.open_session_channel("load", Some(generation)));
-                let notice = tokio::select! {
-                    result = &mut pending => panic!("unexpected completion: {:?}", result.err()),
-                    notice = timeout(Duration::from_secs(5), notices.recv()) => notice.unwrap().unwrap(),
-                };
-                assert_socket_rejected(&base, &format!("/tunnel/data/{}", notice.session_id), StatusCode::TOO_MANY_REQUESTS).await;
-                drop(pending);
                 assert!(state.inner.pending_sessions.lock().is_empty());
-                // Time itself is under test; inject the window boundary, never sleep.
-                state.inner.admission.lock().get_mut(&"127.0.0.1".parse::<IpAddr>().unwrap()).unwrap().started = Instant::now() - ADMISSION_WINDOW;
             }
             let mut waiting = Vec::new();
             for _ in 0..MAX_PENDING_SESSIONS {
@@ -3271,7 +3272,7 @@ mod tests {
             state.unregister_control_channel("load", generation);
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
-            println!("R4 admission: 60 completed data-channel HTTP requests; two exact 429 boundaries; injected-window recovery; 100 waiting requests/503; cancellation registry=0");
+            println!("R4 admission: 60 issued data-channel requests bypass exhausted guess budget; invalid guesses/429; 100 waiting requests/503; cancellation registry=0");
         })
         }));
         drop(runtime);
