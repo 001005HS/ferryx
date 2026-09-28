@@ -16,6 +16,10 @@ const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string
     title: "Default agent",
     description: "Pick the coding agent new agent tabs start with.",
   },
+  cli: {
+    title: "Command-line tool",
+    description: "Optionally install the ferryx command for your terminals.",
+  },
   project: {
     title: "First project",
     description: "Open a folder on this computer or pair another machine.",

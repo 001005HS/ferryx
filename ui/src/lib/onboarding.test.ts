@@ -207,6 +207,7 @@ describe("onboarding exports and constants", () => {
       "features",
       "permissions",
       "agents",
+      "cli",
       "project",
     ]);
     expect(OPEN_ONBOARDING_EVENT).toBe("ferryx:open-onboarding");
@@ -504,7 +505,7 @@ describe("isOnboardingStepSatisfied", () => {
     expect(isOnboardingStepSatisfied("permissions", missingCtx)).toBe(false);
   });
 
-  it("satisfies agents only when available agent exists and cli is satisfied", () => {
+  it("satisfies agents only when an available agent exists, regardless of the cli", () => {
     expect(
       isOnboardingStepSatisfied("agents", {
         permissions: null,
@@ -530,7 +531,7 @@ describe("isOnboardingStepSatisfied", () => {
         cli: cliNotInstalled,
         projectCount: 0,
       })
-    ).toBe(false);
+    ).toBe(true);
 
     expect(
       isOnboardingStepSatisfied("agents", {
@@ -559,6 +560,19 @@ describe("isOnboardingStepSatisfied", () => {
       })
     ).toBe(true);
   });
+
+  it("satisfies cli when installed, unsupported, or status is unknown", () => {
+    const baseCtx: OnboardingContext = {
+      permissions: null,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(isOnboardingStepSatisfied("cli", baseCtx)).toBe(true);
+    expect(isOnboardingStepSatisfied("cli", { ...baseCtx, cli: cliInstalled })).toBe(true);
+    expect(isOnboardingStepSatisfied("cli", { ...baseCtx, cli: cliUnsupported })).toBe(true);
+    expect(isOnboardingStepSatisfied("cli", { ...baseCtx, cli: cliNotInstalled })).toBe(false);
+  });
 });
 
 describe("pendingOnboardingSteps", () => {
@@ -579,6 +593,21 @@ describe("pendingOnboardingSteps", () => {
       "permissions",
       "project",
     ]);
+  });
+
+  it("lists cli as pending when the launcher is supported but not installed", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "features", "permissions", "agents", "project"],
+      dismissed: false,
+    };
+    const ctx: OnboardingContext = {
+      permissions: macosAllGrantedStatus,
+      agents: [{ name: "claude", available: true }],
+      cli: cliNotInstalled,
+      projectCount: 1,
+    };
+    expect(pendingOnboardingSteps(state, ctx)).toEqual(["cli"]);
   });
 
   it("returns empty when all steps completed or satisfied", () => {
@@ -659,8 +688,22 @@ describe("wizardSteps", () => {
       "features",
       "permissions",
       "agents",
+      "cli",
       "project",
     ]);
+  });
+
+  it("omits cli when the launcher is unsupported and keeps it when status is unknown", () => {
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: cliUnsupported,
+      projectCount: 0,
+    };
+    expect(wizardSteps(ctx)).not.toContain("cli");
+    expect(wizardSteps({ ...ctx, cli: null })).toContain("cli");
+    expect(wizardSteps({ ...ctx, cli: cliNotInstalled })).toContain("cli");
+    expect(wizardSteps({ ...ctx, cli: cliInstalled })).toContain("cli");
   });
 
   it("omits permissions on Linux where visible permissions are empty", () => {
@@ -674,6 +717,7 @@ describe("wizardSteps", () => {
       "intro",
       "features",
       "agents",
+      "cli",
       "project",
     ]);
   });
@@ -701,6 +745,7 @@ describe("satisfiedOnboardingSteps", () => {
       "intro",
       "features",
       "agents",
+      "cli",
       "project",
     ]);
   });
@@ -727,6 +772,7 @@ describe("satisfiedOnboardingSteps", () => {
       "features",
       "permissions",
       "agents",
+      "cli",
       "project",
     ]);
   });
@@ -740,10 +786,25 @@ describe("satisfiedOnboardingSteps", () => {
     const ctx: OnboardingContext = {
       permissions: macosPermissionsStatus,
       agents: null,
-      cli: null,
+      cli: cliNotInstalled,
       projectCount: 0,
     };
     expect(satisfiedOnboardingSteps(state, ctx)).toEqual([]);
+  });
+
+  it("reports only cli when its status is unknown and nothing else is done", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: [],
+      dismissed: false,
+    };
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli"]);
   });
 });
 
@@ -806,6 +867,42 @@ describe("shouldAutoOpenOnboarding", () => {
     };
     expect(shouldAutoOpenOnboarding(state, pendingCtx)).toBe(false);
   });
+
+  it("does not reopen for users who finished the flow before the cli step existed", () => {
+    const storage = createMockStorage({
+      [ONBOARDING_STORAGE_KEY]: JSON.stringify({
+        version: 1,
+        completedSteps: ["intro", "features", "permissions", "agents", "project"],
+        dismissed: false,
+      }),
+    });
+    const state = loadOnboardingState(storage);
+    expect(state.completedSteps).not.toContain("cli");
+
+    const satisfiedCtx: OnboardingContext = {
+      permissions: macosAllGrantedStatus,
+      agents: [{ name: "claude", available: true }],
+      cli: cliInstalled,
+      projectCount: 1,
+    };
+    expect(pendingOnboardingSteps(state, satisfiedCtx)).toEqual([]);
+    expect(shouldAutoOpenOnboarding(state, satisfiedCtx)).toBe(false);
+
+    const notInstalledCtx = { ...satisfiedCtx, cli: cliNotInstalled };
+    expect(pendingOnboardingSteps(state, notInstalledCtx)).toEqual(["cli"]);
+    expect(shouldAutoOpenOnboarding(state, notInstalledCtx)).toBe(false);
+  });
+
+  it("loads a persisted cli completion", () => {
+    const storage = createMockStorage({
+      [ONBOARDING_STORAGE_KEY]: JSON.stringify({
+        version: 1,
+        completedSteps: ["agents", "cli"],
+        dismissed: false,
+      }),
+    });
+    expect(loadOnboardingState(storage).completedSteps).toEqual(["agents", "cli"]);
+  });
 });
 
 describe("features step", () => {
@@ -834,6 +931,7 @@ describe("features step", () => {
       "intro",
       "permissions",
       "agents",
+      "cli",
       "project",
     ]);
 

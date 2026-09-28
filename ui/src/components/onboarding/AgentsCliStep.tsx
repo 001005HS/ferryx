@@ -14,24 +14,14 @@ import {
   type CustomAgentValidationError,
   type ResolvedAgent,
 } from "../../lib/agentsSettings";
-import { getCliLauncherStatus, installCliLauncher } from "../../lib/tauri";
-import type { CliLauncherStatus } from "../../lib/types";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import {
-  WizardRow,
-  WizardRowList,
-  WizardStatus,
-} from "./WizardPrimitives";
+import { WizardRow, WizardRowList } from "./WizardPrimitives";
 
 export type AgentsCliStepProps = {
   agents: ReadonlyArray<ResolvedAgent>;
-  loadCliStatus?: () => Promise<CliLauncherStatus>;
-  installCli?: () => Promise<CliLauncherStatus>;
 };
-
-const INSTALL_FAILED_MESSAGE = "Installing the Ferryx CLI failed.";
 
 const VALIDATION_MESSAGES: Record<CustomAgentValidationError, string> = {
   "empty-name": "Enter a name for the agent.",
@@ -82,9 +72,6 @@ function AgentBrandIcon({ name }: { name: string }): JSX.Element {
 export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
   const { agents } = props;
 
-  const [cliStatus, setCliStatus] = useState<CliLauncherStatus | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
   const [defaultAgentId, setDefaultAgentId] = useState<string | null>(
     () => loadAgentSettings().defaultAgentId,
   );
@@ -95,14 +82,11 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
   const [draftError, setDraftError] = useState<string | null>(null);
   const formId = useId();
 
-  const mountedRef = useRef(true);
-  const loadCliStatusRef = useRef(props.loadCliStatus ?? getCliLauncherStatus);
   const groupRef = useRef<HTMLDivElement>(null);
   const draftNameRef = useRef<HTMLInputElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   // Set when the draft form closes so focus returns to the add button instead of <body>.
   const restoreAddFocusRef = useRef(false);
-  const installCli = props.installCli ?? installCliLauncher;
 
   const availableAgents = agents.filter((agent) => agent.available);
   const unavailableNames = agents
@@ -128,25 +112,6 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
   const focusIndex = selectedIndex >= 0 ? selectedIndex : 0;
 
   useEffect(() => {
-    mountedRef.current = true;
-    let cancelled = false;
-
-    loadCliStatusRef.current().then(
-      (status) => {
-        if (!cancelled) setCliStatus(status);
-      },
-      () => {
-        if (!cancelled) setCliStatus(null);
-      },
-    );
-
-    return () => {
-      cancelled = true;
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
     if (draftOpen) {
       draftNameRef.current?.focus();
     } else if (restoreAddFocusRef.current) {
@@ -154,23 +119,6 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
       addButtonRef.current?.focus();
     }
   }, [draftOpen]);
-
-  async function handleInstall(): Promise<void> {
-    setInstalling(true);
-    setInstallError(null);
-    try {
-      const next = await installCli();
-      if (mountedRef.current) setCliStatus(next);
-    } catch (err) {
-      if (mountedRef.current) {
-        setInstallError(
-          err instanceof Error ? err.message : INSTALL_FAILED_MESSAGE,
-        );
-      }
-    } finally {
-      if (mountedRef.current) setInstalling(false);
-    }
-  }
 
   function selectOption(value: string | null): void {
     setDefaultAgentId(value);
@@ -232,7 +180,6 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
     cancelDraft();
   }
 
-  const cli = cliStatus;
   const draftNameId = `${formId}-name`;
   const draftCommandId = `${formId}-command`;
   const draftArgsId = `${formId}-args`;
@@ -438,52 +385,6 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
           </Button>
         )}
       </div>
-
-      {cli && cli.isSupported ? (
-        <div className="mt-6">
-          <div className="text-[11px] font-medium text-muted-foreground mb-2">
-            Command-line launcher
-          </div>
-
-          <WizardRowList>
-            <WizardRow
-              title="Ferryx CLI"
-              description={
-                cli.isInstalled
-                  ? `Installed at ${cli.launcherPath}`
-                  : `Ferryx does not change your shell profile. Make sure the folder that contains ${cli.launcherPath} is on your PATH, then open a new terminal.`
-              }
-              status={
-                cli.isInstalled ? (
-                  <WizardStatus tone="success" label="Installed" />
-                ) : (
-                  <WizardStatus tone="neutral" label="Not installed" />
-                )
-              }
-              action={
-                !cli.isInstalled ? (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-7 text-[11px]"
-                    data-testid="onboarding-install-cli"
-                    disabled={installing}
-                    onClick={() => void handleInstall()}
-                  >
-                    {installing ? "Installing…" : "Install CLI"}
-                  </Button>
-                ) : null
-              }
-            />
-          </WizardRowList>
-
-          {installError ? (
-            <p role="alert" className="mt-2 text-[12px] text-status-warning">
-              {installError}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }

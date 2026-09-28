@@ -8,6 +8,7 @@ import type { CliLauncherStatus, SystemPermissionsStatus } from "../../lib/types
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
 import { AgentsCliStep } from "./AgentsCliStep";
+import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
@@ -35,7 +36,8 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
   intro: "Welcome",
   features: "Features",
   permissions: "Permissions",
-  agents: "Agents & CLI",
+  agents: "Agents",
+  cli: "Command line",
   project: "First project",
 };
 
@@ -44,6 +46,7 @@ const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   features: "What Ferryx does",
   permissions: "Grant system access",
   agents: "Choose your default agent",
+  cli: "Install the command-line tool",
   project: "Open your first project",
 };
 
@@ -153,6 +156,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
           : "Your operating system controls whether Ferryx can show notifications.";
       case "agents":
         return "New agent tabs start with this one. You can switch per tab, or change it later in Settings > Agents.";
+      case "cli":
+        return "Optional. Use ferryx from any terminal. You can also install it later in Settings > General.";
       case "project":
         return "Start with a folder on this computer, or pair another machine.";
     }
@@ -172,13 +177,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
           />
         );
       case "agents":
-        return (
-          <AgentsCliStep
-            agents={agents}
-            loadCliStatus={loadCliStatus}
-            installCli={installCli}
-          />
-        );
+        return <AgentsCliStep agents={agents} />;
+      case "cli":
+        return <CliStep loadCliStatus={loadCliStatus} installCli={installCli} />;
       case "project":
         return (
           <FirstProjectStep

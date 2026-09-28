@@ -46,6 +46,8 @@ const stepParam = parseInt(params.get("step") ?? "0", 10);
 const initialStepIndex = Number.isNaN(stepParam) ? 0 : stepParam;
 const codeParam = params.get("code") ?? "DAEMON_UNAVAILABLE";
 const grantedParam = params.get("granted") === "1";
+// ?cli=installed | unsupported; anything else is the not-installed fixture.
+const cliParam = params.get("cli");
 const doneParam: OnboardingStepId[] = (params.get("done") ?? "")
   .split(",")
   .map((step) => step.trim())
@@ -176,7 +178,7 @@ const agentsFixture: ReadonlyArray<ResolvedAgent> = [
   },
 ];
 
-const cliFixture: CliLauncherStatus = {
+const cliBaseFixture: CliLauncherStatus = {
   launcherPath: "/Users/me/.local/bin/ferryx",
   isInstalled: false,
   isSymlink: false,
@@ -184,6 +186,13 @@ const cliFixture: CliLauncherStatus = {
   activeExecutable: null,
   isSupported: true,
 };
+
+const cliFixture: CliLauncherStatus =
+  cliParam === "installed"
+    ? { ...cliBaseFixture, isInstalled: true }
+    : cliParam === "unsupported"
+      ? { ...cliBaseFixture, isSupported: false }
+      : cliBaseFixture;
 
 function OnboardingQaApp(): JSX.Element {
   const permissionsFixture = React.useMemo(() => {
@@ -195,7 +204,10 @@ function OnboardingQaApp(): JSX.Element {
     const context: OnboardingContext = {
       permissions: permissionsFixture,
       agents: agentsFixture,
-      cli: cliFixture,
+      // view=cli keeps the step even when unsupported (status unknown to the
+      // wizard) so the step's own unsupported line can be inspected; any other
+      // view uses the real fixture, where an unsupported launcher drops the step.
+      cli: viewParam === "cli" ? null : cliFixture,
       projectCount: 0,
     };
     const computedSteps = wizardSteps(context);
@@ -245,8 +257,15 @@ function OnboardingQaApp(): JSX.Element {
   }
 
   const agentsView = viewParam === "agents" || viewParam === "agents-light";
+  const landingStep: OnboardingStepId | null = agentsView
+    ? "agents"
+    : viewParam === "cli"
+      ? "cli"
+      : null;
   const startIndex =
-    agentsView && !params.has("step") ? steps.indexOf("agents") : initialStepIndex;
+    landingStep && !params.has("step")
+      ? Math.max(0, steps.indexOf(landingStep))
+      : initialStepIndex;
 
   if (steps.length === 0) {
     return (

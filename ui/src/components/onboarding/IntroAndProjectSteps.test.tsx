@@ -11,7 +11,7 @@ describe("IntroStep", () => {
 
   it("lists one overview row per remaining wizard step, in wizard order", () => {
     render(
-      <IntroStep steps={["intro", "features", "permissions", "agents", "project"]} />
+      <IntroStep steps={["intro", "features", "permissions", "agents", "cli", "project"]} />
     );
 
     const rows = screen.getAllByTestId(/^onboarding-intro-/);
@@ -19,8 +19,15 @@ describe("IntroStep", () => {
       "onboarding-intro-features",
       "onboarding-intro-permissions",
       "onboarding-intro-agents",
+      "onboarding-intro-cli",
       "onboarding-intro-project",
     ]);
+  });
+
+  it("omits the command-line row when cli is not part of the wizard", () => {
+    render(<IntroStep steps={["intro", "features", "agents", "project"]} />);
+
+    expect(screen.queryByTestId("onboarding-intro-cli")).toBeNull();
   });
 
   it("omits the system access row when permissions are not part of the wizard", () => {

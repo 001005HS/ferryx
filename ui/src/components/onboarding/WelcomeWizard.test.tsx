@@ -14,6 +14,10 @@ vi.mock("./AgentsCliStep", () => ({
   AgentsCliStep: () => <div data-testid="mock-agents-step" />,
 }));
 
+vi.mock("./CliStep", () => ({
+  CliStep: () => <div data-testid="mock-cli-step" />,
+}));
+
 const mockAgents: readonly ResolvedAgent[] = [
   {
     name: "claude",
@@ -261,34 +265,63 @@ describe("WelcomeWizard", () => {
     expect(screen.getByTestId("mock-agents-step")).toBeDefined();
   });
 
-  it("walks the five-step order with Continue and returns with Back", () => {
+  it("walks the six-step order with Continue and returns with Back", () => {
     const props = createDefaultProps({
-      steps: ["intro", "features", "permissions", "agents", "project"],
+      steps: ["intro", "features", "permissions", "agents", "cli", "project"],
     });
     render(<WelcomeWizard {...props} />);
 
     const heading = () => screen.getByRole("heading", { level: 2 }).textContent;
-    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 5");
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 6");
     expect(heading()).toBe("Set up Ferryx");
 
     const expected = [
       "What Ferryx does",
       "Grant system access",
       "Choose your default agent",
+      "Install the command-line tool",
       "Open your first project",
     ];
     expected.forEach((title, index) => {
       fireEvent.click(screen.getByTestId("onboarding-next"));
       expect(heading()).toBe(title);
       expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe(
-        `Step ${index + 2} of 5`,
+        `Step ${index + 2} of 6`,
       );
     });
     expect(screen.getByTestId("onboarding-finish")).toBeDefined();
 
     fireEvent.click(screen.getByTestId("onboarding-back"));
-    expect(heading()).toBe("Choose your default agent");
-    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 4 of 5");
+    expect(heading()).toBe("Install the command-line tool");
+    expect(screen.getByTestId("mock-cli-step")).toBeDefined();
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 5 of 6");
+  });
+
+  it("labels the agents and command-line steps separately in the rail", () => {
+    const props = createDefaultProps({
+      steps: ["intro", "features", "permissions", "agents", "cli", "project"],
+    });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByTestId("onboarding-rail-agents").textContent).toContain("Agents");
+    expect(screen.getByTestId("onboarding-rail-agents").textContent).not.toContain("CLI");
+    expect(screen.getByTestId("onboarding-rail-cli").textContent).toContain("Command line");
+  });
+
+  it("lets Continue leave the optional cli step", () => {
+    const onStepCompleted = vi.fn();
+    const props = createDefaultProps({
+      steps: ["intro", "agents", "cli", "project"],
+      initialStepIndex: 2,
+      onStepCompleted,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByTestId("mock-cli-step")).toBeDefined();
+    fireEvent.click(screen.getByTestId("onboarding-next"));
+
+    expect(onStepCompleted).toHaveBeenCalledWith("cli");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Open your first project");
   });
 
   it("marks already satisfied steps done in the rail but never the current step", () => {

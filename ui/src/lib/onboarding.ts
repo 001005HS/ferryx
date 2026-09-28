@@ -9,6 +9,7 @@ export type OnboardingStepId =
   | "features"
   | "permissions"
   | "agents"
+  | "cli"
   | "project";
 
 export const ONBOARDING_VERSION = 1;
@@ -18,6 +19,7 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "features",
   "permissions",
   "agents",
+  "cli",
   "project",
 ];
 
@@ -227,13 +229,10 @@ export function isOnboardingStepSatisfied(
       if (keys.length === 0) return true;
       return keys.every((key) => ctx.permissions?.[key]?.granted === true);
     }
-    case "agents": {
-      const hasAvailableAgent =
-        ctx.agents !== null && ctx.agents.some((a) => a.available);
-      const cliSatisfied =
-        ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
-      return hasAvailableAgent && cliSatisfied;
-    }
+    case "agents":
+      return ctx.agents !== null && ctx.agents.some((a) => a.available);
+    case "cli":
+      return ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
     case "features":
       // Informational step: only completedSteps marks it as done.
       return false;
@@ -246,6 +245,10 @@ export function wizardSteps(ctx: OnboardingContext): OnboardingStepId[] {
   const visible = visiblePermissionKeys(ctx.permissions);
   return ONBOARDING_STEP_ORDER.filter((step) => {
     if (step === "permissions" && visible.length === 0) {
+      return false;
+    }
+    // Unknown CLI status (null) keeps the step so it can load its own status.
+    if (step === "cli" && ctx.cli !== null && !ctx.cli.isSupported) {
       return false;
     }
     return true;
@@ -296,8 +299,11 @@ export function shouldAutoOpenOnboarding(
     !state.dismissed &&
     ctx.permissions !== null &&
     ctx.permissions.platform !== "web" &&
-    // "features" is informational and never auto-satisfied, so it must never be
-    // the sole reason the wizard pops back open after an upgrade.
-    pendingOnboardingSteps(state, ctx).some((step) => step !== "features")
+    // "features" is informational and never auto-satisfied, and "cli" is optional
+    // (users who finished the flow before it existed have no "cli" entry), so
+    // neither may be the sole reason the wizard pops back open after an upgrade.
+    pendingOnboardingSteps(state, ctx).some(
+      (step) => step !== "features" && step !== "cli"
+    )
   );
 }
