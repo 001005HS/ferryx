@@ -779,12 +779,19 @@ struct RemoteSessionSlot {
     closed: std::sync::atomic::AtomicBool,
 }
 
+struct LocalSessionSlot {
+    connection: Mutex<Option<ActiveConnection>>,
+    active_refs: std::sync::atomic::AtomicUsize,
+    closed: std::sync::atomic::AtomicBool,
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
     remote_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<RemoteSessionSlot>>>>,
+    local_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<LocalSessionSlot>>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
     spawn_lock: Arc<Mutex<()>>,
@@ -803,6 +810,7 @@ impl DaemonClient {
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -815,6 +823,7 @@ impl DaemonClient {
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -1219,6 +1228,7 @@ impl DaemonClient {
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::clone(&self.remote_connections),
+            local_connections: Arc::clone(&self.local_connections),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::clone(&self.upgrade_requested),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -1821,6 +1831,40 @@ impl DaemonClient {
         }
     }
 
+    fn local_connection_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<LocalSessionSlot>, IpcError> {
+        let mut map = self.local_connections.lock();
+        if let Some(slot) = map.get(session_id) {
+            if slot.closed.load(Ordering::SeqCst) {
+                return Err(IpcError::new(
+                    IpcErrorCode::SessionNotFound,
+                    format!("Session {session_id} is closed"),
+                ));
+            }
+            slot.active_refs.fetch_add(1, Ordering::SeqCst);
+            return Ok(Arc::clone(slot));
+        }
+        let slot = Arc::new(LocalSessionSlot {
+            connection: Mutex::new(None),
+            active_refs: std::sync::atomic::AtomicUsize::new(1),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        map.insert(session_id.to_string(), Arc::clone(&slot));
+        Ok(slot)
+    }
+
+    pub fn remove_local_connection_for_session(&self, session_id: &str) {
+        let mut map = self.local_connections.lock();
+        if let Some(slot) = map.get(session_id) {
+            slot.closed.store(true, Ordering::SeqCst);
+            if slot.active_refs.load(Ordering::SeqCst) == 0 {
+                map.remove(session_id);
+            }
+        }
+    }
+
     async fn send_interactive_request(
         &self,
         req: DaemonRequest,
@@ -1915,6 +1959,66 @@ impl DaemonClient {
                 Err(error) => Err(error.into_ipc_error(&req, true)),
             };
         }
+
+        if let DaemonRequest::Write { ref session_id, .. }
+        | DaemonRequest::Resize { ref session_id, .. } = req
+        {
+            // Per-session connection slots for local Write/Resize isolate
+            // cross-session head-of-line blocking (e.g. one stalled local session
+            // does not hold a shared mutex for up to 15s and block other sessions).
+            // Note explicitly: this isolation fixes cross-session HOL only; the
+            // affected session may still overflow or stall during its own 15s timeout.
+            // Mutating operations maintain strict at-most-once delivery without retries.
+            let session_slot = self.local_connection_for_session(session_id)?;
+
+            struct LocalActiveRefGuard<'a> {
+                client: &'a DaemonClient,
+                session_id: String,
+                slot: Arc<LocalSessionSlot>,
+            }
+            impl<'a> Drop for LocalActiveRefGuard<'a> {
+                fn drop(&mut self) {
+                    let prev = self.slot.active_refs.fetch_sub(1, Ordering::SeqCst);
+                    if prev == 1 && self.slot.closed.load(Ordering::SeqCst) {
+                        let mut map = self.client.local_connections.lock();
+                        if let Some(cur) = map.get(&self.session_id) {
+                            if Arc::ptr_eq(cur, &self.slot) {
+                                map.remove(&self.session_id);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ref_guard = LocalActiveRefGuard {
+                client: self,
+                session_id: session_id.clone(),
+                slot: Arc::clone(&session_slot),
+            };
+
+            let mut slot = session_slot.connection.lock().await;
+            if session_slot.closed.load(Ordering::SeqCst) {
+                return Err(IpcError::new(
+                    IpcErrorCode::SessionNotFound,
+                    format!("Session {session_id} is closed"),
+                ));
+            }
+
+            let mut conn = slot.take();
+            if conn.is_none() {
+                conn = Some(self.connect_and_handshake().await?);
+            }
+            let mut active = conn.expect("connected");
+            let timeout = std::time::Duration::from_secs(15);
+            let res = active.request_with_timeout(&req, timeout).await;
+            return match res {
+                Ok(reply) => {
+                    *slot = Some(active);
+                    Ok(reply)
+                }
+                Err(error) => Err(error.into_ipc_error(&req, true)),
+            };
+        }
+
         self.send_on_connection(&self.interactive_connection, req)
             .await
     }
@@ -2899,6 +3003,7 @@ impl DaemonClient {
         }
 
         self.remove_remote_connection_for_session(session_id);
+        self.remove_local_connection_for_session(session_id);
 
         let resp = self
             .send_request(DaemonRequest::Close {
@@ -2942,6 +3047,7 @@ impl DaemonClient {
 
     pub async fn detach_terminal(&self, session_id: &str) -> Result<(), IpcError> {
         self.remove_remote_connection_for_session(session_id);
+        self.remove_local_connection_for_session(session_id);
         if !session_id.starts_with("daemon-session:") {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidArgument,
@@ -3337,6 +3443,182 @@ mod tests {
         assert!(matches!(
             first.await.unwrap().unwrap(),
             DaemonResponse::Pong
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_input_socket_sessions_do_not_block_each_other() {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("isolated-local-input.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut entered = Some(entered_tx);
+            let mut release = Some(release_rx);
+            let mut peers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let entered = if index == 0 { entered.take() } else { None };
+                let release = if index == 0 { release.take() } else { None };
+                peers.spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let handshake = DaemonResponse::HandshakeOk {
+                        version: DAEMON_PROTOCOL_VERSION,
+                        pid: std::process::id(),
+                        epoch: 1,
+                        binary_path: None,
+                        binary_mtime_ms: None,
+                        daemon_version: None,
+                    };
+                    write
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    if let Some(entered) = entered {
+                        assert!(matches!(request, DaemonRequest::Write { .. }));
+                        entered.send(()).unwrap();
+                    }
+                    if let Some(release) = release {
+                        release.await.unwrap();
+                        write.write_all(b"{\"type\":\"writeOk\"}\n").await.unwrap();
+                    } else {
+                        // Session B arrives while session A is stalled
+                        assert!(matches!(request, DaemonRequest::Write { .. }));
+                        write.write_all(b"{\"type\":\"writeOk\"}\n").await.unwrap();
+                    }
+                });
+            }
+            while let Some(peer) = peers.join_next().await {
+                peer.unwrap();
+            }
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        let first_client = client.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .send_interactive_request(DaemonRequest::Write {
+                    session_id: "local-first".into(),
+                    data: b"hello".to_vec(),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Session A is stalled in server waiting for release_rx.
+        // Session B sends Write on its own per-session slot and must complete without blocking.
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send_interactive_request(DaemonRequest::Write {
+                session_id: "local-second".into(),
+                data: b"world".to_vec(),
+            }),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        assert!(matches!(second.unwrap().unwrap(), DaemonResponse::WriteOk));
+        assert!(matches!(
+            first.await.unwrap().unwrap(),
+            DaemonResponse::WriteOk
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_resize_session_does_not_block_on_stalled_write_session() {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("isolated-local-resize.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut entered = Some(entered_tx);
+            let mut release = Some(release_rx);
+            let mut peers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let entered = if index == 0 { entered.take() } else { None };
+                let release = if index == 0 { release.take() } else { None };
+                peers.spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let handshake = DaemonResponse::HandshakeOk {
+                        version: DAEMON_PROTOCOL_VERSION,
+                        pid: std::process::id(),
+                        epoch: 1,
+                        binary_path: None,
+                        binary_mtime_ms: None,
+                        daemon_version: None,
+                    };
+                    write
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    if let Some(entered) = entered {
+                        assert!(matches!(request, DaemonRequest::Write { .. }));
+                        entered.send(()).unwrap();
+                    }
+                    if let Some(release) = release {
+                        release.await.unwrap();
+                        write.write_all(b"{\"type\":\"writeOk\"}\n").await.unwrap();
+                    } else {
+                        // Session B arrives with Resize while session A is stalled on Write
+                        assert!(matches!(request, DaemonRequest::Resize { .. }));
+                        write.write_all(b"{\"type\":\"resizeOk\"}\n").await.unwrap();
+                    }
+                });
+            }
+            while let Some(peer) = peers.join_next().await {
+                peer.unwrap();
+            }
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        let first_client = client.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .send_interactive_request(DaemonRequest::Write {
+                    session_id: "local-first".into(),
+                    data: b"hello".to_vec(),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Session A is stalled. Session B sends Resize and must succeed immediately.
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send_interactive_request(DaemonRequest::Resize {
+                session_id: "local-second".into(),
+                cols: 80,
+                rows: 24,
+            }),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        assert!(matches!(second.unwrap().unwrap(), DaemonResponse::ResizeOk));
+        assert!(matches!(
+            first.await.unwrap().unwrap(),
+            DaemonResponse::WriteOk
         ));
         server.await.unwrap();
     }
