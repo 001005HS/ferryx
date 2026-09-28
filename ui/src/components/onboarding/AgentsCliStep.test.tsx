@@ -1,7 +1,9 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ResolvedAgent } from "../../lib/agentsSettings";
+import { resolveAgentLogoByCommandName } from "../../lib/agentIcon";
+import { loadAgentSettings, type ResolvedAgent } from "../../lib/agentsSettings";
 import type { CliLauncherStatus } from "../../lib/types";
 import { AgentsCliStep, type AgentsCliStepProps } from "./AgentsCliStep";
 
@@ -15,8 +17,9 @@ vi.mock("../../lib/tauri", () => ({
   installCliLauncher: () => mockTauri.installCliLauncher(),
 }));
 
-const EMPTY_AGENT_COPY =
-  "No coding agents were found on your PATH. Install one (for example Claude Code or Codex), or register a custom command.";
+const EMPTY_TITLE = "No coding agents found on your PATH.";
+const EMPTY_DESCRIPTION =
+  "Install one (for example Claude Code or Codex), or add a custom command in Settings > Agents.";
 
 function agent(name: string, available: boolean): ResolvedAgent {
   return { name, available, enabled: true, command: name, args: "", custom: false };
@@ -60,30 +63,106 @@ describe("AgentsCliStep", () => {
   beforeEach(() => {
     mockTauri.getCliLauncherStatus.mockReset();
     mockTauri.installCliLauncher.mockReset();
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
   });
 
-  it("renders the heading and found / not-found agent rows", () => {
+  it("renders a default-agent radiogroup with Auto plus only the installed agents", () => {
     renderStep({
       agents: [agent("claude", true), agent("codex", false)],
       loadCliStatus: () => Promise.resolve(installedStatus),
     });
 
-    expect(screen.getByText("Coding agents and CLI")).toBeDefined();
-    expect(screen.getByTestId("onboarding-agent-claude")).toBeDefined();
-    expect(screen.getByTestId("onboarding-agent-codex")).toBeDefined();
-    expect(screen.getByText("Found")).toBeDefined();
-    expect(screen.getByText("Not found")).toBeDefined();
+    const group = screen.getByRole("radiogroup", { name: "Default agent" });
+    const options = within(group).getAllByRole("radio");
+
+    expect(options).toHaveLength(2);
+    expect(screen.getByText("Auto")).toBeDefined();
+    expect(screen.getByText("Use the first available agent.")).toBeDefined();
+    expect(options[0]).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("onboarding-agent-claude")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(screen.getByTestId("onboarding-agent-claude")).toHaveTextContent("claude");
+    expect(screen.queryByTestId("onboarding-agent-codex")).toBeNull();
   });
 
-  it("shows the empty-agent copy and opens agent settings", () => {
+  it("renders the brand icon for a known agent and no image for an unknown one", () => {
+    renderStep({
+      agents: [agent("claude", true), agent("mystery", true)],
+      loadCliStatus: () => Promise.resolve(installedStatus),
+    });
+
+    const claudeOption = screen.getByTestId("onboarding-agent-claude");
+    const claudeImg = claudeOption.querySelector("img");
+    expect(claudeImg).not.toBeNull();
+    expect(claudeImg?.getAttribute("src")).toBe(resolveAgentLogoByCommandName("claude"));
+
+    const unknownOption = screen.getByTestId("onboarding-agent-mystery");
+    expect(unknownOption.querySelector("img")).toBeNull();
+    expect(unknownOption.querySelector("svg")).not.toBeNull();
+  });
+
+  it("persists the chosen default agent immediately", () => {
+    renderStep({
+      agents: [agent("claude", true)],
+      loadCliStatus: () => Promise.resolve(installedStatus),
+    });
+
+    expect(loadAgentSettings().defaultAgentId).toBeNull();
+
+    fireEvent.click(screen.getByTestId("onboarding-agent-claude"));
+    expect(loadAgentSettings().defaultAgentId).toBe("claude");
+    expect(screen.getByTestId("onboarding-agent-claude")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    fireEvent.click(screen.getAllByRole("radio")[0]);
+    expect(loadAgentSettings().defaultAgentId).toBeNull();
+    expect(screen.getAllByRole("radio")[0]).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByText(/^Not installed:/)).toBeNull();
+  });
+
+  it("moves the selection with arrow keys and keeps the roving tabindex", () => {
+    renderStep({
+      agents: [agent("claude", true)],
+      loadCliStatus: () => Promise.resolve(installedStatus),
+    });
+
+    const autoOption = screen.getAllByRole("radio")[0];
+    expect(autoOption).toHaveAttribute("tabindex", "0");
+
+    fireEvent.keyDown(autoOption, { key: "ArrowDown" });
+
+    const claudeOption = screen.getByTestId("onboarding-agent-claude");
+    expect(claudeOption).toHaveAttribute("aria-checked", "true");
+    expect(claudeOption).toHaveAttribute("tabindex", "0");
+    expect(autoOption).toHaveAttribute("tabindex", "-1");
+    expect(loadAgentSettings().defaultAgentId).toBe("claude");
+  });
+
+  it("lists unavailable agents in one quiet line", () => {
+    renderStep({
+      agents: [agent("claude", true), agent("gjc", false), agent("aider", false)],
+      loadCliStatus: () => Promise.resolve(installedStatus),
+    });
+
+    expect(screen.getByText("Not installed: gjc, aider")).toBeDefined();
+  });
+
+  it("shows the empty message and opens agent settings when nothing is installed", () => {
     const onOpenAgentSettings = vi.fn();
     renderStep({ agents: [agent("codex", false)], onOpenAgentSettings });
 
-    expect(screen.getByText(EMPTY_AGENT_COPY)).toBeDefined();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.getByText(EMPTY_TITLE)).toBeDefined();
+    expect(screen.getByText(EMPTY_DESCRIPTION)).toBeDefined();
 
     fireEvent.click(screen.getByTestId("onboarding-open-agent-settings"));
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
@@ -133,7 +212,7 @@ describe("AgentsCliStep", () => {
 
     expect(screen.queryByText("Ferryx CLI")).toBeNull();
     expect(screen.queryByTestId("onboarding-install-cli")).toBeNull();
-    expect(screen.getByText("Coding agents and CLI")).toBeDefined();
+    expect(screen.getByRole("radiogroup", { name: "Default agent" })).toBeDefined();
   });
 
   it("hides the CLI card when the launcher is unsupported", async () => {
@@ -172,7 +251,7 @@ describe("AgentsCliStep", () => {
 
     expect(loadCliStatus).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Ferryx CLI")).toBeNull();
-    expect(screen.getByText("Coding agents and CLI")).toBeDefined();
+    expect(screen.getByRole("radiogroup", { name: "Default agent" })).toBeDefined();
   });
 
   it("does not throw when the install promise rejects after unmount", async () => {

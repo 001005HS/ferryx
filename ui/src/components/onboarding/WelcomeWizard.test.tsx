@@ -83,7 +83,7 @@ describe("WelcomeWizard", () => {
     expect(indicator.textContent).toBe("Step 1 of 3");
   });
 
-  it('Next calls onStepCompleted("intro") and shows the permissions step', () => {
+  it('Continue calls onStepCompleted("intro") and shows the permissions step', () => {
     const onStepCompleted = vi.fn();
     const props = createDefaultProps({
       steps: ["intro", "permissions", "project"],
@@ -91,7 +91,7 @@ describe("WelcomeWizard", () => {
     });
     render(<WelcomeWizard {...props} />);
 
-    expect(screen.getByText("How Ferryx works")).toBeDefined();
+    expect(screen.getByText("Set up Ferryx")).toBeDefined();
     fireEvent.click(screen.getByTestId("onboarding-next"));
 
     expect(onStepCompleted).toHaveBeenCalledTimes(1);
@@ -114,10 +114,10 @@ describe("WelcomeWizard", () => {
     fireEvent.click(screen.getByTestId("onboarding-back"));
     expect(screen.queryByTestId("onboarding-back")).toBeNull();
     expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 3");
-    expect(screen.getByText("How Ferryx works")).toBeDefined();
+    expect(screen.getByText("Set up Ferryx")).toBeDefined();
   });
 
-  it("last step shows Finish (not Next) and Finish calls onStepCompleted then onFinish", () => {
+  it("last step shows Done (not Continue) and Done calls onStepCompleted then onFinish", () => {
     const onStepCompleted = vi.fn();
     const onFinish = vi.fn();
     const props = createDefaultProps({
@@ -131,7 +131,7 @@ describe("WelcomeWizard", () => {
     expect(screen.queryByTestId("onboarding-next")).toBeNull();
     const finishButton = screen.getByTestId("onboarding-finish");
     expect(finishButton).toBeDefined();
-    expect(finishButton.textContent).toBe("Finish");
+    expect(finishButton.textContent).toBe("Done");
 
     const callOrder: string[] = [];
     onStepCompleted.mockImplementation(() => callOrder.push("stepCompleted"));
@@ -161,7 +161,8 @@ describe("WelcomeWizard", () => {
     fireEvent.click(screen.getByTestId("onboarding-remind-later"));
     expect(onRemindLater).toHaveBeenCalledTimes(1);
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    const dialog = screen.getByRole("dialog", { name: "Welcome to Ferryx" });
+    fireEvent.keyDown(dialog, { key: "Escape" });
     expect(onRemindLater).toHaveBeenCalledTimes(2);
   });
 

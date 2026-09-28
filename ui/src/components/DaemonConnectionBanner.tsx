@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 
 import { Button } from "./ui/button";
 
@@ -27,30 +27,33 @@ export function DaemonConnectionBanner(props: {
     <div
       role="alert"
       data-testid="daemon-connection-banner"
-      className="flex items-start justify-between gap-4 border-b border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-200"
+      className="flex items-start gap-3 border-b border-border bg-card px-4 py-3"
     >
-      <div className="flex items-start gap-3">
-        <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
-        <div className="flex flex-col gap-1">
-          <div className="text-sm font-semibold text-amber-100">{title}</div>
-          <div className="text-xs text-amber-200/90">{body}</div>
-          <div className="font-mono text-[11px] text-amber-300/70">
-            {error.code}
-          </div>
+      <AlertCircle
+        aria-hidden="true"
+        className="mt-0.5 size-4 shrink-0 text-status-warning"
+      />
+
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-foreground">{title}</div>
+        <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+          {body}
+        </div>
+        <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+          {error.code}
         </div>
       </div>
-      <div className="shrink-0">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          data-testid="daemon-connection-retry"
-          className="border-amber-500/40 bg-amber-500/20 text-xs font-medium text-amber-100 hover:bg-amber-500/30 hover:text-amber-50"
-          onClick={onRetry}
-        >
-          Retry
-        </Button>
-      </div>
+
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        className="h-7 shrink-0 text-[11px]"
+        data-testid="daemon-connection-retry"
+        onClick={onRetry}
+      >
+        Retry
+      </Button>
     </div>
   );
 }

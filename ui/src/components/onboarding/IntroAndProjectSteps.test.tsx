@@ -21,10 +21,9 @@ describe("IntroStep", () => {
     cleanup();
   });
 
-  it("renders the heading and the three points", () => {
+  it("renders the three points", () => {
     render(<IntroStep isMac />);
 
-    expect(screen.getByText("How Ferryx works")).toBeDefined();
     expect(screen.getByText("Sessions outlive the window")).toBeDefined();
     expect(screen.getByText("Projects, worktrees, tabs")).toBeDefined();
     expect(screen.getByText("Keyboard first")).toBeDefined();
@@ -57,21 +56,18 @@ describe("FirstProjectStep", () => {
     cleanup();
   });
 
-  it("renders the heading and both option cards with their buttons", () => {
+  it("renders both project choices as buttons", () => {
     render(
       <FirstProjectStep onAddProject={vi.fn()} onConnectMachine={vi.fn()} />
     );
 
-    expect(screen.getByText("Open your first project")).toBeDefined();
-    expect(screen.getByText("Local folder")).toBeDefined();
-    expect(screen.getByText("Remote machine (optional)")).toBeDefined();
     expect(screen.getByTestId("onboarding-add-project")).toBeDefined();
     expect(screen.getByTestId("onboarding-connect-machine")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Add Project" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "Connect a machine" })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Add a local folder/ })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Connect a machine/ })).toBeDefined();
   });
 
-  it("calls onAddProject when Add Project is clicked", () => {
+  it("calls onAddProject when Add a local folder is clicked", () => {
     const onAddProject = vi.fn();
     const onConnectMachine = vi.fn();
     render(

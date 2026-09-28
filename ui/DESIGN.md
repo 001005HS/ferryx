@@ -250,3 +250,27 @@ metadata lines truncate rather than wrap.
 - Worktree rows re-derive display names from branch strings on each render. Cheap at realistic
   worktree counts; revisit only if a project exceeds a few hundred worktrees.
 - **Mobile composer attachment staging:** The mobile composer can stage attachments but sending is blocked until remote upload exists, so the composer states the block in a polite status region.
+
+## 9. Onboarding wizard
+
+Added for the first-run Welcome onboarding modal (`ui/src/components/onboarding/`).
+
+### Primitives (`WizardPrimitives.tsx`)
+- `WizardRowList`: Bordered list container (`border-y border-border divide-y divide-border/40`) grouping wizard items.
+- `WizardRow`: Flexible item row with title (`text-[13px] font-medium text-foreground`), optional description (`text-[12px] text-muted-foreground`), status glyph/label, and trailing action slot (`shrink-0`).
+- `WizardStatus`: Compact status indicator (`text-[11px] font-medium`) pairing semantic tokens (`text-status-success`, `text-status-warning`, `text-muted-foreground`) with a non-color glyph (`Check`, `AlertCircle`, `Minus`).
+- `Keycap`: Standard keyboard shortcut badge (`rounded border border-border bg-muted/70 px-1.5 py-0.5 font-mono text-[10px] text-foreground`).
+
+### Dialog & Step States
+- Dialog shell: Two-column desktop grid (`sm:grid-cols-[13rem_1fr]`) with left linear step rail and right content viewport.
+- Step transitions: Step content bodies mount with `animate-enter motion-reduce:animate-none`.
+- Event-driven sync: Hardware and OS permission statuses refresh on window `focus` and `visibilitychange` rather than periodic polling intervals.
+- Action hierarchy: Single primary action in footer ("Continue" / "Done") with secondary actions ("Skip setup", "Back"); per-row interactions use compact controls (`size="sm" h-7 text-[11px]`).
+
+### Surface patterns (round 2)
+- **Empty workspace (`GettingStartedChecklist`)**: no `Card` boxes. A centered `max-w-md w-full px-4` column holds a left-aligned header, then full-width choice rows that reuse the `FirstProjectStep` anatomy (icon tile + `text-[13px]` title + `text-[12px]` description + `ChevronRight`), then one quiet setup row (`border-t border-border pt-4`) pairing the permissions line with a ghost `Open Welcome Setup` action.
+- **`WhatsNewDialog`**: same shell as the wizard — `bg-background/80 backdrop-blur-sm` scrim, `rounded-lg border border-border bg-card shadow-lg` panel, `Updated` eyebrow + `text-[17px]` heading named by `aria-labelledby`, `IconButton` close, footer `border-t` with a focused-on-mount `Got it` primary action. Escape is handled on the panel, never a window listener. Markdown renders at the `text-[13px]` scale; links stay `text-foreground` with `decoration-border` (never `text-primary`).
+- **`DaemonConnectionBanner`**: a calm inline notice — `border-b border-border bg-card`, one `text-status-warning` `AlertCircle` glyph, `text-[13px]`/`text-[12px]`/`font-mono text-[11px]` text block, compact `h-7 text-[11px]` secondary retry. No amber slabs, tinted borders, or state colours beyond the status token.
+- **Default agent picker (Agents & CLI step)**: a `role="radiogroup"` of choice-row buttons (`rounded-md`, `hover:bg-accent`, `focus-visible:ring-1`); selection reads as `bg-accent` plus a trailing `Check`, never a coloured border. Options carry the brand icon from `lib/agentIcon` (`agent-tab-logo--monochrome` when monochrome, `TerminalSquare` when unknown) and the resolved command in `font-mono`. Roving tabindex, arrow-key selection, immediate `saveAgentSettings` persistence; agents that are not installed collapse into one muted `Not installed: …` line, and an all-empty PATH renders the `WizardRow` empty message instead of the group.
+- **Settings (`PermissionsSection`)**: the onboarding shortcut is a `SettingRow` (label + description + `h-7 text-[11px]` secondary control), not a floating ghost button.
+

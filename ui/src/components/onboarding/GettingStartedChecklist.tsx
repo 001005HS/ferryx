@@ -1,16 +1,23 @@
-import { FolderPlus, ListChecks, Monitor } from "lucide-react";
+import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
 
 import { Button } from "../ui/button";
-import { Card } from "../ui/card";
 
-export function GettingStartedChecklist(props: {
+export type GettingStartedChecklistProps = {
+  permissionsSummary: { granted: number; total: number } | null;
   onAddProject: () => void;
   onConnectMachine: () => void;
   onOpenWelcome: () => void;
-  permissionsSummary: { granted: number; total: number } | null;
-}): JSX.Element {
-  const { onAddProject, onConnectMachine, onOpenWelcome, permissionsSummary } = props;
+};
 
+const CHOICE_CLASS =
+  "group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+export function GettingStartedChecklist({
+  permissionsSummary,
+  onAddProject,
+  onConnectMachine,
+  onOpenWelcome,
+}: GettingStartedChecklistProps): JSX.Element {
   const permissionsLine =
     permissionsSummary !== null && permissionsSummary.total > 0
       ? `${permissionsSummary.granted} of ${permissionsSummary.total} permissions granted`
@@ -21,54 +28,72 @@ export function GettingStartedChecklist(props: {
       data-testid="no-projects-view"
       className="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
     >
-      <div className="flex w-full max-w-md flex-col items-center gap-1 px-4 text-center">
-        <p className="text-sm font-semibold text-foreground">No projects</p>
-        <p className="text-xs text-muted-foreground">
-          Add a project to open a terminal workspace.
-        </p>
-      </div>
+      <div className="w-full max-w-md px-4">
+        <div>
+          <p className="text-[15px] font-semibold tracking-tight text-foreground">
+            No projects
+          </p>
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            Add a project to open a terminal workspace.
+          </p>
+        </div>
 
-      <div className="flex w-full max-w-md flex-col gap-2 px-4">
-        <Card data-testid="checklist-add-project" className="border-border bg-card/60 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <FolderPlus className="size-4 shrink-0 text-primary" />
-              <span className="text-sm font-medium text-foreground">Add a local project</span>
+        <div className="mt-4 grid gap-2">
+          <button
+            type="button"
+            data-testid="checklist-add-project"
+            aria-label="Add Project"
+            onClick={onAddProject}
+            className={CHOICE_CLASS}
+          >
+            <div className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60">
+              <FolderPlus className="size-4 text-foreground" />
             </div>
-            <Button type="button" size="sm" onClick={onAddProject}>
-              Add Project
-            </Button>
-          </div>
-        </Card>
-
-        <Card data-testid="checklist-connect-machine" className="border-border bg-card/60 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <Monitor className="size-4 shrink-0 text-primary" />
-              <span className="text-sm font-medium text-foreground">
-                Connect a remote machine (optional)
-              </span>
-            </div>
-            <Button type="button" size="sm" variant="outline" onClick={onConnectMachine}>
-              Connect machine
-            </Button>
-          </div>
-        </Card>
-
-        <Card data-testid="checklist-review-setup" className="border-border bg-card/60 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <ListChecks className="size-4 shrink-0 text-primary" />
-                <span className="text-sm font-medium text-foreground">Review setup</span>
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-foreground">
+                Add Project
               </div>
-              <p className="text-xs text-muted-foreground">{permissionsLine}</p>
+              <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+                Pick a folder on this computer. Git repositories unlock
+                worktrees.
+              </div>
             </div>
-            <Button type="button" size="sm" variant="outline" onClick={onOpenWelcome}>
-              Open Welcome Setup
-            </Button>
-          </div>
-        </Card>
+            <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
+          </button>
+
+          <button
+            type="button"
+            data-testid="checklist-connect-machine"
+            aria-label="Connect machine"
+            onClick={onConnectMachine}
+            className={CHOICE_CLASS}
+          >
+            <div className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60">
+              <Monitor className="size-4 text-foreground" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-foreground">
+                Connect a machine
+              </div>
+              <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+                Pair another computer through your Ferryx account.
+              </div>
+            </div>
+            <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
+          </button>
+        </div>
+
+        <div
+          data-testid="checklist-review-setup"
+          className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4"
+        >
+          <span className="text-[12px] text-muted-foreground">
+            {permissionsLine}
+          </span>
+          <Button type="button" variant="ghost" size="sm" onClick={onOpenWelcome}>
+            Open Welcome Setup
+          </Button>
+        </div>
       </div>
     </div>
   );

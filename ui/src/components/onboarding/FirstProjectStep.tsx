@@ -1,7 +1,4 @@
-import { FolderPlus, Monitor } from "lucide-react";
-
-import { Button } from "../ui/button";
-import { Card } from "../ui/card";
+import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
 
 export function FirstProjectStep(props: {
   onAddProject: () => void;
@@ -10,55 +7,46 @@ export function FirstProjectStep(props: {
   const { onAddProject, onConnectMachine } = props;
 
   return (
-    <div>
-      <h2 className="text-lg font-semibold tracking-tight text-foreground">
-        Open your first project
-      </h2>
-
-      <div className="mt-4 space-y-3">
-        <Card className="border-border bg-card/60 p-4">
-          <div className="flex items-center gap-2">
-            <FolderPlus className="size-4 shrink-0 text-primary" />
-            <span className="text-sm font-medium text-foreground">Local folder</span>
+    <div className="grid gap-2">
+      <button
+        type="button"
+        data-testid="onboarding-add-project"
+        onClick={onAddProject}
+        className="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <div className="size-8 rounded-md bg-accent/60 grid place-items-center shrink-0">
+          <FolderPlus className="size-4 text-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-foreground">
+            Add a local folder
           </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+          <div className="mt-0.5 text-[12px] text-muted-foreground leading-relaxed">
             Pick a folder on this computer. Git repositories unlock worktrees.
-          </p>
-          <div className="mt-3 flex justify-end">
-            <Button
-              size="sm"
-              data-testid="onboarding-add-project"
-              onClick={onAddProject}
-              className="gap-1.5 text-xs"
-            >
-              <FolderPlus className="size-3.5" />
-              Add Project
-            </Button>
           </div>
-        </Card>
+        </div>
+        <ChevronRight className="size-4 text-muted-foreground ml-auto shrink-0" />
+      </button>
 
-        <Card className="border-border bg-card/60 p-4">
-          <div className="flex items-center gap-2">
-            <Monitor className="size-4 shrink-0 text-primary" />
-            <span className="text-sm font-medium text-foreground">Remote machine (optional)</span>
+      <button
+        type="button"
+        data-testid="onboarding-connect-machine"
+        onClick={onConnectMachine}
+        className="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <div className="size-8 rounded-md bg-accent/60 grid place-items-center shrink-0">
+          <Monitor className="size-4 text-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-foreground">
+            Connect a machine
           </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-            Pair another computer through your Ferryx account and work in its projects from here.
-          </p>
-          <div className="mt-3 flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              data-testid="onboarding-connect-machine"
-              onClick={onConnectMachine}
-              className="gap-1.5 text-xs"
-            >
-              <Monitor className="size-3.5" />
-              Connect a machine
-            </Button>
+          <div className="mt-0.5 text-[12px] text-muted-foreground leading-relaxed">
+            Pair another computer through your Ferryx account.
           </div>
-        </Card>
-      </div>
+        </div>
+        <ChevronRight className="size-4 text-muted-foreground ml-auto shrink-0" />
+      </button>
     </div>
   );
 }

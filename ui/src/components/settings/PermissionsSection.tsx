@@ -21,6 +21,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { toast } from "../ui/sonner";
+import { SettingRow } from "./primitives";
 
 function StatusBadge({ item }: { item?: PermissionItemStatus }) {
   if (!item) {
@@ -334,17 +335,20 @@ export function PermissionsSection() {
       </div>
 
       {status !== null && status.platform !== "web" && (
-        <div className="flex justify-end">
+        <SettingRow
+          label="Welcome setup"
+          description="Walk through permissions, agents, and your first project again."
+        >
           <Button
-            variant="ghost"
+            variant="secondary"
             size="sm"
+            className="h-7 text-[11px]"
             data-testid="rerun-permissions-onboarding"
             onClick={handleRerunOnboarding}
-            className="text-xs text-muted-foreground"
           >
             Show Welcome Setup
           </Button>
-        </div>
+        </SettingRow>
       )}
 
       {isMacHost && (

@@ -38,9 +38,15 @@ describe("GettingStartedChecklist", () => {
   it("renders the three checklist rows", () => {
     renderChecklist();
 
-    expect(screen.getByTestId("checklist-add-project")).toBeDefined();
-    expect(screen.getByTestId("checklist-connect-machine")).toBeDefined();
-    expect(screen.getByTestId("checklist-review-setup")).toBeDefined();
+    expect(screen.getByTestId("checklist-add-project")).toBe(
+      screen.getByRole("button", { name: "Add Project" })
+    );
+    expect(screen.getByTestId("checklist-connect-machine")).toBe(
+      screen.getByRole("button", { name: "Connect machine" })
+    );
+    expect(screen.getByTestId("checklist-review-setup").contains(
+      screen.getByRole("button", { name: "Open Welcome Setup" })
+    )).toBe(true);
   });
 
   it("calls onAddProject from the primary Add Project button", () => {

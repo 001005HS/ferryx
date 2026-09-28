@@ -1,7 +1,5 @@
-import { FolderTree, Keyboard, Server } from "lucide-react";
-
 import { shortcutLabel } from "../../lib/shortcuts";
-import { Card } from "../ui/card";
+import { Keycap, WizardRow, WizardRowList } from "./WizardPrimitives";
 
 const INTRO_SHORTCUTS = [
   { id: "commandPalette.open", title: "Command palette" },
@@ -10,56 +8,33 @@ const INTRO_SHORTCUTS = [
   { id: "project.add", title: "Add project" },
 ] as const;
 
-export function IntroStep(props: { isMac: boolean }): JSX.Element {
-  const { isMac } = props;
-
+export function IntroStep({ isMac }: { isMac: boolean }): JSX.Element {
   return (
-    <div>
-      <h2 className="text-lg font-semibold tracking-tight text-foreground">How Ferryx works</h2>
-
-      <div className="mt-4 space-y-3">
-        <Card className="border-border bg-card/60 p-4">
-          <div className="flex items-center gap-2">
-            <Server className="size-4 shrink-0 text-primary" />
-            <span className="text-sm font-medium text-foreground">Sessions outlive the window</span>
-          </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-            Terminals and agents run in the Ferryx background service, not in the window.
-            Reloading or closing a window does not stop them.
-          </p>
-        </Card>
-
-        <Card className="border-border bg-card/60 p-4">
-          <div className="flex items-center gap-2">
-            <FolderTree className="size-4 shrink-0 text-primary" />
-            <span className="text-sm font-medium text-foreground">Projects, worktrees, tabs</span>
-          </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-            Add a folder as a project. In Git repositories Ferryx can create isolated worktrees,
-            each with its own tabs and split panes.
-          </p>
-        </Card>
-
-        <Card className="border-border bg-card/60 p-4">
-          <div className="flex items-center gap-2">
-            <Keyboard className="size-4 shrink-0 text-primary" />
-            <span className="text-sm font-medium text-foreground">Keyboard first</span>
-          </div>
-          <ul className="mt-2 space-y-1.5">
+    <WizardRowList>
+      <WizardRow
+        title="Sessions outlive the window"
+        description="Terminals and agents run in the Ferryx background service. Closing a window doesn't stop them."
+      />
+      <WizardRow
+        title="Projects, worktrees, tabs"
+        description="Add a folder as a project. Git repositories get isolated worktrees, each with its own tabs and panes."
+      />
+      <WizardRow
+        title="Keyboard first"
+        description={
+          <span className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
             {INTRO_SHORTCUTS.map((shortcut) => (
-              <li
+              <span
                 key={shortcut.id}
-                className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
+                className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground"
               >
                 <span>{shortcut.title}</span>
-                <kbd className="rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground">
-                  {shortcutLabel(shortcut.id, isMac)}
-                </kbd>
-              </li>
+                <Keycap>{shortcutLabel(shortcut.id, isMac)}</Keycap>
+              </span>
             ))}
-          </ul>
-        </Card>
-      </div>
-    </div>
+          </span>
+        }
+      />
+    </WizardRowList>
   );
 }

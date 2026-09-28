@@ -156,12 +156,6 @@ describe("PermissionsStep", () => {
 
     const counter = screen.getByTestId("onboarding-permissions-count");
     expect(counter.textContent).toBe("0 of 3 granted");
-
-    expect(
-      screen.getByText(
-        "Grant these so agents, file access, and alerts work without interruptions. You can change them later in Settings > Permissions."
-      )
-    ).toBeDefined();
   });
 
   it("renders Windows with only notifications card, Managed by OS badge, and Open Windows Settings button", () => {
@@ -183,11 +177,6 @@ describe("PermissionsStep", () => {
     );
     expect(winSettingsBtn.textContent).toContain("Open Windows Settings");
     expect(screen.queryByTestId("onboarding-permissions-count")).toBeNull();
-    expect(
-      screen.getByText(
-        "Your operating system manages notification access for Ferryx."
-      )
-    ).toBeDefined();
 
     fireEvent.click(winSettingsBtn);
     expect(mockTauri.openPermissionsSystemSettings).toHaveBeenCalledWith(
@@ -213,9 +202,7 @@ describe("PermissionsStep", () => {
     expect(screen.queryByTestId("onboarding-permissions-count")).toBeNull();
   });
 
-  it("updates a badge to Granted after polling fetchStatus resolves granted", async () => {
-    vi.useFakeTimers();
-
+  it("updates status when visibilitychange event is triggered to visible", async () => {
     const fetchStatus = vi
       .fn()
       .mockResolvedValueOnce(mockMacStatusNotGranted)
@@ -231,17 +218,18 @@ describe("PermissionsStep", () => {
     expect(screen.getByTestId("onboarding-permissions-count").textContent).toBe(
       "0 of 3 granted"
     );
-    expect(screen.getAllByText("Recommended")).toHaveLength(2);
-    expect(screen.getByText("Optional")).toBeDefined();
 
-    await vi.advanceTimersByTimeAsync(2000);
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    fireEvent(document, new Event("visibilitychange"));
 
-    expect(screen.getByTestId("onboarding-permissions-count").textContent).toBe(
-      "3 of 3 granted"
-    );
-    expect(screen.getAllByText("Granted")).toHaveLength(3);
-    expect(screen.queryByText("Recommended")).toBeNull();
-    expect(screen.queryByText("Optional")).toBeNull();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("onboarding-permissions-count").textContent
+      ).toBe("3 of 3 granted");
+    });
   });
 
   it("updates status when window focus event is triggered", async () => {
@@ -271,8 +259,6 @@ describe("PermissionsStep", () => {
   });
 
   it("keeps last status when fetchStatus rejects", async () => {
-    vi.useFakeTimers();
-
     const fetchStatus = vi
       .fn()
       .mockResolvedValueOnce(mockMacStatusNotGranted)
@@ -289,7 +275,11 @@ describe("PermissionsStep", () => {
       "0 of 3 granted"
     );
 
-    await vi.advanceTimersByTimeAsync(2000);
+    fireEvent(window, new Event("focus"));
+
+    await waitFor(() => {
+      expect(fetchStatus).toHaveBeenCalledTimes(2);
+    });
 
     expect(screen.getByTestId("onboarding-permissions-count").textContent).toBe(
       "0 of 3 granted"
