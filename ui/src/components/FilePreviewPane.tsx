@@ -1,5 +1,6 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
-import { ExternalLink, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { ChevronDown, ExternalLink, FileDown, RotateCcw } from "lucide-react";
+import { toast } from "./ui/sonner";
 
 import { FilePreviewAudio } from "./FilePreviewAudio";
 import { FilePreviewCsv } from "./FilePreviewCsv";
@@ -12,6 +13,9 @@ import type { FilePreviewController, FilePreviewState } from "../lib/filePreview
 import { checkFilePreviewChanged } from "../lib/filePreviewCommands";
 import { getFilePreview, retainFilePreview, subscribeFilePreviews } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
+import { extractIpcErrorMessage } from "../lib/sshHosts";
+import { listOpenWithApps, openWithApp, printCurrentWebview, type OpenWithApps } from "../lib/fileOpenWith";
+import "../styles/filePreviewPrint.css";
 
 export type FilePreviewPaneProps = {
   previewId: string;
@@ -69,6 +73,11 @@ function FilePreviewPaneBody({
   const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const [sourceMode, setSourceMode] = useState(false);
   const [hasDiskChange, setHasDiskChange] = useState(false);
+  const [openWithOpen, setOpenWithOpen] = useState(false);
+  const [loadedForPath, setLoadedForPath] = useState<string | null>(null);
+  const [appsData, setAppsData] = useState<OpenWithApps>({ apps: [], supportsChooser: false });
+  const [isLoadingApps, setIsLoadingApps] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setHasDiskChange(false);
@@ -123,6 +132,80 @@ function FilePreviewPaneBody({
       ? ((state.payload as { resolvedPath?: string | null }).resolvedPath ?? path)
       : path;
 
+  useEffect(() => {
+    if (!openWithOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpenWithOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenWithOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openWithOpen]);
+
+  const handleToggleOpenWith = useCallback(() => {
+    const next = !openWithOpen;
+    setOpenWithOpen(next);
+    if (next && loadedForPath !== filePath) {
+      setIsLoadingApps(true);
+      listOpenWithApps(filePath)
+        .then((data) => {
+          setAppsData(data);
+          setLoadedForPath(filePath);
+        })
+        .catch((error) => {
+          toast.error(extractIpcErrorMessage(error, "Could not open the file."));
+          setAppsData({ apps: [], supportsChooser: false });
+          setLoadedForPath(filePath);
+        })
+        .finally(() => {
+          setIsLoadingApps(false);
+        });
+    }
+  }, [openWithOpen, filePath, loadedForPath]);
+
+  const handleSelectApp = useCallback(
+    async (appId: string) => {
+      setOpenWithOpen(false);
+      try {
+        await openWithApp(filePath, appId);
+      } catch (error) {
+        toast.error(extractIpcErrorMessage(error, "Could not open the file."));
+      }
+    },
+    [filePath],
+  );
+
+  const handleOpenDefault = useCallback(async () => {
+    setOpenWithOpen(false);
+    try {
+      await controller.openExternal();
+    } catch (error) {
+      toast.error(extractIpcErrorMessage(error, "Could not open the file."));
+    }
+  }, [controller]);
+
+  const handleExportPdf = useCallback(async () => {
+    try {
+      await printCurrentWebview();
+    } catch (error) {
+      toast.error(extractIpcErrorMessage(error, "Could not print preview."));
+    }
+  }, []);
+
   return (
     <div data-testid="file-preview-pane" data-preview-id={previewId} className="flex h-full min-h-0 w-full flex-col bg-background">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2">
@@ -134,6 +217,17 @@ function FilePreviewPaneBody({
           {filePath}
         </span>
         <div className="flex items-center gap-2 shrink-0">
+          {state.status === "ready" && state.payload.kind === "markdown" && (
+            <button
+              type="button"
+              data-testid="file-preview-export-pdf"
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={handleExportPdf}
+            >
+              <FileDown className="size-3" aria-hidden />
+              Export PDF
+            </button>
+          )}
           {state.status === "ready" && (
             <button
               type="button"
@@ -154,6 +248,77 @@ function FilePreviewPaneBody({
             <ExternalLink className="size-3" aria-hidden />
             Open externally
           </button>
+          <div className="relative inline-block" ref={menuRef}>
+            <button
+              type="button"
+              data-testid="file-preview-open-with"
+              aria-haspopup="menu"
+              aria-expanded={openWithOpen}
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={handleToggleOpenWith}
+            >
+              <span>Open with</span>
+              <ChevronDown className="size-3" aria-hidden />
+            </button>
+            {openWithOpen && (
+              <div
+                role="menu"
+                aria-label="Open with"
+                className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-[12px] hover:bg-accent hover:text-accent-foreground"
+                  onClick={handleOpenDefault}
+                >
+                  Default app
+                </button>
+                {isLoadingApps ? (
+                  <div
+                    role="menuitem"
+                    aria-disabled="true"
+                    className="px-2 py-1.5 text-[12px] text-muted-foreground"
+                  >
+                    Loading…
+                  </div>
+                ) : (
+                  <>
+                    {appsData.apps.map((app) => (
+                      <button
+                        key={app.id}
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-[12px] hover:bg-accent hover:text-accent-foreground"
+                        onClick={() => handleSelectApp(app.id)}
+                      >
+                        {app.name}
+                      </button>
+                    ))}
+                    {appsData.apps.length === 0 && (
+                      <div
+                        role="menuitem"
+                        aria-disabled="true"
+                        className="px-2 py-1.5 text-[12px] text-muted-foreground"
+                      >
+                        No other apps found
+                      </div>
+                    )}
+                    {appsData.supportsChooser && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center rounded-sm border-t border-border mt-1 pt-1.5 px-2 py-1.5 text-left text-[12px] hover:bg-accent hover:text-accent-foreground"
+                        onClick={() => handleSelectApp("chooser")}
+                      >
+                        Choose application...
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
       {hasDiskChange && state.status === "ready" && (
@@ -221,7 +386,7 @@ function ReadyPreview({
     }
   }
   if (payload.kind === "text" || payload.kind === "markdown") {
-    return (
+    const preview = (
       <FilePreviewText
         {...rendererProps}
         payload={payload}
@@ -231,6 +396,14 @@ function ReadyPreview({
         markdown={payload.kind === "markdown" ? controller.markdownCapability() : null}
       />
     );
+    if (payload.kind === "markdown") {
+      return (
+        <div data-file-preview-print-root className="h-full w-full">
+          {preview}
+        </div>
+      );
+    }
+    return preview;
   }
   if (payload.kind === "image") return <FilePreviewImage {...rendererProps} payload={payload} />;
   if (payload.kind === "audio") return <FilePreviewAudio {...rendererProps} payload={payload} />;
