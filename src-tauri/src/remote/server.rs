@@ -2964,7 +2964,22 @@ pub(crate) fn resolve_dist_dir_from(
     None
 }
 
+/// Resolves the directory containing static UI assets for the remote web client.
+///
+/// If `FERRYX_UI_DIST_DIR` is set and non-empty, that directory is used (after
+/// canonicalizing/validating it exists) before checking packaged resource bundles
+/// or compile-time manifest locations.
 pub(crate) fn resolve_dist_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("FERRYX_UI_DIST_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            if path.exists() {
+                return path.canonicalize().unwrap_or(path);
+            }
+        }
+    }
+
     let cwd = std::env::current_dir().ok();
     let exe = std::env::current_exe().ok();
     let manifest_dir = option_env!("CARGO_MANIFEST_DIR").map(Path::new);
