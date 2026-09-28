@@ -84,3 +84,9 @@ export function getOrCreateInstallationId(
   return next;
 }
 
+export const ONBOARDING_STORAGE_KEY = "ferryx.onboarding.v1";
+export const WHATS_NEW_SEEN_VERSION_STORAGE_KEY = "ferryx.whatsNew.seenVersion";
+export const WHATS_NEW_PENDING_STORAGE_KEY = "ferryx.whatsNew.pending";
+export const NOTIFICATION_PERMISSION_HINT_STORAGE_KEY = "ferryx.hints.notificationPermission";
+
+

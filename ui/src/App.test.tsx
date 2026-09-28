@@ -21,7 +21,7 @@ if (typeof window === "undefined") {
 
 if (!(window as any).__TAURI_INTERNALS__) {
   (window as any).__TAURI_INTERNALS__ = {
-    invoke: () => Promise.resolve(),
+    invoke: (cmd: string) => Promise.resolve(cmd === "cmd_browser_download_list" ? [] : undefined),
     transformCallback: () => 1,
   };
 }
@@ -95,6 +95,29 @@ const native = {
   remoteSelectionHandler: null as null | ((payload: any) => void),
   onNotificationActivated: vi.fn().mockResolvedValue(() => {}),
   takeNotificationActivations: vi.fn().mockResolvedValue([]),
+  getSystemPermissionsStatus: vi.fn(async () => ({
+    platform: "web",
+    allGranted: true,
+    fullDiskAccess: { status: "unsupported", granted: false, canRequest: false, description: "" },
+    accessibility: { status: "unsupported", granted: false, canRequest: false, description: "" },
+    notifications: { status: "unsupported", granted: false, canRequest: false, description: "" },
+  })),
+  getCliLauncherStatus: vi.fn(async () => ({
+    launcherPath: "~/.local/bin/ferryx",
+    isInstalled: false,
+    isSymlink: false,
+    currentTarget: null,
+    activeExecutable: null,
+    isSupported: false,
+  })),
+  installCliLauncher: vi.fn(async () => ({
+    launcherPath: "~/.local/bin/ferryx",
+    isInstalled: true,
+    isSymlink: true,
+    currentTarget: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+    activeExecutable: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+    isSupported: true,
+  })),
 };
 
 const updater = {
@@ -174,15 +197,12 @@ vi.mock("./lib/tauri", () => ({
   previewWorktreeDelete: vi.fn(),
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
-  unregisterProject: vi.fn().mockResolvedValue(undefined),
+  unregisterProject: vi.fn(async () => undefined),
   getInitialProject: native.getInitialProject,
-  getSystemPermissionsStatus: vi.fn().mockResolvedValue({
-    platform: "web",
-    allGranted: true,
-    fullDiskAccess: { status: "unsupported", granted: false, canRequest: false, description: "" },
-    accessibility: { status: "unsupported", granted: false, canRequest: false, description: "" },
-    notifications: { status: "unsupported", granted: false, canRequest: false, description: "" },
-  }),
+  getSystemPermissionsStatus: native.getSystemPermissionsStatus,
+  getCliLauncherStatus: native.getCliLauncherStatus,
+  getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
+  installCliLauncher: native.installCliLauncher,
   listProjectBranches: native.listProjectBranches,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
@@ -192,15 +212,15 @@ vi.mock("./lib/tauri", () => ({
   clearSession: native.clearSession,
   listTerminalSessions: native.listTerminalSessions,
   spawnTerminal: native.spawnTerminal,
-  spawnTerminalsBatch: vi.fn().mockResolvedValue([]),
+  spawnTerminalsBatch: vi.fn(async () => []),
   spawnTerminalDetailed: native.spawnTerminalDetailed,
-  describeTerminal: vi.fn().mockResolvedValue(null),
-  closeTerminal: vi.fn().mockResolvedValue(undefined),
-  attachTerminal: vi.fn().mockResolvedValue(undefined),
+  describeTerminal: vi.fn(async () => null),
+  closeTerminal: vi.fn(async () => undefined),
+  attachTerminal: vi.fn(async () => undefined),
   getTerminalCwd: vi.fn(),
   resizeTerminal: vi.fn(),
   waitForTerminalExit: vi.fn(),
-  discoverAgentProviderSession: vi.fn().mockResolvedValue(null),
+  discoverAgentProviderSession: vi.fn(async () => null),
   detectAgents: native.detectAgents,
   writeTerminal: native.writeTerminal,
   isTauriRuntime: native.isTauriRuntime,
@@ -220,17 +240,17 @@ vi.mock("./lib/tauri", () => ({
   publishFocusedTerminal: native.publishFocusedTerminal,
   setBadgeCount: native.setBadgeCount,
   onRemoteSelectionRequested: native.onRemoteSelectionRequested,
-  onNativeTerminalAgentState: vi.fn().mockResolvedValue(() => {}),
-  onNativeTerminalBell: vi.fn().mockResolvedValue(() => {}),
-  onNativeTerminalFocus: vi.fn().mockResolvedValue(() => {}),
-  onNativeTerminalTitle: vi.fn().mockResolvedValue(() => {}),
+  onNativeTerminalAgentState: vi.fn(async () => () => {}),
+  onNativeTerminalBell: vi.fn(async () => () => {}),
+  onNativeTerminalFocus: vi.fn(async () => () => {}),
+  onNativeTerminalTitle: vi.fn(async () => () => {}),
   // Overlay input ownership reaches the host through this bridge; the App shell mounts
   // the visibility provider, so the mock must expose it or every App render throws.
-  setNativeTerminalDomOverlayInput: vi.fn().mockResolvedValue(undefined),
-  onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
+  setNativeTerminalDomOverlayInput: vi.fn(async () => undefined),
+  onWorktreeChanged: vi.fn(async () => () => {}),
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,
-  bootTrace: vi.fn().mockResolvedValue(undefined),
+  bootTrace: vi.fn(async () => undefined),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
 }));
@@ -578,6 +598,32 @@ describe("App project workspace flow", () => {
     native.writeTerminal.mockResolvedValue(undefined);
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
+    native.getSystemPermissionsStatus.mockReset();
+    native.getSystemPermissionsStatus.mockImplementation(async () => ({
+      platform: "web",
+      allGranted: true,
+      fullDiskAccess: { status: "unsupported", granted: false, canRequest: false, description: "" },
+      accessibility: { status: "unsupported", granted: false, canRequest: false, description: "" },
+      notifications: { status: "unsupported", granted: false, canRequest: false, description: "" },
+    }));
+    native.getCliLauncherStatus.mockReset();
+    native.getCliLauncherStatus.mockImplementation(async () => ({
+      launcherPath: "~/.local/bin/ferryx",
+      isInstalled: false,
+      isSymlink: false,
+      currentTarget: null,
+      activeExecutable: null,
+      isSupported: false,
+    }));
+    native.installCliLauncher.mockReset();
+    native.installCliLauncher.mockImplementation(async () => ({
+      launcherPath: "~/.local/bin/ferryx",
+      isInstalled: true,
+      isSymlink: true,
+      currentTarget: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+      activeExecutable: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+      isSupported: true,
+    }));
   });
 
   it("awaits the local registration heal before publishing the bootstrap in both boot branches", () => {
@@ -4776,6 +4822,116 @@ describe("App project workspace flow", () => {
         toastWarningSpy.mockRestore();
         onTabSwitchSpy.mockRestore();
       }
+    });
+  });
+
+  describe("Wave 3a Onboarding and Welcome", () => {
+    // 11.a: wizard auto-opens for a macOS status with missing permissions and zero projects
+    it("auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects", async () => {
+      try {
+        native.isTauriRuntime.mockReturnValue(true);
+        native.getInitialProject.mockRejectedValue(new Error("no startup project"));
+        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([]));
+        localStorage.removeItem("ferryx.onboarding.v1");
+        localStorage.removeItem("ferryx.onboarding.permissionsDismissed");
+
+        native.getSystemPermissionsStatus.mockImplementation(async () => ({
+          platform: "macos",
+          allGranted: false,
+          fullDiskAccess: {
+            status: "denied",
+            granted: false,
+            canRequest: false,
+            canOpenSettings: true,
+            description: "Full disk access needed",
+          },
+          accessibility: {
+            status: "denied",
+            granted: false,
+            canRequest: true,
+            canOpenSettings: false,
+            description: "Accessibility needed",
+          },
+          notifications: {
+            status: "not_determined",
+            granted: false,
+            canRequest: true,
+            canOpenSettings: false,
+            description: "Notifications needed",
+          },
+        }));
+
+        native.getCliLauncherStatus.mockImplementation(async () => ({
+          launcherPath: "~/.local/bin/ferryx",
+          isInstalled: false,
+          isSymlink: false,
+          currentTarget: null,
+          activeExecutable: null,
+          isSupported: true,
+        }));
+
+        render(<App />);
+
+        // Real timers: the auto-open check is scheduled 1200ms after mount and the
+        // WelcomeWizard chunk is lazy-loaded, so wait for the dialog with a bounded timeout.
+        expect(
+          await screen.findByRole("dialog", { name: "Welcome to Ferryx" }, { timeout: 8000 })
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 15000);
+
+    it("does not auto-open WelcomeWizard for platform web", async () => {
+      vi.useFakeTimers();
+      try {
+        native.isTauriRuntime.mockReturnValue(false);
+        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([]));
+        native.getSystemPermissionsStatus.mockImplementation(async () => ({
+          platform: "web",
+          allGranted: false,
+          fullDiskAccess: { status: "unsupported", granted: false, canRequest: false, canOpenSettings: false, description: "" },
+          accessibility: { status: "unsupported", granted: false, canRequest: false, canOpenSettings: false, description: "" },
+          notifications: { status: "unsupported", granted: false, canRequest: false, description: "" },
+        }));
+
+        render(<App />);
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1300);
+        });
+
+        expect(screen.queryByRole("dialog", { name: "Welcome to Ferryx" })).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("renders GettingStartedChecklist with 'No projects' and 'Add Project' button when projects list is empty", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([]));
+      native.getInitialProject.mockRejectedValue(new Error("no startup project"));
+      render(<App />);
+
+      expect(await screen.findByTestId("no-projects-view")).toBeInTheDocument();
+      expect(screen.getByText("No projects")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
+    });
+
+    it("renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+      native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+      native.registerProject.mockRejectedValue({
+        code: "DAEMON_UNAVAILABLE",
+        message: "background service is unreachable",
+      });
+
+      render(<App />);
+
+      expect(await screen.findByTestId("daemon-connection-banner")).toBeInTheDocument();
+      expect(screen.getByText("Ferryx can't reach its background service")).toBeInTheDocument();
+      expect(screen.getByText("DAEMON_UNAVAILABLE")).toBeInTheDocument();
+      expect(screen.getByTestId("daemon-connection-retry")).toBeInTheDocument();
     });
   });
 });

@@ -33,6 +33,7 @@ export interface NotificationCoordinatorOptions {
   onError?: (error: unknown, source: 'sound' | 'dispatch') => void;
   getPermissionStatus?: () => Promise<NotificationPermissionStatus>;
   requestPermission?: () => Promise<{ granted: boolean; error?: string | null }>;
+  onPermissionUnavailable?: () => void;
 }
 
 export interface TerminalBellEventParams {
@@ -164,7 +165,10 @@ export class NotificationCoordinator {
         if (!result || result.submitted) return;
         if (result.reason === 'permission-required') {
           const granted = await this.ensureNotificationPermission();
-          if (!granted) return;
+          if (!granted) {
+            this.options.onPermissionUnavailable?.();
+            return;
+          }
           const retried = await dispatchNotification(dispatchArgs);
           if (retried && !retried.submitted && !this.isExpectedPermissionRejection(retried.reason)) {
             this.options.onError?.(
@@ -172,6 +176,10 @@ export class NotificationCoordinator {
               'dispatch',
             );
           }
+          return;
+        }
+        if (result.reason === 'blocked-by-system') {
+          this.options.onPermissionUnavailable?.();
           return;
         }
         if (this.isExpectedPermissionRejection(result.reason)) return;

@@ -1,0 +1,268 @@
+import {
+  ONBOARDING_STORAGE_KEY,
+  PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY,
+} from "./storageKeys";
+import type { CliLauncherStatus, SystemPermissionsStatus } from "./types";
+
+export type OnboardingStepId = "intro" | "permissions" | "agents" | "project";
+
+export const ONBOARDING_VERSION = 1;
+
+export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
+  "intro",
+  "permissions",
+  "agents",
+  "project",
+];
+
+export const OPEN_ONBOARDING_EVENT = "ferryx:open-onboarding";
+
+export type OnboardingState = {
+  version: 1;
+  completedSteps: OnboardingStepId[];
+  dismissed: boolean;
+};
+
+export type PermissionKey = "fullDiskAccess" | "accessibility" | "notifications";
+
+export type PermissionPriority = "recommended" | "optional";
+
+export const PERMISSION_PRIORITY: Record<PermissionKey, PermissionPriority> = {
+  fullDiskAccess: "recommended",
+  accessibility: "recommended",
+  notifications: "optional",
+};
+
+export type OnboardingContext = {
+  permissions: SystemPermissionsStatus | null;
+  agents: ReadonlyArray<{ name: string; available: boolean }> | null;
+  cli: CliLauncherStatus | null;
+  projectCount: number;
+};
+
+function browserStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+const PERMISSION_KEYS_IN_ORDER: readonly PermissionKey[] = [
+  "fullDiskAccess",
+  "accessibility",
+  "notifications",
+];
+
+export function loadOnboardingState(
+  storage: Storage | null = browserStorage()
+): OnboardingState {
+  const defaultState: OnboardingState = {
+    version: 1,
+    completedSteps: [],
+    dismissed: false,
+  };
+
+  if (!storage) {
+    return defaultState;
+  }
+
+  let isAbsent = false;
+  try {
+    const raw = storage.getItem(ONBOARDING_STORAGE_KEY);
+    if (raw === null) {
+      isAbsent = true;
+    } else {
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        parsed.version === 1 &&
+        Array.isArray(parsed.completedSteps)
+      ) {
+        const knownSet = new Set<string>(ONBOARDING_STEP_ORDER);
+        const filteredSteps: OnboardingStepId[] = [];
+        const seen = new Set<OnboardingStepId>();
+        for (const item of parsed.completedSteps) {
+          if (typeof item === "string" && knownSet.has(item)) {
+            const stepId = item as OnboardingStepId;
+            if (!seen.has(stepId)) {
+              seen.add(stepId);
+              filteredSteps.push(stepId);
+            }
+          }
+        }
+        return {
+          version: 1,
+          completedSteps: filteredSteps,
+          dismissed: Boolean(parsed.dismissed),
+        };
+      } else {
+        isAbsent = true;
+      }
+    }
+  } catch {
+    isAbsent = true;
+  }
+
+  if (isAbsent) {
+    try {
+      const legacy = storage.getItem(PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY);
+      if (legacy === "true") {
+        const migrated: OnboardingState = {
+          version: 1,
+          completedSteps: ["intro", "permissions"],
+          dismissed: false,
+        };
+        saveOnboardingState(migrated, storage);
+        try {
+          storage.removeItem(PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY);
+        } catch {
+          void 0;
+        }
+        return migrated;
+      }
+    } catch {
+      void 0;
+    }
+  }
+
+  return defaultState;
+}
+
+export function saveOnboardingState(
+  state: OnboardingState,
+  storage: Storage | null = browserStorage()
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    void 0;
+  }
+}
+
+export function markOnboardingStepsCompleted(
+  steps: readonly OnboardingStepId[],
+  storage: Storage | null = browserStorage()
+): OnboardingState {
+  const current = loadOnboardingState(storage);
+  const currentSet = new Set<OnboardingStepId>(current.completedSteps);
+  for (const step of steps) {
+    currentSet.add(step);
+  }
+  const completedSteps = ONBOARDING_STEP_ORDER.filter((id) => currentSet.has(id));
+  const next: OnboardingState = {
+    ...current,
+    completedSteps,
+  };
+  saveOnboardingState(next, storage);
+  return next;
+}
+
+export function dismissOnboarding(
+  storage: Storage | null = browserStorage()
+): OnboardingState {
+  const current = loadOnboardingState(storage);
+  const next: OnboardingState = {
+    ...current,
+    dismissed: true,
+  };
+  saveOnboardingState(next, storage);
+  return next;
+}
+
+export function resetOnboarding(
+  storage: Storage | null = browserStorage()
+): void {
+  if (!storage) return;
+  try {
+    storage.removeItem(ONBOARDING_STORAGE_KEY);
+  } catch {
+    void 0;
+  }
+  try {
+    storage.removeItem(PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY);
+  } catch {
+    void 0;
+  }
+}
+
+export function visiblePermissionKeys(
+  status: SystemPermissionsStatus | null
+): PermissionKey[] {
+  if (!status || status.platform === "web") {
+    return [];
+  }
+  const result: PermissionKey[] = [];
+  for (const key of PERMISSION_KEYS_IN_ORDER) {
+    const item = status[key];
+    if (!item) continue;
+    if (
+      item.status !== "unsupported" &&
+      (item.granted || item.canRequest || item.canOpenSettings || item.status !== "unknown")
+    ) {
+      result.push(key);
+    }
+  }
+  return result;
+}
+
+export function isOnboardingStepSatisfied(
+  step: OnboardingStepId,
+  ctx: OnboardingContext
+): boolean {
+  switch (step) {
+    case "intro":
+      return ctx.projectCount > 0;
+    case "permissions": {
+      const keys = visiblePermissionKeys(ctx.permissions);
+      if (keys.length === 0) return true;
+      return keys.every((key) => ctx.permissions?.[key]?.granted === true);
+    }
+    case "agents": {
+      const hasAvailableAgent =
+        ctx.agents !== null && ctx.agents.some((a) => a.available);
+      const cliSatisfied =
+        ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
+      return hasAvailableAgent && cliSatisfied;
+    }
+    case "project":
+      return ctx.projectCount > 0;
+  }
+}
+
+export function pendingOnboardingSteps(
+  state: OnboardingState,
+  ctx: OnboardingContext
+): OnboardingStepId[] {
+  const completed = new Set<OnboardingStepId>(state.completedSteps);
+  return ONBOARDING_STEP_ORDER.filter(
+    (step) => !completed.has(step) && !isOnboardingStepSatisfied(step, ctx)
+  );
+}
+
+export function rerunOnboardingSteps(
+  ctx: OnboardingContext
+): OnboardingStepId[] {
+  const visible = visiblePermissionKeys(ctx.permissions);
+  return ONBOARDING_STEP_ORDER.filter((step) => {
+    if (step === "permissions" && visible.length === 0) {
+      return false;
+    }
+    return true;
+  });
+}
+
+export function shouldAutoOpenOnboarding(
+  state: OnboardingState,
+  ctx: OnboardingContext
+): boolean {
+  return (
+    !state.dismissed &&
+    ctx.permissions !== null &&
+    ctx.permissions.platform !== "web" &&
+    pendingOnboardingSteps(state, ctx).length > 0
+  );
+}

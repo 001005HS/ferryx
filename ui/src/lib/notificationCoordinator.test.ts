@@ -717,3 +717,144 @@ describe("reset", () => {
     instance.dispose();
   });
 });
+
+describe("onPermissionUnavailable callback", () => {
+  it("calls onPermissionUnavailable when permission is required and request is denied", async () => {
+    const onPermissionUnavailable = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    requestMock.mockResolvedValueOnce({ granted: false });
+    statusMock.mockResolvedValueOnce({ authorization: "denied" });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onPermissionUnavailable,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    instance.dispose();
+  });
+
+  it("calls onPermissionUnavailable when initial dispatch is blocked-by-system", async () => {
+    const onPermissionUnavailable = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "blocked-by-system" });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onPermissionUnavailable,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    instance.dispose();
+  });
+
+  it("does not call onPermissionUnavailable when dispatch succeeds", async () => {
+    const onPermissionUnavailable = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: true });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onPermissionUnavailable,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).not.toHaveBeenCalled();
+    instance.dispose();
+  });
+
+  it("does not call onPermissionUnavailable when permission is granted and retry succeeds", async () => {
+    const onPermissionUnavailable = vi.fn();
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" })
+      .mockResolvedValueOnce({ submitted: true });
+    requestMock.mockResolvedValueOnce({ granted: true });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onPermissionUnavailable,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).not.toHaveBeenCalled();
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+    instance.dispose();
+  });
+
+  it("does not call onPermissionUnavailable for general unhandled backend errors", async () => {
+    const onPermissionUnavailable = vi.fn();
+    const onError = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "backend-crash" });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onPermissionUnavailable,
+      onError,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    instance.dispose();
+  });
+
+  it("calls onPermissionUnavailable on terminal bell when permission is unavailable", async () => {
+    const onPermissionUnavailable = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    requestMock.mockResolvedValueOnce({ granted: false });
+    statusMock.mockResolvedValueOnce({ authorization: "denied" });
+
+    const { instance } = coordinator({
+      getSettings: () => settings({ terminalBell: true }),
+      onPermissionUnavailable,
+    });
+
+    instance.handleTerminalBell({
+      sessionId: "s1",
+      tabId: "t1",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(onPermissionUnavailable).toHaveBeenCalledTimes(1);
+    instance.dispose();
+  });
+});
+

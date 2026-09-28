@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { OPEN_ONBOARDING_EVENT } from "../../lib/onboarding";
+import { ONBOARDING_STORAGE_KEY } from "../../lib/storageKeys";
 import type { SystemPermissionsStatus } from "../../lib/types";
 import { PermissionsSection } from "./PermissionsSection";
 
@@ -122,12 +124,36 @@ const mockStatusLinux: SystemPermissionsStatus = {
   },
 };
 
+const mockStatusWeb: SystemPermissionsStatus = {
+  platform: "web",
+  allGranted: false,
+  fullDiskAccess: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  accessibility: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  notifications: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+};
+
 const savedProcessPlatform = process.platform;
 const savedPlatform = Object.getOwnPropertyDescriptor(window.navigator, "platform");
 const savedUserAgent = Object.getOwnPropertyDescriptor(window.navigator, "userAgent");
 
-// `browserPlatform` defaults to the host platform; pass it explicitly to simulate a
-// remote web client whose browser OS differs from the paired host.
 async function renderStatus(status: SystemPermissionsStatus, browserPlatform: string = status.platform) {
   Object.defineProperty(process, "platform", {
     value: browserPlatform === "macos" ? "darwin" : "win32",
@@ -138,7 +164,6 @@ async function renderStatus(status: SystemPermissionsStatus, browserPlatform: st
   Object.defineProperty(window.navigator, "userAgent", {
     value: browserPlatform === "macos" ? "Macintosh" : "Windows NT 10.0", configurable: true,
   });
-  // Subscribe to the exact IPC request before mounting; Vitest bounds the await.
   const ready = new Promise<void>((resolve) => {
     mockTauri.getSystemPermissionsStatus.mockImplementation(() => {
       resolve();
@@ -157,10 +182,12 @@ describe("PermissionsSection", () => {
     mockTauri.openPermissionsSystemSettings.mockReset();
     mockTauri.requestAccessibilityPermission.mockReset();
     mockTauri.requestNotificationPermission.mockReset();
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     Object.defineProperty(process, "platform", { value: savedProcessPlatform });
     if (savedPlatform) Object.defineProperty(window.navigator, "platform", savedPlatform);
     else Reflect.deleteProperty(window.navigator, "platform");
@@ -169,10 +196,8 @@ describe("PermissionsSection", () => {
   });
 
   it("renders applicable grant advice when macOS permissions are denied", async () => {
-    // Given / When: mount with denied macOS permissions from OS IPC.
     await renderStatus(mockStatusNotGranted);
 
-    // Then: applicable advice and grant controls remain available.
     expect(screen.getByRole("alert")).toBeDefined();
     expect(screen.getByTestId("open-fda-settings")).toBeEnabled();
     expect(screen.getByTestId("open-accessibility-settings")).toBeEnabled();
@@ -182,28 +207,22 @@ describe("PermissionsSection", () => {
   });
 
   it("triggers open system settings when clicking open settings buttons", async () => {
-    // Given
     mockTauri.openPermissionsSystemSettings.mockResolvedValue({ opened: true, target: "full_disk_access" });
     await renderStatus(mockStatusNotGranted);
 
-    // When
     await act(async () => fireEvent.click(screen.getByTestId("open-fda-settings")));
-    // Then
     expect(mockTauri.openPermissionsSystemSettings).toHaveBeenCalledWith("full_disk_access");
   });
 
   it("renders all granted status correctly", async () => {
-    // Given / When
     await renderStatus(mockStatusAllGranted);
 
-    // Then
     expect(screen.getAllByText("Granted").length).toBe(3);
     expect(screen.getByRole("alert")).toBeDefined();
     expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
   it("requests notification permission and refreshes when Enable Notifications is clicked", async () => {
-    // Given
     const canRequestStatus: SystemPermissionsStatus = {
       ...mockStatusNotGranted,
       notifications: {
@@ -221,13 +240,11 @@ describe("PermissionsSection", () => {
       });
     });
 
-    // When
     await act(async () => {
       fireEvent.click(screen.getByTestId("request-notifications"));
       await refreshed;
     });
 
-    // Then
     expect(mockTauri.requestNotificationPermission).toHaveBeenCalledTimes(1);
     expect(mockTauri.getSystemPermissionsStatus).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("request-notifications")).toBeNull();
@@ -289,15 +306,14 @@ describe("PermissionsSection", () => {
     expect(screen.getByText("Desktop Notifications")).toBeDefined();
   });
 
-  it("renders Windows notifications-only surface with OS-managed badge", async () => {
-    // Given / When: non-authoritative Windows capabilities arrive through IPC.
+  it("renders Windows notifications-only surface with OS-managed badge and Show Welcome Setup", async () => {
     await renderStatus(mockStatusWindows);
 
-    // Then: no macOS advice or grant actions, but OS settings remain available.
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByTestId("open-fda-settings")).toBeNull();
     expect(screen.queryByTestId("open-accessibility-settings")).toBeNull();
-    expect(screen.queryByTestId("rerun-permissions-onboarding")).toBeNull();
+    expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Show Welcome Setup" })).toBeDefined();
     expect(screen.queryByText("Full Disk Access")).toBeNull();
     expect(screen.queryByText("Accessibility")).toBeNull();
     expect(screen.getByText("Managed by OS")).toBeDefined();
@@ -305,56 +321,46 @@ describe("PermissionsSection", () => {
     expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
-  it("follows the host platform, not the browser OS, for macOS-only copy and controls", async () => {
-    // Given: a non-macOS host viewed from a remote web client running on a Mac browser.
-    await renderStatus(mockStatusWindows, "macos");
-
-    // Then: the host platform decides the copy and the macOS-only affordances.
-    expect(screen.queryByText(/Configure macOS permissions/)).toBeNull();
-    expect(screen.getByText(/Windows and Linux manage these permissions at the OS level/)).toBeDefined();
-    expect(screen.queryByText("How to grant permissions in macOS:")).toBeNull();
-    expect(screen.queryByTestId("rerun-permissions-onboarding")).toBeNull();
-  });
-
-  it("renders no Linux notifications action on a realistic Linux host", async () => {
-    // Given: the real Linux capability (canOpenSettings false, no launcher target).
+  it("renders Linux notifications-only surface without open button and with Show Welcome Setup", async () => {
     await renderStatus(mockStatusLinux);
 
-    // Then: no dead button and no macOS advice.
     expect(screen.queryByTestId("open-notifications-settings")).toBeNull();
     expect(screen.queryByTestId("request-notifications")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText(/Configure macOS permissions/)).toBeNull();
+    expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Show Welcome Setup" })).toBeDefined();
   });
 
-  it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {
-    // Given
-    const nav = window.navigator;
-    const savedPlatform = Object.getOwnPropertyDescriptor(nav, "platform");
-    const savedUserAgent = Object.getOwnPropertyDescriptor(nav, "userAgent");
-    Object.defineProperty(nav, "platform", { value: "MacIntel", configurable: true });
-    Object.defineProperty(nav, "userAgent", {
-      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-      configurable: true,
-    });
-    try {
-      window.localStorage.setItem("ferryx.permissions.onboarding-dismissed", "true");
-      const onEvent = vi.fn();
-      window.addEventListener("ferryx:open-permissions-onboarding", onEvent, { once: true });
+  it("hides Show Welcome Setup when platform is web", async () => {
+    await renderStatus(mockStatusWeb);
 
-      await renderStatus(mockStatusNotGranted);
+    expect(screen.queryByTestId("rerun-permissions-onboarding")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show Welcome Setup" })).toBeNull();
+  });
 
-      // When
-      fireEvent.click(screen.getByTestId("rerun-permissions-onboarding"));
+  it("follows the host platform, not the browser OS, for macOS-only copy and controls", async () => {
+    await renderStatus(mockStatusWindows, "macos");
 
-      // Then
-      expect(window.localStorage.getItem("ferryx.permissions.onboarding-dismissed")).toBeNull();
-      expect(onEvent).toHaveBeenCalledTimes(1);
-    } finally {
-      if (savedPlatform) Object.defineProperty(nav, "platform", savedPlatform);
-      else Reflect.deleteProperty(nav, "platform");
-      if (savedUserAgent) Object.defineProperty(nav, "userAgent", savedUserAgent);
-      else Reflect.deleteProperty(nav, "userAgent");
-    }
+    expect(screen.queryByText(/Configure macOS permissions/)).toBeNull();
+    expect(screen.getByText(/Windows and Linux manage these permissions at the OS level/)).toBeDefined();
+    expect(screen.queryByText("How to grant permissions in macOS:")).toBeNull();
+    expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Show Welcome Setup" })).toBeDefined();
+  });
+
+  it("resets onboarding storage key and dispatches ferryx:open-onboarding event on Show Welcome Setup", async () => {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify({ version: 1, completedSteps: ["intro"], dismissed: true }));
+    const onEvent = vi.fn();
+    window.addEventListener(OPEN_ONBOARDING_EVENT, onEvent, { once: true });
+
+    await renderStatus(mockStatusNotGranted);
+
+    const button = screen.getByTestId("rerun-permissions-onboarding");
+    expect(button.textContent).toBe("Show Welcome Setup");
+    fireEvent.click(button);
+
+    expect(window.localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBeNull();
+    expect(onEvent).toHaveBeenCalledTimes(1);
   });
 });

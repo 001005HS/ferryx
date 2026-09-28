@@ -24,6 +24,7 @@ const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest
 await import("./test/setup");
 
 const { saveNotificationSettings } = await import("./lib/notificationSettings");
+const { isMacShortcutPlatform } = await import("./lib/shortcuts");
 
 let nativeFocusChanged: ((event: { payload: boolean }) => void) | null = null;
 let resolveNativeFocusTrackingReady: (() => void) | null = null;
@@ -177,6 +178,24 @@ vi.mock("./lib/tauri", () => ({
   setBadgeCount: native.setBadgeCount,
   onRemoteSelectionRequested: native.onRemoteSelectionRequested,
   onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
+  bootTrace: vi.fn(async () => undefined),
+  setNativeTerminalDomOverlayInput: vi.fn(async () => undefined),
+  getCliLauncherStatus: vi.fn(async () => ({
+    launcherPath: "~/.local/bin/ferryx",
+    isInstalled: false,
+    isSymlink: false,
+    currentTarget: null,
+    activeExecutable: null,
+    isSupported: false,
+  })),
+  installCliLauncher: vi.fn(async () => ({
+    launcherPath: "~/.local/bin/ferryx",
+    isInstalled: true,
+    isSymlink: true,
+    currentTarget: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+    activeExecutable: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+    isSupported: true,
+  })),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: native.dispatchNotification,
@@ -1034,11 +1053,13 @@ describe("App notification coordinator wiring", () => {
       expect(paneFlashSessions()).toEqual([]);
     });
 
+    // Defect 2: non-mac platforms use ctrlKey instead of metaKey
     it("keeps the worktree list as the default and toggles the inbox with the notifications shortcut", async () => {
+      const isMac = isMacShortcutPlatform();
       const view = render(<App />);
       const shortcut = () => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "n", code: "KeyN", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
+          key: "n", code: "KeyN", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
         }));
       });
       expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
@@ -1051,6 +1072,7 @@ describe("App notification coordinator wiring", () => {
     });
 
     it("shows the attention count on the collapsed sidebar and reopens the inbox from it", async () => {
+      const isMac = isMacShortcutPlatform();
       currentActivityTargets = [target];
       const view = render(<App />);
       await act(async () => { await nativeFocusTrackingReady; });
@@ -1058,7 +1080,7 @@ describe("App notification coordinator wiring", () => {
       act(() => { emitActivityTargets(); });
       act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "b", code: "KeyB", metaKey: true, bubbles: true, cancelable: true,
+          key: "b", code: "KeyB", metaKey: isMac, ctrlKey: !isMac, bubbles: true, cancelable: true,
         }));
       });
       expect(view.queryByTestId("mock-sidebar")).toBeNull();

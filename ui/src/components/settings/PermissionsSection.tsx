@@ -8,7 +8,7 @@ import {
   Shield,
 } from "lucide-react";
 
-import { OPEN_PERMISSIONS_ONBOARDING_EVENT, resetPermissionsOnboardingDismissed } from "../../lib/permissionsOnboarding";
+import { OPEN_ONBOARDING_EVENT, resetOnboarding } from "../../lib/onboarding";
 import {
   getSystemPermissionsStatus,
   openPermissionsSystemSettings,
@@ -144,8 +144,8 @@ export function PermissionsSection() {
   }, [fetchStatus]);
 
   const handleRerunOnboarding = useCallback(() => {
-    resetPermissionsOnboardingDismissed();
-    window.dispatchEvent(new CustomEvent(OPEN_PERMISSIONS_ONBOARDING_EVENT));
+    resetOnboarding();
+    window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
   }, []);
 
   const allGranted = status?.allGranted ?? false;
@@ -333,7 +333,7 @@ export function PermissionsSection() {
         </Card>
       </div>
 
-      {isMacHost && (
+      {status !== null && status.platform !== "web" && (
         <div className="flex justify-end">
           <Button
             variant="ghost"
@@ -342,7 +342,7 @@ export function PermissionsSection() {
             onClick={handleRerunOnboarding}
             className="text-xs text-muted-foreground"
           >
-            Re-run Welcome Setup
+            Show Welcome Setup
           </Button>
         </div>
       )}

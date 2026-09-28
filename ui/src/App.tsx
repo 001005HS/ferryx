@@ -40,12 +40,29 @@ import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/na
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
+// Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
-  loadPermissionsOnboardingDismissed,
-  OPEN_PERMISSIONS_ONBOARDING_EVENT,
-  savePermissionsOnboardingDismissed,
-  shouldShowPermissionsOnboarding,
-} from "./lib/permissionsOnboarding";
+  OPEN_ONBOARDING_EVENT,
+  dismissOnboarding,
+  loadOnboardingState,
+  markOnboardingStepsCompleted,
+  pendingOnboardingSteps,
+  rerunOnboardingSteps,
+  shouldAutoOpenOnboarding,
+  visiblePermissionKeys,
+  type OnboardingContext,
+  type OnboardingStepId,
+} from "./lib/onboarding";
+import {
+  markWhatsNewSeen,
+  resolveWhatsNew,
+  startWhatsNewRecorder,
+  type WhatsNewEntry,
+} from "./lib/whatsNew";
+import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
+import { getCurrentVersion } from "./lib/updater";
+import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
+import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import type { SectionId } from "./components/settings/types";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
@@ -66,6 +83,7 @@ import {
   DEFAULT_WORKSPACE_ID,
   closeTerminal,
   detectAgents,
+  getCliLauncherStatus,
   getInitialProject,
   getSystemPermissionsStatus,
   isTauriRuntime,
@@ -118,7 +136,7 @@ import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
-import type { NotificationTarget, PersistedWorkspaceSession } from "./lib/types";
+import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
@@ -167,9 +185,14 @@ const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, 
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
 const SettingsDialog = lazy(loadSettingsDialog);
-const PermissionsOnboardingDialog = lazy(() =>
-  import("./components/onboarding/PermissionsOnboardingDialog").then((m) => ({
-    default: m.PermissionsOnboardingDialog,
+const WelcomeWizard = lazy(() =>
+  import("./components/onboarding/WelcomeWizard").then((m) => ({
+    default: m.WelcomeWizard,
+  }))
+);
+const WhatsNewDialog = lazy(() =>
+  import("./components/onboarding/WhatsNewDialog").then((m) => ({
+    default: m.WhatsNewDialog,
   }))
 );
 let settingsDialogPreloaded = false;
@@ -618,6 +641,7 @@ function WorkspaceApp({
   initialProjects: RegisteredProject[];
   initialActiveProjectId: string;
 }) {
+  const [isNativeRuntime] = useState(() => isTauriRuntime());
   const activeRemoteHost = useSyncExternalStore(
     remoteHostStore.subscribe,
     () => selectActiveHost(remoteHostStore.getState()),
@@ -632,7 +656,11 @@ function WorkspaceApp({
   }, []);
   const [registeredProjectId, setRegisteredProjectId] = useState<string | null>(null);
   const [registrationAttempt, setRegistrationAttempt] = useState(0);
-  const [registrationError, setRegistrationError] = useState<{ workspaceId: string; message: string } | null>(null);
+  const [registrationError, setRegistrationError] = useState<{
+    workspaceId: string;
+    code: string;
+    message: string;
+  } | null>(null);
   const [sshTabOperation, setSshTabOperation] = useState<{
     workspaceId: string;
     error?: string;
@@ -692,6 +720,8 @@ function WorkspaceApp({
     () => mergeDetections(agentSettings, agentDetections),
     [agentSettings, agentDetections],
   );
+  const resolvedAgentsRef = useRef(resolvedAgents);
+  resolvedAgentsRef.current = resolvedAgents;
 
   const launchableAgents = useMemo(
     () => getLaunchableAgents(resolvedAgents),
@@ -757,6 +787,7 @@ function WorkspaceApp({
   markWorktreeUnreadRef.current = markWorktreeUnread;
 
   const reportRuntimeErrorRef = useRef<(err: unknown) => void>(() => {});
+  const handleOpenSettingsRef = useRef<(section?: SectionId) => void>(() => {});
 
   const coordinatorRef = useRef<NotificationCoordinator | null>(null);
   if (!coordinatorRef.current) {
@@ -765,6 +796,8 @@ function WorkspaceApp({
       onMarkWorktreeUnread: (path, owner) => markWorktreeUnreadRef.current?.(path, owner),
       isWindowFocused: () => getNativeWindowFocused() ?? isWindowForegroundFocused(),
       onError: (err) => reportRuntimeErrorRef.current(err),
+      onPermissionUnavailable: () =>
+        showNotificationPermissionHint(() => handleOpenSettingsRef.current("notifications")),
     });
   }
 
@@ -1231,7 +1264,11 @@ function WorkspaceApp({
         });
         if (!cancelled) {
           const ipcError = toIpcError(error);
-          setRegistrationError({ workspaceId: activeProject.workspaceId, message: `${ipcError.code}: ${ipcError.message}` });
+          setRegistrationError({
+            workspaceId: activeProject.workspaceId,
+            code: ipcError.code,
+            message: ipcError.message,
+          });
           reportRuntimeError(error);
         }
       });
@@ -1571,7 +1608,9 @@ function WorkspaceApp({
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
-  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
+  const [onboardingPermissions, setOnboardingPermissions] = useState<SystemPermissionsStatus | null>(null);
+  const [whatsNew, setWhatsNew] = useState<WhatsNewEntry | null>(null);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
@@ -2429,43 +2468,88 @@ function WorkspaceApp({
     setSettingsInitialSection(validSection);
     setIsSettingsOpen(true);
   }, []);
+  handleOpenSettingsRef.current = handleOpenSettings;
   const handleOpenSshSettings = useCallback(() => handleOpenSettings("ssh"), [handleOpenSettings]);
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
   }, []);
 
-  const handleCloseOnboarding = useCallback((dontShowAgain: boolean) => {
-    if (dontShowAgain) {
-      savePermissionsOnboardingDismissed();
-    }
-    setIsOnboardingOpen(false);
-  }, []);
-
   useEffect(() => {
+    if (!isNativeRuntime || activeRemoteHostRef.current) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
-      if (loadPermissionsOnboardingDismissed()) return;
-      const status = await getSystemPermissionsStatus().catch(() => null);
-      if (!cancelled && shouldShowPermissionsOnboarding(status, false)) {
-        setIsOnboardingOpen(true);
+      if (activeRemoteHostRef.current) return;
+      const [permissions, cli] = await Promise.all([
+        getSystemPermissionsStatus().catch(() => null),
+        getCliLauncherStatus().catch(() => null),
+      ]);
+      if (cancelled) return;
+      if (permissions) {
+        setOnboardingPermissions(permissions);
+      }
+      const ctx: OnboardingContext = {
+        permissions,
+        agents: resolvedAgentsRef.current,
+        cli,
+        projectCount: projectsRef.current.length,
+      };
+      const state = loadOnboardingState();
+      if (shouldAutoOpenOnboarding(state, ctx)) {
+        setOnboardingSteps(pendingOnboardingSteps(state, ctx));
       }
     }, 1200);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const handleOpenOnboarding = async () => {
+      const [permissions, cli] = await Promise.all([
+        getSystemPermissionsStatus().catch(() => null),
+        getCliLauncherStatus().catch(() => null),
+      ]);
+      if (cancelled) return;
+      if (permissions) {
+        setOnboardingPermissions(permissions);
+      }
+      const ctx: OnboardingContext = {
+        permissions,
+        agents: resolvedAgentsRef.current,
+        cli,
+        projectCount: projectsRef.current.length,
+      };
+      setOnboardingSteps(rerunOnboardingSteps(ctx));
+    };
+    window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding);
+    };
   }, []);
 
   useEffect(() => {
-    const handleOpenOnboarding = () => {
-      setIsOnboardingOpen(true);
-    };
-    window.addEventListener(OPEN_PERMISSIONS_ONBOARDING_EVENT, handleOpenOnboarding);
+    if (!isNativeRuntime) return;
+    return startWhatsNewRecorder();
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let cancelled = false;
+    void getCurrentVersion().then((version) => {
+      if (cancelled || !version) return;
+      const entry = resolveWhatsNew(version);
+      if (!cancelled && entry) {
+        setWhatsNew(entry);
+      }
+    });
     return () => {
-      window.removeEventListener(OPEN_PERMISSIONS_ONBOARDING_EVENT, handleOpenOnboarding);
+      cancelled = true;
     };
-  }, []);
+  }, [isNativeRuntime]);
 
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
@@ -3064,7 +3148,16 @@ function WorkspaceApp({
   useShortcuts(shortcutHandlers);
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
-  const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId ? registrationError.message : undefined;
+  const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
+    ? `${registrationError.code}: ${registrationError.message}`
+    : undefined;
+  const permissionsSummary = useMemo(() => {
+    if (!onboardingPermissions) return null;
+    const keys = visiblePermissionKeys(onboardingPermissions);
+    if (keys.length === 0) return null;
+    const granted = keys.filter((k) => onboardingPermissions[k]?.granted).length;
+    return { granted, total: keys.length };
+  }, [onboardingPermissions]);
   const activeSshTabOperation = sshTabOperation?.workspaceId === activeProject.workspaceId ? sshTabOperation : null;
   const sshInitializing = registeredProjectId !== activeProject.workspaceId ||
     workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading" ||
@@ -3162,6 +3255,21 @@ function WorkspaceApp({
         {!activeRemoteHost && pairedTerminalsUnavailable ? <div role="alert" className="px-4 py-3 text-sm text-muted-foreground">
           Paired daemon terminal support is unavailable. Enable paired projects in Settings with a compatible native proxy. Saved tabs and panes are preserved.
         </div> : null}
+        {!activeRemoteHost &&
+        activeProject.target?.kind !== "ssh" &&
+        activeProject.target?.kind !== "pairedDaemon" &&
+        registrationError?.workspaceId === activeProject.workspaceId ? (
+          <DaemonConnectionBanner
+            error={{
+              code: registrationError.code,
+              message: registrationError.message,
+            }}
+            onRetry={() => {
+              setRegistrationError(null);
+              setRegistrationAttempt((attempt) => attempt + 1);
+            }}
+          />
+        ) : null}
         {activeRemoteHost ? (
           <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
             <RemoteHostConnection
@@ -3172,22 +3280,14 @@ function WorkspaceApp({
             />
           </div>
         ) : projects.length === 0 ? (
-          <div
-            data-testid="no-projects-view"
-            className="flex h-full flex-1 flex-col items-center justify-center gap-4 bg-background"
-          >
-            <div className="flex flex-col items-center gap-1 text-center">
-              <p className="text-sm font-medium text-muted-foreground">No projects</p>
-              <p className="text-xs text-muted-foreground/70">Add a project to open a terminal workspace.</p>
-            </div>
-            <button
-              type="button"
-              onClick={handleOpenAddProject}
-              className="flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium hover:bg-accent/80"
-            >
-              <span>Add Project</span>
-            </button>
-          </div>
+          <GettingStartedChecklist
+            onAddProject={handleOpenAddProject}
+            onConnectMachine={() => handleOpenSettings("remote")}
+            onOpenWelcome={() => {
+              window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
+            }}
+            permissionsSummary={permissionsSummary}
+          />
         ) : showSshStatus && activeProject.target?.kind === "ssh" ? (
           <SshWorkspaceStatus
             hostLabel={getCachedSshHosts()?.find((host) => host.id === sshHostId)?.label ?? activeProject.target.hostId}
@@ -3327,9 +3427,45 @@ function WorkspaceApp({
             onOpenSshProject={handleOpenSshProject} />
         </Suspense>
       ) : null}
-      {isOnboardingOpen ? (
+      {!activeRemoteHost && onboardingSteps && onboardingSteps.length > 0 ? (
         <Suspense fallback={null}>
-          <PermissionsOnboardingDialog open onClose={handleCloseOnboarding} />
+          <WelcomeWizard
+            steps={onboardingSteps}
+            permissionsStatus={onboardingPermissions}
+            agents={resolvedAgents}
+            isMac={isMacShortcutPlatform()}
+            onStepCompleted={(step) => markOnboardingStepsCompleted([step])}
+            onFinish={() => setOnboardingSteps(null)}
+            onSkip={() => {
+              dismissOnboarding();
+              setOnboardingSteps(null);
+            }}
+            onRemindLater={() => setOnboardingSteps(null)}
+            onAddProject={() => {
+              setOnboardingSteps(null);
+              handleOpenAddProject();
+            }}
+            onConnectMachine={() => {
+              setOnboardingSteps(null);
+              handleOpenSettings("remote");
+            }}
+            onOpenAgentSettings={() => {
+              setOnboardingSteps(null);
+              handleOpenSettings("agents");
+            }}
+          />
+        </Suspense>
+      ) : null}
+      {!activeRemoteHost && whatsNew && (!onboardingSteps || onboardingSteps.length === 0) ? (
+        <Suspense fallback={null}>
+          <WhatsNewDialog
+            version={whatsNew.version}
+            notes={whatsNew.notes}
+            onClose={() => {
+              markWhatsNewSeen(whatsNew.version);
+              setWhatsNew(null);
+            }}
+          />
         </Suspense>
       ) : null}
       {isAddProjectOpen ? (
