@@ -614,7 +614,8 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
 
     expect(result.current.state.layout.tabs.map((tab) => tab.id)).toEqual([docsTabId, mainTabId, featureTabId]);
-    expect(result.current.state.layout.tabs.find((tab) => tab.id === mainTabId)?.label).toBe("renamed main");
+    // A terminal rename is kept beside the automatic label so live titles never overwrite it.
+    expect(result.current.state.layout.tabs.find((tab) => tab.id === mainTabId)).toMatchObject({ label: "main", customLabel: "renamed main" });
     expect(result.current.state.layout.tabs.find((tab) => tab.id === featureTabId)?.pinned).toBe(true);
 
     await act(async () => {

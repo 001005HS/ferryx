@@ -17,6 +17,8 @@ type SortableTabProps = {
   unread: boolean;
   sleeping?: boolean;
   activity?: ActivitySummary;
+  displayText?: string;
+  displayTooltip?: string;
   isRenaming: boolean;
   renameValue: string;
   onRenameValueChange: (value: string) => void;
@@ -35,6 +37,8 @@ export const SortableTab = memo(function SortableTab({
   unread,
   sleeping = false,
   activity,
+  displayText,
+  displayTooltip,
   isRenaming,
   renameValue,
   onRenameValueChange,
@@ -75,6 +79,7 @@ export const SortableTab = memo(function SortableTab({
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
+      title={displayTooltip}
       data-tab-dnd-id={tab.id}
       data-tab-group-id={groupId}
       data-tab-index={index}
@@ -163,7 +168,7 @@ export const SortableTab = memo(function SortableTab({
           className="min-w-0 flex-1 rounded border border-ring bg-background px-1 py-0.5 text-xs text-foreground outline-none"
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate text-left">{tab.label}</span>
+        <span className="min-w-0 flex-1 truncate text-left">{displayText ?? tab.label}</span>
       )}
 
       {isPinned ? <Pin className="size-2.5 shrink-0 text-muted-foreground/80" aria-label="Pinned tab" /> : null}
@@ -172,7 +177,7 @@ export const SortableTab = memo(function SortableTab({
         <span
           role="button"
           tabIndex={0}
-          aria-label={`Close ${tab.label}`}
+          aria-label={`Close ${displayText ?? tab.label}`}
           data-shortcut-close-tab={tab.id}
           onPointerDown={stopPointer}
           onClick={(event) => {

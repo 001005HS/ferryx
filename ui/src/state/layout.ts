@@ -288,7 +288,27 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
     }
     case "RENAME_TAB": {
       const label = action.label.trim();
-      if (!label || !state.tabs.some((tab) => tab.id === action.tabId)) return state;
+      const target = state.tabs.find((tab) => tab.id === action.tabId);
+      if (!target) return state;
+      if (isTerminalTab(target)) {
+        // A terminal tab's label is its automatic fallback; a user rename lives beside it so
+        // live titles never overwrite it, and clearing the rename returns the tab to automatic.
+        if (!label && target.customLabel === undefined) return state;
+        if (label && target.customLabel === label) return state;
+        return normalizeLayoutInternal(
+          {
+            ...state,
+            tabs: state.tabs.map((tab) => {
+              if (tab.id !== action.tabId || !isTerminalTab(tab)) return tab;
+              if (label) return { ...tab, customLabel: label };
+              const { customLabel: _cleared, ...rest } = tab;
+              return rest;
+            }),
+          },
+          true,
+        );
+      }
+      if (!label) return state;
       return normalizeLayoutInternal(
         {
           ...state,

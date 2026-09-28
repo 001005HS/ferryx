@@ -258,3 +258,67 @@ fn probe_generic_selection_and_esc_cancel_do_not_fabricate_copilot() {
         "generic esc-to-cancel prompt must not fabricate copilot"
     );
 }
+
+// Measured 2026-09-28 on a live senpi (omo) pane that the UI kept reporting as working for 40
+// minutes after its transcript went quiet: senpi draws no bare ">" prompt, so between turns
+// its bottom lines are the status footer and the OmO/memory tag line.
+const SENPI_IDLE_FOOTER: [&str; 4] = [
+    "  Reloaded keybindings, extensions, skills, prompts, themes, and context files",
+    "",
+    "/Volumes/T9-Mac/Noveling/noveling \u{2022} main \u{2022} $0.552 \u{2022} 359K/667K (53.8%) (auto)      (kiro-lb) claude-opus-5.5:medium",
+    "(\u{1f63a} OmO Native by Q Kim) mem:noveling-572243cf 10m ago (+53)",
+];
+
+#[test]
+fn probe_senpi_idle_footer_settles_a_pane_last_seen_working() {
+    assert_eq!(
+        detect(&SENPI_IDLE_FOOTER, "OmO - noveling", Some(AgentActivity::Working)),
+        Some(AgentActivity::Idle),
+        "senpi's between-turn footer is idle evidence; holding the previous working state pins the pane forever"
+    );
+}
+
+#[test]
+fn probe_senpi_live_working_line_above_footer_stays_working() {
+    let rows = [
+        "  \u{2022} Working (18s \u{2022} esc to interrupt)",
+        "/Volumes/T9-Mac/project/ferryx \u{2022} main \u{2022} $1.204 \u{2022} 120K/667K (18.0%) (auto)      claude-opus-5.5:medium",
+        "(\u{1f63a} OmO Native by Q Kim) mem:ferryx-f3088a01 just now (+20)",
+    ];
+    assert_eq!(
+        detect(&rows, "OmO - ferryx", Some(AgentActivity::Idle)),
+        Some(AgentActivity::Working),
+        "the live working line directly above the footer must veto the footer idle rule"
+    );
+}
+
+#[test]
+fn probe_senpi_ask_user_question_reaches_blocked() {
+    let rows = [
+        "  \u{2022} Waiting for your answer",
+        "  Approach \u{2014} Which display should tabs use?",
+        "  \u{276f} 1. Live agent title",
+        "    2. Branch name",
+        "  Submit (0/1 answered) \u{2014} Enter advances",
+        "(\u{1f63a} OmO Native by Q Kim) mem:ferryx-f3088a01 just now (+20)",
+    ];
+    assert_eq!(
+        detect(&rows, "? Approach", Some(AgentActivity::Working)),
+        Some(AgentActivity::Blocked),
+        "senpi's question box is a request for the user; it must not read as working"
+    );
+}
+
+#[test]
+fn probe_quoted_waiting_for_answer_without_question_box_is_not_blocked() {
+    let rows = [
+        "$ grep -rn 'Waiting for your answer' src/",
+        "src/ui.ts:12:  status = \"Waiting for your answer\";",
+        "$ ",
+    ];
+    assert_ne!(
+        detect(&rows, "zsh", None),
+        Some(AgentActivity::Blocked),
+        "quoting the phrase in a shell must not fabricate a pending question"
+    );
+}

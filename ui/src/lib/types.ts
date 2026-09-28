@@ -184,6 +184,8 @@ export type TerminalTab = {
   /** Compatibility primary session; every real pane leaf is authoritative in TabPaneLayout. */
   sessionId: string;
   pinned?: boolean;
+  /** Set only by an explicit user rename; wins over live terminal/agent titles. */
+  customLabel?: string;
 };
 
 export type BrowserProfileId = string;

@@ -137,6 +137,7 @@ import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
+import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
@@ -548,7 +549,7 @@ export function deriveFocusedTerminal(
         : null;
 
       const activity = sessionId ? state.activityBySessionId?.[sessionId] : undefined;
-      const baseLabel = remoteTabLabel(tab.label);
+      const baseLabel = remoteTabLabel(staticTabLabel(tab));
       return {
         id: remotePaneId(tab.id, multiPane ? leafId : null),
         label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
@@ -2174,7 +2175,7 @@ function WorkspaceApp({
         return activity?.state === "working" || activity?.state === "waiting";
       }).length;
       if (activeAgentCount > 0 || generalSettings.confirmCloseTab) {
-        setPendingTabClose({ kind: "tab", tabId: tab.id, label: tab.label, activeAgentCount });
+        setPendingTabClose({ kind: "tab", tabId: tab.id, label: isTerminalTab(tab) ? staticTabLabel(tab) : tab.label, activeAgentCount });
         return;
       }
       void closeTab(tabId).catch(reportRuntimeError);
@@ -2227,7 +2228,7 @@ function WorkspaceApp({
           return activity?.state === "working" || activity?.state === "waiting";
         }).length;
         if (activeAgentCount > 0 || (generalSettings.confirmCloseTab && !tab?.pinned)) {
-          setPendingTabClose({ kind: "tab", tabId, leafId, label: tab?.label ?? "", activeAgentCount });
+          setPendingTabClose({ kind: "tab", tabId, leafId, label: tab && isTerminalTab(tab) ? staticTabLabel(tab) : (tab?.label ?? ""), activeAgentCount });
           return;
         }
       }

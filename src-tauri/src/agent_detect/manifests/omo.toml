@@ -21,6 +21,20 @@ any = [
 ]
 
 [[rules]]
+id = "ask_user_question_blocked"
+state = "blocked"
+priority = 350
+region = "whole_recent"
+visible_blocker = true
+# senpi's ask_user_question UI: the working line reads "Waiting for your answer" while the
+# question box shows its submit line ("Submit (0/2 answered) — Enter advances"). Both are
+# required so an unrelated screen quoting either phrase is not taken for a pending question.
+all = [
+  { contains = ["waiting for your answer"] },
+  { line_regex = ['(?i)submit \(\d+/\d+ answered\)'] },
+]
+
+[[rules]]
 id = "spinner_working"
 state = "working"
 priority = 200
@@ -47,5 +61,27 @@ not = [
   { line_regex = ['[\x{2800}-\x{28FF}]'] },
   { contains = ["esc to interrupt"] },
   { contains = ["esc to cancel"] },
+  { contains = ["waiting for approval"] },
+]
+
+[[rules]]
+id = "senpi_footer_idle"
+state = "idle"
+priority = 40
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+# senpi (omo) never draws a bare ">" prompt: between turns its bottom lines are the status
+# footer (context meter "359K/667K (53.8%)") plus the OmO/memory tag line. Without this rule
+# nothing matches that screen and the engine holds the previous state, so a pane last seen
+# working stays working after the turn ends. The working line ("(12s • esc to interrupt)")
+# sits directly above the footer while a turn runs, so its presence vetoes idle.
+all = [
+  { line_regex = ['\d+(?:\.\d+)?[kKmM]?/\d+(?:\.\d+)?[kKmM] \((?:\d+(?:\.\d+)?%|\?)\)'] },
+  { any = [{ contains = ["omo native"] }, { line_regex = ['\bmem:[a-z0-9-]+'] }] },
+]
+not = [
+  { line_regex = ['[\x{2800}-\x{28FF}]'] },
+  { contains = ["to interrupt"] },
+  { contains = ["waiting for your answer"] },
   { contains = ["waiting for approval"] },
 ]

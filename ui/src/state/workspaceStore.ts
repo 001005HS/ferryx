@@ -619,7 +619,7 @@ export function useWorkspaceStore({
       };
       const tab: TerminalTab = {
         id: tabId,
-        label: label ?? nextTabLabel(worktree, getAllTabs(stateRef.current), stateRef.current.sessions),
+        label: label ?? nextTabLabel(worktree),
         sessionId,
       };
       return { tab, session };
@@ -3210,19 +3210,19 @@ function getActiveWorktree(state: WorkspaceState) {
   return state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? state.worktrees[0] ?? null;
 }
 
-function nextTabLabel(worktree: Worktree, allTabs: WorkspaceTab[], sessions: Record<string, TerminalSession>) {
+/**
+ * Automatic fallback label for a new terminal tab: the worktree's branch. The visible text is
+ * resolved live from the terminal title (see state/tabDisplay.ts), which also disambiguates
+ * identical names, so no ordinal is baked into the stored label.
+ */
+function nextTabLabel(worktree: Worktree) {
   const branch = worktree.branch?.replace(/^refs\/heads\//, "") ?? "";
   const parts = branch.split("/");
-  const base =
-    parts[0] === "orca" && parts.length > 2
-      ? parts.slice(2).join("/")
-      : branch && branch !== "orca-lite"
-        ? branch
-        : "main";
-  const count = allTabs.filter(
-    (tab) => isTerminalTab(tab) && sessionWorktreePath(sessions[tab.sessionId]) === worktree.path,
-  ).length + 1;
-  return count === 1 ? base : `${base} (${count})`;
+  return parts[0] === "orca" && parts.length > 2
+    ? parts.slice(2).join("/")
+    : branch && branch !== "orca-lite"
+      ? branch
+      : "main";
 }
 
 function mapBackendLifecycle(payload: TerminalLifecyclePayload): TerminalLifecycle {

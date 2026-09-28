@@ -169,6 +169,29 @@ describe("TabBar", () => {
     expect(onAdd).toHaveBeenCalledOnce();
   });
 
+  it("renders the resolved display text and tooltip instead of the raw label", () => {
+    render(
+      <TabBar
+        groupId="group-a"
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        tabDisplayById={{
+          "tab-a": { text: "fix login bug", tooltip: "OmO - fix login bug - ferryx (main)" },
+        }}
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    expect(getTab("fix login bug")).toHaveAttribute(
+      "title",
+      "OmO - fix login bug - ferryx (main)",
+    );
+    expect(screen.queryByText("main")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close fix login bug" })).toBeInTheDocument();
+  });
+
   it("supports keyboard tab activation", () => {
     const onActivate = vi.fn();
     render(

@@ -328,9 +328,33 @@ describe("layoutReducer with per-tab split trees", () => {
     state = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "  custom title  " });
     state = layoutReducer(state, { type: "SET_TAB_PINNED", tabId: "tab-1", pinned: true });
 
-    expect(state.tabs[0]).toMatchObject({ label: "custom title", pinned: true });
-    const unchanged = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "   " });
+    // A terminal rename is stored beside the automatic label so live titles never overwrite it.
+    expect(state.tabs[0]).toMatchObject({ customLabel: "custom title", pinned: true });
+    expect(state.tabs[0].label).toBe("tab-1");
+    const unchanged = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "custom title" });
     expect(unchanged).toBe(state);
+  });
+
+  it("clears a terminal tab's custom label on a blank rename so the tab returns to automatic", () => {
+    let state = createLayoutState([tab("tab-1", "s1")], "tab-1");
+    const untouched = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "   " });
+    expect(untouched).toBe(state);
+
+    state = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "build watcher" });
+    state = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "   " });
+
+    expect(state.tabs[0]).not.toHaveProperty("customLabel");
+    expect(state.tabs[0].label).toBe("tab-1");
+  });
+
+  it("renames browser tabs through their label and still rejects blank browser titles", () => {
+    const browser: BrowserTab = { id: "browser-1", kind: "browser", label: "Browser", browserId: "b1", url: "https://example.com" };
+    let state = createLayoutState([tab("tab-1", "s1"), browser], "browser-1");
+    state = layoutReducer(state, { type: "RENAME_TAB", tabId: "browser-1", label: " Docs " });
+
+    expect(state.tabs[1]).toMatchObject({ label: "Docs" });
+    expect(state.tabs[1]).not.toHaveProperty("customLabel");
+    expect(layoutReducer(state, { type: "RENAME_TAB", tabId: "browser-1", label: " " })).toBe(state);
   });
 
   it("ignores focus requests for leaves that do not exist", () => {

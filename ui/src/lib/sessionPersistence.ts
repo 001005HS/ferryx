@@ -237,6 +237,7 @@ export function serializeWorkspaceState(
         kind: "terminal",
         label: tab.label,
         pinned: Boolean(tab.pinned),
+        ...(tab.customLabel ? { customTitle: tab.customLabel } : {}),
         terminal: {
           primarySessionId: tab.sessionId,
           paneTree: effectiveRoot,
@@ -698,12 +699,14 @@ export function deserializeWorkspaceState(
       }
 
       const primarySessionId = persistedTab.terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
+      const customLabel = typeof persistedTab.customTitle === "string" ? persistedTab.customTitle.trim().slice(0, 200) : "";
       const tab: TerminalTab = {
         id: persistedTab.id,
         kind: "terminal",
         sessionId: primarySessionId,
         label: persistedTab.label,
         pinned: Boolean(persistedTab.pinned),
+        ...(customLabel ? { customLabel } : {}),
       };
       tabs.push(tab);
     }

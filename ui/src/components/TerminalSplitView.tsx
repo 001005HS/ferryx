@@ -19,7 +19,7 @@ import {
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Rows2, X } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 
 import type { ActivitySummary, TerminalActivity } from "../lib/activity";
@@ -35,6 +35,7 @@ import type {
   WorkspaceTab,
 } from "../lib/types";
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
+import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
 import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
 import {
@@ -280,6 +281,10 @@ export function TerminalSplitView({
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
   const normalizedLayout = normalizeLayout(layout);
+  const tabDisplayById = useMemo(
+    () => computeTerminalTabDisplay(normalizedLayout.tabs, normalizedLayout, sessions, activityBySessionId),
+    [normalizedLayout.tabs, sessions, activityBySessionId],
+  );
   const groups = normalizedLayout.tabGroups ?? {};
   const groupLayout = normalizedLayout.tabGroupLayout ?? null;
   const firstGroupId = firstTabGroupId(groupLayout);
@@ -504,6 +509,7 @@ export function TerminalSplitView({
     unreadTabIds,
     activityByTabId,
     activityBySessionId,
+    tabDisplayById,
     searchLeafId,
     onCloseSearch,
     onReconnectAgentSession,
@@ -552,6 +558,7 @@ export function TerminalSplitView({
           <TabBar
             tabs={[]}
             activeTabId=""
+            tabDisplayById={tabDisplayById}
             onActivate={onActivateTab}
             onClose={onCloseTab}
             onAdd={onAddTab}
@@ -692,6 +699,7 @@ type TabGroupViewProps = {
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
   activityBySessionId?: Record<string, TerminalActivity>;
+  tabDisplayById?: Record<string, TerminalTabDisplay | undefined>;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
@@ -744,6 +752,7 @@ function TabGroupView({
   unreadTabIds,
   activityByTabId,
   activityBySessionId,
+  tabDisplayById,
   searchLeafId,
   onCloseSearch,
   onReconnectAgentSession,
@@ -784,6 +793,7 @@ function TabGroupView({
         activeTabId={activeTab?.id ?? ""}
         unreadTabIds={unreadTabIds}
         activityByTabId={activityByTabId}
+        tabDisplayById={tabDisplayById}
         onActivate={onActivateTab}
         onClose={onCloseTab}
         onCloseOthers={onCloseOtherTabs}

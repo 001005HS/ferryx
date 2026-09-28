@@ -2,6 +2,7 @@ import { GitBranch, Search, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SHORTCUTS, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+import { staticTabLabel } from "../lib/tabTitle";
 import type { WorkspaceTab, Worktree } from "../lib/types";
 
 export type CommandPaletteProps = {
@@ -23,7 +24,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     [normalizedQuery, worktrees],
   );
   const filteredTabs = useMemo(
-    () => tabs.filter((tab) => tab.label.toLowerCase().includes(normalizedQuery)),
+    () => tabs.filter((tab) => staticTabLabel(tab).toLowerCase().includes(normalizedQuery)),
     [normalizedQuery, tabs],
   );
 
@@ -105,7 +106,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
                   className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-foreground hover:bg-accent"
                 >
                   <TerminalSquare className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">{tab.label}</span>
+                  <span className="min-w-0 flex-1 truncate">{staticTabLabel(tab)}</span>
                 </button>
               ))}
             </section>

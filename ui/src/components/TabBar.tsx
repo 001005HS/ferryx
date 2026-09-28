@@ -19,7 +19,8 @@ import {
 } from "../lib/sessionLifecycle";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 import { getSystemPermissionsStatus } from "../lib/tauri";
-import type { WorkspaceTab } from "../lib/types";
+import { isTerminalTab, type WorkspaceTab } from "../lib/types";
+import type { TerminalTabDisplay } from "../state/tabDisplay";
 import { SortableTab } from "./tab-dnd/SortableTab";
 import type { TabDropEdge } from "./tab-dnd/tabDragTypes";
 import { IconButton } from "./ui/IconButton";
@@ -59,6 +60,8 @@ type TabBarProps = {
   leadingSpacer?: number;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
+  /** Resolved live text/tooltip per terminal tab; falls back to `tab.label` when absent. */
+  tabDisplayById?: Record<string, TerminalTabDisplay | undefined>;
 };
 
 const WINDOWS_SHELL_OPTIONS = [
@@ -99,6 +102,7 @@ export function TabBar({
   leadingSpacer = 0,
   unreadTabIds,
   activityByTabId,
+  tabDisplayById,
 }: TabBarProps) {
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -259,8 +263,10 @@ export function TabBar({
     if (!onRenameTab) return;
     renameCancelledRef.current = false;
     setRenamingTabId(tab.id);
-    setRenameValue(tab.label);
-  }, [onRenameTab]);
+    setRenameValue(
+      (isTerminalTab(tab) && tab.customLabel) || tabDisplayById?.[tab.id]?.text || tab.label,
+    );
+  }, [onRenameTab, tabDisplayById]);
 
   const handleContextMenu = useCallback((event: React.MouseEvent, tab: WorkspaceTab) => {
     event.preventDefault();
@@ -436,6 +442,8 @@ export function TabBar({
                 unread={Boolean(unreadTabIds?.[tab.id] && !active)}
                 sleeping={sleeping}
                 activity={activityByTabId?.[tab.id]}
+                displayText={tabDisplayById?.[tab.id]?.text}
+                displayTooltip={tabDisplayById?.[tab.id]?.tooltip}
                 isRenaming={renamingTabId === tab.id}
                 renameValue={renameValue}
                 onRenameValueChange={setRenameValue}
