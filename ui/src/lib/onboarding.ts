@@ -4,12 +4,18 @@ import {
 } from "./storageKeys";
 import type { CliLauncherStatus, SystemPermissionsStatus } from "./types";
 
-export type OnboardingStepId = "intro" | "permissions" | "agents" | "project";
+export type OnboardingStepId =
+  | "intro"
+  | "features"
+  | "permissions"
+  | "agents"
+  | "project";
 
 export const ONBOARDING_VERSION = 1;
 
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "intro",
+  "features",
   "permissions",
   "agents",
   "project",
@@ -228,24 +234,15 @@ export function isOnboardingStepSatisfied(
         ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
       return hasAvailableAgent && cliSatisfied;
     }
+    case "features":
+      // Informational step: only completedSteps marks it as done.
+      return false;
     case "project":
       return ctx.projectCount > 0;
   }
 }
 
-export function pendingOnboardingSteps(
-  state: OnboardingState,
-  ctx: OnboardingContext
-): OnboardingStepId[] {
-  const completed = new Set<OnboardingStepId>(state.completedSteps);
-  return ONBOARDING_STEP_ORDER.filter(
-    (step) => !completed.has(step) && !isOnboardingStepSatisfied(step, ctx)
-  );
-}
-
-export function rerunOnboardingSteps(
-  ctx: OnboardingContext
-): OnboardingStepId[] {
+export function wizardSteps(ctx: OnboardingContext): OnboardingStepId[] {
   const visible = visiblePermissionKeys(ctx.permissions);
   return ONBOARDING_STEP_ORDER.filter((step) => {
     if (step === "permissions" && visible.length === 0) {
@@ -253,6 +250,42 @@ export function rerunOnboardingSteps(
     }
     return true;
   });
+}
+
+export function satisfiedOnboardingSteps(
+  state: OnboardingState,
+  ctx: OnboardingContext
+): OnboardingStepId[] {
+  const completed = new Set<OnboardingStepId>(state.completedSteps);
+  return wizardSteps(ctx).filter(
+    (step) => completed.has(step) || isOnboardingStepSatisfied(step, ctx)
+  );
+}
+
+export function pendingOnboardingSteps(
+  state: OnboardingState,
+  ctx: OnboardingContext
+): OnboardingStepId[] {
+  const completed = new Set<OnboardingStepId>(state.completedSteps);
+  return wizardSteps(ctx).filter(
+    (step) => !completed.has(step) && !isOnboardingStepSatisfied(step, ctx)
+  );
+}
+
+/**
+ * Where an auto-opened wizard should land: the first pending step that needs
+ * action. "features" is informational and never auto-satisfied, so it is skipped
+ * unless it is the only pending step; with nothing pending, the first step.
+ */
+export function initialWizardStepIndex(
+  steps: readonly OnboardingStepId[],
+  state: OnboardingState,
+  ctx: OnboardingContext
+): number {
+  const pending = pendingOnboardingSteps(state, ctx);
+  const target = pending.find((step) => step !== "features") ?? pending[0];
+  if (!target) return 0;
+  return Math.max(0, steps.indexOf(target));
 }
 
 export function shouldAutoOpenOnboarding(
@@ -263,6 +296,8 @@ export function shouldAutoOpenOnboarding(
     !state.dismissed &&
     ctx.permissions !== null &&
     ctx.permissions.platform !== "web" &&
-    pendingOnboardingSteps(state, ctx).length > 0
+    // "features" is informational and never auto-satisfied, so it must never be
+    // the sole reason the wizard pops back open after an upgrade.
+    pendingOnboardingSteps(state, ctx).some((step) => step !== "features")
   );
 }

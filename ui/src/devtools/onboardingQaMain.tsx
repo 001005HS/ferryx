@@ -8,7 +8,9 @@ import { GettingStartedChecklist } from "../components/onboarding/GettingStarted
 import { DaemonConnectionBanner } from "../components/DaemonConnectionBanner";
 import { WhatsNewDialog } from "../components/onboarding/WhatsNewDialog";
 import {
-  pendingOnboardingSteps,
+  ONBOARDING_STEP_ORDER,
+  visiblePermissionKeys,
+  wizardSteps,
   type OnboardingContext,
   type OnboardingStepId,
 } from "../lib/onboarding";
@@ -43,7 +45,15 @@ const platformParam = (params.get("platform") ?? "macos").toLowerCase();
 const stepParam = parseInt(params.get("step") ?? "0", 10);
 const initialStepIndex = Number.isNaN(stepParam) ? 0 : stepParam;
 const codeParam = params.get("code") ?? "DAEMON_UNAVAILABLE";
-const themeParam = params.get("theme") ?? "dark";
+const grantedParam = params.get("granted") === "1";
+const doneParam: OnboardingStepId[] = (params.get("done") ?? "")
+  .split(",")
+  .map((step) => step.trim())
+  .filter((step): step is OnboardingStepId =>
+    (ONBOARDING_STEP_ORDER as readonly string[]).includes(step),
+  );
+const themeParam =
+  params.get("theme") ?? (viewParam === "agents-light" ? "light" : "dark");
 
 if (themeParam === "light") {
   document.documentElement.classList.remove("dark");
@@ -139,6 +149,14 @@ function getPermissionsFixture(platform: string): SystemPermissionsStatus {
   };
 }
 
+function grantAllVisible(status: SystemPermissionsStatus): SystemPermissionsStatus {
+  const next: SystemPermissionsStatus = { ...status, allGranted: true };
+  for (const key of visiblePermissionKeys(status)) {
+    next[key] = { ...status[key], status: "granted", granted: true, canRequest: false };
+  }
+  return next;
+}
+
 const agentsFixture: ReadonlyArray<ResolvedAgent> = [
   {
     name: "claude",
@@ -168,10 +186,22 @@ const cliFixture: CliLauncherStatus = {
 };
 
 function OnboardingQaApp(): JSX.Element {
-  const permissionsFixture = React.useMemo(
-    () => getPermissionsFixture(platformParam),
-    [],
-  );
+  const permissionsFixture = React.useMemo(() => {
+    const base = getPermissionsFixture(platformParam);
+    return grantedParam ? grantAllVisible(base) : base;
+  }, []);
+
+  const steps = React.useMemo(() => {
+    const context: OnboardingContext = {
+      permissions: permissionsFixture,
+      agents: agentsFixture,
+      cli: cliFixture,
+      projectCount: 0,
+    };
+    const computedSteps = wizardSteps(context);
+    window.__qaSteps = computedSteps;
+    return computedSteps;
+  }, [permissionsFixture]);
 
   if (viewParam === "empty") {
     return (
@@ -186,11 +216,13 @@ function OnboardingQaApp(): JSX.Element {
     );
   }
 
-  if (viewParam === "banner") {
+  if (viewParam === "banner" || viewParam === "banner-mismatch") {
+    const bannerCode =
+      viewParam === "banner-mismatch" ? "DAEMON_PROTOCOL_MISMATCH" : codeParam;
     return (
       <div className="min-h-screen w-full bg-background p-4 flex flex-col gap-4">
         <DaemonConnectionBanner
-          error={{ code: codeParam, message: "daemon down" }}
+          error={{ code: bannerCode, message: "daemon down" }}
           onRetry={() => logQa("onRetry")}
         />
         <main className="flex-1 rounded-md border border-dashed border-zinc-800 p-8 flex items-center justify-center text-zinc-500">
@@ -212,21 +244,9 @@ function OnboardingQaApp(): JSX.Element {
     );
   }
 
-  const context: OnboardingContext = {
-    permissions: permissionsFixture,
-    agents: agentsFixture,
-    cli: cliFixture,
-    projectCount: 0,
-  };
-
-  const steps = React.useMemo(() => {
-    const computedSteps = pendingOnboardingSteps(
-      { version: 1, completedSteps: [], dismissed: false },
-      context,
-    );
-    window.__qaSteps = computedSteps;
-    return computedSteps;
-  }, [permissionsFixture]);
+  const agentsView = viewParam === "agents" || viewParam === "agents-light";
+  const startIndex =
+    agentsView && !params.has("step") ? steps.indexOf("agents") : initialStepIndex;
 
   if (steps.length === 0) {
     return (
@@ -243,10 +263,10 @@ function OnboardingQaApp(): JSX.Element {
         permissionsStatus={permissionsFixture}
         agents={agentsFixture}
         isMac={platformParam === "macos"}
-        initialStepIndex={initialStepIndex}
+        doneSteps={doneParam}
+        initialStepIndex={startIndex}
         onAddProject={() => logQa("onAddProject")}
         onConnectMachine={() => logQa("onConnectMachine")}
-        onOpenAgentSettings={() => logQa("onOpenAgentSettings")}
         onStepCompleted={(step: OnboardingStepId) => logQa(`onStepCompleted:${step}`)}
         onFinish={() => logQa("onFinish")}
         onSkip={() => logQa("onSkip")}

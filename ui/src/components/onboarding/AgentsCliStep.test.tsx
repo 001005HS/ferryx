@@ -3,9 +3,14 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveAgentLogoByCommandName } from "../../lib/agentIcon";
-import { loadAgentSettings, type ResolvedAgent } from "../../lib/agentsSettings";
+import {
+  AGENTS_SETTINGS_CHANGED_EVENT,
+  loadAgentSettings,
+  type ResolvedAgent,
+} from "../../lib/agentsSettings";
 import type { CliLauncherStatus } from "../../lib/types";
 import { AgentsCliStep, type AgentsCliStepProps } from "./AgentsCliStep";
+import { WelcomeWizard } from "./WelcomeWizard";
 
 const mockTauri = vi.hoisted(() => ({
   getCliLauncherStatus: vi.fn(),
@@ -19,7 +24,7 @@ vi.mock("../../lib/tauri", () => ({
 
 const EMPTY_TITLE = "No coding agents found on your PATH.";
 const EMPTY_DESCRIPTION =
-  "Install one (for example Claude Code or Codex), or add a custom command in Settings > Agents.";
+  "Install one (for example Claude Code or Codex), or add a custom command below.";
 
 function agent(name: string, available: boolean): ResolvedAgent {
   return { name, available, enabled: true, command: name, args: "", custom: false };
@@ -52,7 +57,6 @@ function renderStep(overrides: Partial<AgentsCliStepProps> = {}) {
   return render(
     <AgentsCliStep
       agents={[agent("claude", true)]}
-      onOpenAgentSettings={vi.fn()}
       loadCliStatus={() => Promise.resolve(notInstalledStatus)}
       {...overrides}
     />
@@ -156,16 +160,211 @@ describe("AgentsCliStep", () => {
     expect(screen.getByText("Not installed: gjc, aider")).toBeDefined();
   });
 
-  it("shows the empty message and opens agent settings when nothing is installed", () => {
-    const onOpenAgentSettings = vi.fn();
-    renderStep({ agents: [agent("codex", false)], onOpenAgentSettings });
+  it("shows the empty message when nothing is installed", () => {
+    renderStep({ agents: [agent("codex", false)] });
 
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByText(EMPTY_TITLE)).toBeDefined();
     expect(screen.getByText(EMPTY_DESCRIPTION)).toBeDefined();
+  });
 
-    fireEvent.click(screen.getByTestId("onboarding-open-agent-settings"));
-    expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
+  it("has no control that leaves the wizard", async () => {
+    const onSkip = vi.fn();
+    const onRemindLater = vi.fn();
+    const onFinish = vi.fn();
+    render(
+      <WelcomeWizard
+        steps={["agents"]}
+        permissionsStatus={null}
+        agents={[agent("claude", true), agent("codex", false)]}
+        isMac
+        onAddProject={vi.fn()}
+        onConnectMachine={vi.fn()}
+        onStepCompleted={vi.fn()}
+        onFinish={onFinish}
+        onSkip={onSkip}
+        onRemindLater={onRemindLater}
+        loadCliStatus={() => Promise.resolve(notInstalledStatus)}
+        installCli={() => Promise.resolve(installedStatus)}
+      />
+    );
+    await screen.findByTestId("onboarding-install-cli");
+
+    const wizardChrome = new Set([
+      "onboarding-skip",
+      "onboarding-remind-later",
+      "onboarding-finish",
+      "onboarding-next",
+      "onboarding-back",
+    ]);
+    const stepButtons = screen
+      .getAllByRole("button")
+      .concat(screen.getAllByRole("radio"))
+      .filter((button) => !wizardChrome.has(button.getAttribute("data-testid") ?? ""));
+    expect(stepButtons.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const button of stepButtons) {
+        if (button.isConnected) fireEvent.click(button);
+      }
+    });
+
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(onSkip).not.toHaveBeenCalled();
+    expect(onRemindLater).not.toHaveBeenCalled();
+    expect(onFinish).not.toHaveBeenCalled();
+  });
+
+  it("focuses the name field and adds a custom agent as the default", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+
+    const nameInput = screen.getByTestId("onboarding-custom-agent-name");
+    expect(document.activeElement).toBe(nameInput);
+
+    fireEvent.change(nameInput, { target: { value: "My Agent" } });
+    fireEvent.change(screen.getByTestId("onboarding-custom-agent-command"), {
+      target: { value: "echo" },
+    });
+    fireEvent.click(screen.getByTestId("onboarding-custom-agent-add"));
+
+    const settings = loadAgentSettings();
+    expect(settings.custom.map((entry) => entry.name)).toContain("my-agent");
+    expect(settings.defaultAgentId).toBe("my-agent");
+    expect(screen.queryByTestId("onboarding-custom-agent-name")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("onboarding-add-custom-agent"),
+    );
+  });
+
+  it("persists arguments separately from the command in a single settings write", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+    const listener = vi.fn();
+    window.addEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+
+    try {
+      fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+      fireEvent.change(screen.getByTestId("onboarding-custom-agent-name"), {
+        target: { value: "runner" },
+      });
+      fireEvent.change(screen.getByTestId("onboarding-custom-agent-command"), {
+        target: { value: "my-agent" },
+      });
+      fireEvent.change(screen.getByTestId("onboarding-custom-agent-args"), {
+        target: { value: " --continue " },
+      });
+      fireEvent.click(screen.getByTestId("onboarding-custom-agent-add"));
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+    }
+
+    const settings = loadAgentSettings();
+    expect(settings.custom).toEqual([
+      { name: "runner", command: "my-agent", args: "--continue" },
+    ]);
+    expect(settings.defaultAgentId).toBe("runner");
+  });
+
+  it("submits the custom agent form with Enter", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+    fireEvent.change(screen.getByTestId("onboarding-custom-agent-name"), {
+      target: { value: "runner" },
+    });
+    const commandInput = screen.getByTestId("onboarding-custom-agent-command");
+    fireEvent.change(commandInput, { target: { value: "runner --go" } });
+    fireEvent.submit(commandInput.closest("form") as HTMLFormElement);
+
+    expect(loadAgentSettings().defaultAgentId).toBe("runner");
+    expect(screen.queryByTestId("onboarding-custom-agent-name")).toBeNull();
+  });
+
+  it("rejects an empty custom agent name without persisting", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+    fireEvent.change(screen.getByTestId("onboarding-custom-agent-command"), {
+      target: { value: "echo" },
+    });
+    fireEvent.click(screen.getByTestId("onboarding-custom-agent-add"));
+
+    const alert = screen.getByRole("alert");
+    expect(alert.id).not.toBe("");
+    expect(screen.getByTestId("onboarding-custom-agent-name")).toHaveAttribute(
+      "aria-describedby",
+      alert.id,
+    );
+    expect(loadAgentSettings().custom).toHaveLength(0);
+    expect(loadAgentSettings().defaultAgentId).toBeNull();
+  });
+
+  it("rejects a reserved built-in agent name", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+    fireEvent.change(screen.getByTestId("onboarding-custom-agent-name"), {
+      target: { value: "claude" },
+    });
+    fireEvent.change(screen.getByTestId("onboarding-custom-agent-command"), {
+      target: { value: "echo" },
+    });
+    fireEvent.click(screen.getByTestId("onboarding-custom-agent-add"));
+
+    expect(screen.getByRole("alert")).toBeDefined();
+    expect(loadAgentSettings().custom).toHaveLength(0);
+    expect(loadAgentSettings().defaultAgentId).toBeNull();
+  });
+
+  it("dispatches the agents-settings changed event on Rescan", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+    const listener = vi.fn();
+    window.addEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+
+    try {
+      fireEvent.click(screen.getByTestId("onboarding-rescan-agents"));
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+    }
+  });
+
+  it("closes the custom agent form on Escape without propagating the keydown", () => {
+    const parentKeyDown = vi.fn();
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <AgentsCliStep
+          agents={[agent("claude", true)]}
+          loadCliStatus={() => Promise.resolve(installedStatus)}
+        />
+      </div>
+    );
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+    fireEvent.keyDown(screen.getByTestId("onboarding-custom-agent-name"), {
+      key: "Escape",
+    });
+
+    expect(screen.queryByTestId("onboarding-custom-agent-name")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("onboarding-add-custom-agent"),
+    );
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the add button when the form is cancelled", () => {
+    renderStep({ loadCliStatus: () => Promise.resolve(installedStatus) });
+
+    fireEvent.click(screen.getByTestId("onboarding-add-custom-agent"));
+    fireEvent.click(screen.getByTestId("onboarding-custom-agent-cancel"));
+
+    expect(screen.queryByTestId("onboarding-custom-agent-name")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("onboarding-add-custom-agent"),
+    );
   });
 
   it("disables the install button while installing and shows the installed state", async () => {
@@ -230,7 +429,7 @@ describe("AgentsCliStep", () => {
     mockTauri.getCliLauncherStatus.mockResolvedValue(notInstalledStatus);
     mockTauri.installCliLauncher.mockResolvedValue(installedStatus);
 
-    render(<AgentsCliStep agents={[agent("claude", true)]} onOpenAgentSettings={vi.fn()} />);
+    render(<AgentsCliStep agents={[agent("claude", true)]} />);
 
     fireEvent.click(await screen.findByTestId("onboarding-install-cli"));
 

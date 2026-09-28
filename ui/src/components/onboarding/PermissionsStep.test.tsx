@@ -202,6 +202,38 @@ describe("PermissionsStep", () => {
     expect(screen.queryByTestId("onboarding-permissions-count")).toBeNull();
   });
 
+  it("shows the all-set line when every visible permission is granted", () => {
+    const fetchStatus = vi.fn(() => Promise.resolve(mockMacStatusAllGranted));
+    render(
+      <PermissionsStep initialStatus={mockMacStatusAllGranted} fetchStatus={fetchStatus} />
+    );
+
+    expect(screen.getByTestId("onboarding-permissions-all-set")).toBeDefined();
+    expect(screen.getByTestId("onboarding-permissions-count").textContent).toBe(
+      "3 of 3 granted"
+    );
+  });
+
+  it("hides the all-set line when one visible permission is not granted", () => {
+    const status: SystemPermissionsStatus = {
+      ...mockMacStatusAllGranted,
+      allGranted: false,
+      notifications: {
+        ...mockMacStatusAllGranted.notifications,
+        status: "not_determined",
+        granted: false,
+        canRequest: true,
+      },
+    };
+    const fetchStatus = vi.fn(() => Promise.resolve(status));
+    render(<PermissionsStep initialStatus={status} fetchStatus={fetchStatus} />);
+
+    expect(screen.queryByTestId("onboarding-permissions-all-set")).toBeNull();
+    expect(screen.getByTestId("onboarding-permissions-count").textContent).toBe(
+      "2 of 3 granted"
+    );
+  });
+
   it("updates status when visibilitychange event is triggered to visible", async () => {
     const fetchStatus = vi
       .fn()

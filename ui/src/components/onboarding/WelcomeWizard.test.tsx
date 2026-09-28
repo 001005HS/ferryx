@@ -59,7 +59,6 @@ function createDefaultProps(overrides?: Partial<WelcomeWizardProps>): WelcomeWiz
     isMac: true,
     onAddProject: vi.fn(),
     onConnectMachine: vi.fn(),
-    onOpenAgentSettings: vi.fn(),
     onStepCompleted: vi.fn(),
     onFinish: vi.fn(),
     onSkip: vi.fn(),
@@ -260,6 +259,63 @@ describe("WelcomeWizard", () => {
     render(<WelcomeWizard {...props} />);
 
     expect(screen.getByTestId("mock-agents-step")).toBeDefined();
+  });
+
+  it("walks the five-step order with Continue and returns with Back", () => {
+    const props = createDefaultProps({
+      steps: ["intro", "features", "permissions", "agents", "project"],
+    });
+    render(<WelcomeWizard {...props} />);
+
+    const heading = () => screen.getByRole("heading", { level: 2 }).textContent;
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 5");
+    expect(heading()).toBe("Set up Ferryx");
+
+    const expected = [
+      "What Ferryx does",
+      "Grant system access",
+      "Choose your default agent",
+      "Open your first project",
+    ];
+    expected.forEach((title, index) => {
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+      expect(heading()).toBe(title);
+      expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe(
+        `Step ${index + 2} of 5`,
+      );
+    });
+    expect(screen.getByTestId("onboarding-finish")).toBeDefined();
+
+    fireEvent.click(screen.getByTestId("onboarding-back"));
+    expect(heading()).toBe("Choose your default agent");
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 4 of 5");
+  });
+
+  it("marks already satisfied steps done in the rail but never the current step", () => {
+    const props = createDefaultProps({
+      steps: ["intro", "features", "permissions", "agents", "project"],
+      doneSteps: ["permissions"],
+      initialStepIndex: 0,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    const permissionsRow = screen.getByTestId("onboarding-rail-permissions");
+    const introRow = screen.getByTestId("onboarding-rail-intro");
+    expect(permissionsRow.querySelector("svg")).not.toBeNull();
+    expect(introRow.querySelector("svg")).toBeNull();
+    expect(introRow.getAttribute("aria-current")).toBe("step");
+  });
+
+  it("initialStepIndex=2 opens on the permissions step of the five-step order", () => {
+    const props = createDefaultProps({
+      steps: ["intro", "features", "permissions", "agents", "project"],
+      initialStepIndex: 2,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Grant system access");
+    expect(screen.getByTestId("mock-permissions-step")).toBeDefined();
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 3 of 5");
   });
 
   it("returns null when steps is empty", () => {

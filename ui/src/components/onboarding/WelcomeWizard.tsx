@@ -8,18 +8,19 @@ import type { CliLauncherStatus, SystemPermissionsStatus } from "../../lib/types
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
 import { AgentsCliStep } from "./AgentsCliStep";
+import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
 import { PermissionsStep } from "./PermissionsStep";
 
 export type WelcomeWizardProps = {
   steps: readonly OnboardingStepId[];
+  doneSteps?: readonly OnboardingStepId[];
   permissionsStatus: SystemPermissionsStatus | null;
   agents: ReadonlyArray<ResolvedAgent>;
   isMac: boolean;
   onAddProject: () => void;
   onConnectMachine: () => void;
-  onOpenAgentSettings: () => void;
   onStepCompleted: (step: OnboardingStepId) => void;
   onFinish: () => void;
   onSkip: () => void;
@@ -32,6 +33,7 @@ export type WelcomeWizardProps = {
 
 const STEP_TITLES: Record<OnboardingStepId, string> = {
   intro: "Welcome",
+  features: "Features",
   permissions: "Permissions",
   agents: "Agents & CLI",
   project: "First project",
@@ -39,6 +41,7 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
 
 const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   intro: "Set up Ferryx",
+  features: "What Ferryx does",
   permissions: "Grant system access",
   agents: "Choose your default agent",
   project: "Open your first project",
@@ -54,12 +57,12 @@ function clampStepIndex(index: number, total: number): number {
 export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const {
     steps,
+    doneSteps = [],
     permissionsStatus,
     agents,
     isMac,
     onAddProject,
     onConnectMachine,
-    onOpenAgentSettings,
     onStepCompleted,
     onFinish,
     onSkip,
@@ -141,7 +144,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const getLedeText = (step: OnboardingStepId): string => {
     switch (step) {
       case "intro":
-        return "A few things to know, then we'll get your first project open.";
+        return "A short setup, then we'll get your first project open.";
+      case "features":
+        return "The parts you'll use every day.";
       case "permissions":
         return isMac
           ? "These let agents and git work without macOS prompts. Change them anytime in Settings > Permissions."
@@ -156,7 +161,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const renderStepContent = () => {
     switch (currentStep) {
       case "intro":
-        return <IntroStep isMac={isMac} />;
+        return <IntroStep steps={steps} />;
+      case "features":
+        return <FeaturesStep isMac={isMac} />;
       case "permissions":
         return (
           <PermissionsStep
@@ -168,7 +175,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return (
           <AgentsCliStep
             agents={agents}
-            onOpenAgentSettings={onOpenAgentSettings}
             loadCliStatus={loadCliStatus}
             installCli={installCli}
           />
@@ -199,7 +205,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         aria-modal="true"
         aria-label="Welcome to Ferryx"
         onKeyDown={handleKeyDown}
-        className="flex w-full max-w-3xl max-h-[min(40rem,90vh)] overflow-hidden rounded-lg border border-border bg-card shadow-lg sm:grid sm:grid-cols-[13rem_1fr]"
+        className="flex w-full max-w-3xl max-h-[min(40rem,90vh)] overflow-hidden rounded-lg border border-border bg-card shadow-lg sm:grid sm:grid-cols-[13rem_1fr] sm:grid-rows-[minmax(0,1fr)]"
       >
         <div className="hidden sm:flex min-h-0 flex-col border-r border-border bg-background/40 p-4">
           <div className="flex items-center gap-1.5 mb-4">
@@ -211,11 +217,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
           <ol aria-label="Setup steps" className="space-y-1">
             {steps.map((stepId, index) => {
-              const isCompleted = index < currentStepIndex;
               const isCurrent = index === currentStepIndex;
+              const isDone =
+                !isCurrent &&
+                (index < currentStepIndex || doneSteps.includes(stepId));
               return (
                 <li
                   key={stepId}
+                  data-testid={`onboarding-rail-${stepId}`}
                   aria-current={isCurrent ? "step" : undefined}
                   className={cn(
                     "h-8 rounded-md px-2 flex items-center gap-2 text-[12px]",
@@ -225,7 +234,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   )}
                 >
                   <span className="size-4 flex items-center justify-center shrink-0">
-                    {isCompleted ? (
+                    {isDone ? (
                       <Check
                         className="size-3.5 text-status-success"
                         aria-hidden="true"

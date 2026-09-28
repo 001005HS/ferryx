@@ -1,40 +1,53 @@
-import { shortcutLabel } from "../../lib/shortcuts";
-import { Keycap, WizardRow, WizardRowList } from "./WizardPrimitives";
+import type { OnboardingStepId } from "../../lib/onboarding";
+import { WizardRow, WizardRowList } from "./WizardPrimitives";
 
-const INTRO_SHORTCUTS = [
-  { id: "commandPalette.open", title: "Command palette" },
-  { id: "tab.newTerminal", title: "New terminal tab" },
-  { id: "terminal.splitRight", title: "Split right" },
-  { id: "project.add", title: "Add project" },
-] as const;
+type OverviewStepId = Exclude<OnboardingStepId, "intro">;
 
-export function IntroStep({ isMac }: { isMac: boolean }): JSX.Element {
+const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string }> = {
+  features: {
+    title: "Features tour",
+    description: "A quick look at the parts you'll use every day.",
+  },
+  permissions: {
+    title: "System access",
+    description: "Grant the operating system access Ferryx needs.",
+  },
+  agents: {
+    title: "Default agent",
+    description: "Pick the coding agent new agent tabs start with.",
+  },
+  project: {
+    title: "First project",
+    description: "Open a folder on this computer or pair another machine.",
+  },
+};
+
+export type IntroStepProps = {
+  steps: readonly OnboardingStepId[];
+};
+
+export function IntroStep({ steps }: IntroStepProps): JSX.Element {
+  const covered = steps.filter(
+    (step): step is OverviewStepId => step !== "intro",
+  );
   return (
-    <WizardRowList>
-      <WizardRow
-        title="Sessions outlive the window"
-        description="Terminals and agents run in the Ferryx background service. Closing a window doesn't stop them."
-      />
-      <WizardRow
-        title="Projects, worktrees, tabs"
-        description="Add a folder as a project. Git repositories get isolated worktrees, each with its own tabs and panes."
-      />
-      <WizardRow
-        title="Keyboard first"
-        description={
-          <span className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
-            {INTRO_SHORTCUTS.map((shortcut) => (
-              <span
-                key={shortcut.id}
-                className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground"
-              >
-                <span>{shortcut.title}</span>
-                <Keycap>{shortcutLabel(shortcut.id, isMac)}</Keycap>
-              </span>
-            ))}
-          </span>
-        }
-      />
-    </WizardRowList>
+    <div>
+      <p className="mb-3 text-[13px] leading-relaxed text-foreground">
+        Ferryx runs your terminals and coding agents across projects and machines.
+      </p>
+      <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+        This setup covers
+      </div>
+      <WizardRowList>
+        {covered.map((step) => (
+          <WizardRow
+            key={step}
+            testId={`onboarding-intro-${step}`}
+            title={OVERVIEW_ROWS[step].title}
+            description={OVERVIEW_ROWS[step].description}
+          />
+        ))}
+      </WizardRowList>
+    </div>
   );
 }

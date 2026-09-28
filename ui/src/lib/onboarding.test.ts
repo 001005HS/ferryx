@@ -6,15 +6,17 @@ import {
   OPEN_ONBOARDING_EVENT,
   PERMISSION_PRIORITY,
   dismissOnboarding,
+  initialWizardStepIndex,
   isOnboardingStepSatisfied,
   loadOnboardingState,
   markOnboardingStepsCompleted,
   pendingOnboardingSteps,
-  rerunOnboardingSteps,
   resetOnboarding,
+  satisfiedOnboardingSteps,
   saveOnboardingState,
   shouldAutoOpenOnboarding,
   visiblePermissionKeys,
+  wizardSteps,
   type OnboardingContext,
   type OnboardingState,
 } from "./onboarding";
@@ -202,6 +204,7 @@ describe("onboarding exports and constants", () => {
     expect(ONBOARDING_VERSION).toBe(1);
     expect(ONBOARDING_STEP_ORDER).toEqual([
       "intro",
+      "features",
       "permissions",
       "agents",
       "project",
@@ -261,6 +264,20 @@ describe("loadOnboardingState", () => {
       completedSteps: ["intro", "permissions"],
       dismissed: false,
     });
+  });
+
+  it("keeps the features step id in completedSteps", () => {
+    const storage = createMockStorage({
+      [ONBOARDING_STORAGE_KEY]: JSON.stringify({
+        version: 1,
+        completedSteps: ["features", "intro"],
+        dismissed: false,
+      }),
+    });
+    expect(loadOnboardingState(storage).completedSteps).toEqual([
+      "features",
+      "intro",
+    ]);
   });
 
   it("treats malformed JSON as absent and returns default if no legacy key", () => {
@@ -558,6 +575,7 @@ describe("pendingOnboardingSteps", () => {
       projectCount: 0,
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual([
+      "features",
       "permissions",
       "project",
     ]);
@@ -566,7 +584,7 @@ describe("pendingOnboardingSteps", () => {
   it("returns empty when all steps completed or satisfied", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["permissions"],
+      completedSteps: ["intro", "features", "permissions", "agents", "project"],
       dismissed: false,
     };
     const ctx: OnboardingContext = {
@@ -579,30 +597,153 @@ describe("pendingOnboardingSteps", () => {
   });
 });
 
-describe("rerunOnboardingSteps", () => {
-  it("returns all 4 steps on macOS where permissions are visible", () => {
+describe("initialWizardStepIndex", () => {
+  const steps = ["intro", "features", "permissions", "agents", "project"] as const;
+
+  it("skips the informational features step and lands on the first actionable one", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro"],
+      dismissed: false,
+    };
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: [{ name: "claude", available: true }],
+      cli: cliInstalled,
+      projectCount: 1,
+    };
+    expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("permissions"));
+  });
+
+  it("lands on features when it is the only pending step", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "permissions", "agents", "project"],
+      dismissed: false,
+    };
     const ctx: OnboardingContext = {
       permissions: macosPermissionsStatus,
       agents: null,
       cli: null,
-      projectCount: 3,
+      projectCount: 0,
     };
-    expect(rerunOnboardingSteps(ctx)).toEqual([
+    expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("features"));
+  });
+
+  it("returns 0 when nothing is pending", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: [...steps],
+      dismissed: false,
+    };
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(initialWizardStepIndex(steps, state, ctx)).toBe(0);
+  });
+});
+
+describe("wizardSteps", () => {
+  it("includes features and permissions on macOS", () => {
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(wizardSteps(ctx)).toEqual([
       "intro",
+      "features",
       "permissions",
       "agents",
       "project",
     ]);
   });
 
-  it("drops permissions on Linux where visible permissions are empty", () => {
+  it("omits permissions on Linux where visible permissions are empty", () => {
     const ctx: OnboardingContext = {
       permissions: linuxPermissionsStatus,
       agents: null,
       cli: null,
       projectCount: 0,
     };
-    expect(rerunOnboardingSteps(ctx)).toEqual(["intro", "agents", "project"]);
+    expect(wizardSteps(ctx)).toEqual([
+      "intro",
+      "features",
+      "agents",
+      "project",
+    ]);
+  });
+});
+
+describe("satisfiedOnboardingSteps", () => {
+  it("reports completed and satisfied wizard steps in wizard order", () => {
+    const storage = createMockStorage();
+    saveOnboardingState(
+      {
+        version: 1,
+        completedSteps: ["intro", "features"],
+        dismissed: false,
+      },
+      storage,
+    );
+    const state = loadOnboardingState(storage);
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: [{ name: "claude", available: true }],
+      cli: cliInstalled,
+      projectCount: 1,
+    };
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
+      "intro",
+      "features",
+      "agents",
+      "project",
+    ]);
+  });
+
+  it("includes permissions when every visible permission is granted", () => {
+    const storage = createMockStorage();
+    saveOnboardingState(
+      {
+        version: 1,
+        completedSteps: ["intro", "features"],
+        dismissed: false,
+      },
+      storage,
+    );
+    const state = loadOnboardingState(storage);
+    const ctx: OnboardingContext = {
+      permissions: macosAllGrantedStatus,
+      agents: [{ name: "claude", available: true }],
+      cli: cliInstalled,
+      projectCount: 1,
+    };
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
+      "intro",
+      "features",
+      "permissions",
+      "agents",
+      "project",
+    ]);
+  });
+
+  it("stays empty when nothing is completed or satisfied", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: [],
+      dismissed: false,
+    };
+    const ctx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual([]);
   });
 });
 
@@ -660,9 +801,72 @@ describe("shouldAutoOpenOnboarding", () => {
   it("returns false when no pending steps remain", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "permissions", "agents", "project"],
+      completedSteps: ["intro", "features", "permissions", "agents", "project"],
       dismissed: false,
     };
     expect(shouldAutoOpenOnboarding(state, pendingCtx)).toBe(false);
+  });
+});
+
+describe("features step", () => {
+  const satisfiedCtx: OnboardingContext = {
+    permissions: macosAllGrantedStatus,
+    agents: [{ name: "claude", available: true }],
+    cli: cliInstalled,
+    projectCount: 5,
+  };
+
+  it("is never auto-satisfied by context", () => {
+    expect(isOnboardingStepSatisfied("features", satisfiedCtx)).toBe(false);
+    expect(
+      isOnboardingStepSatisfied("features", { ...satisfiedCtx, projectCount: 0 })
+    ).toBe(false);
+  });
+
+  it("stays pending until it is recorded in completedSteps", () => {
+    const upgraded: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "permissions", "agents", "project"],
+      dismissed: false,
+    };
+    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
+    expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
+      "intro",
+      "permissions",
+      "agents",
+      "project",
+    ]);
+
+    const doneState = markOnboardingStepsCompleted(
+      ["features"],
+      createMockStorage(),
+    );
+    expect(pendingOnboardingSteps(doneState, satisfiedCtx)).toEqual([]);
+    expect(satisfiedOnboardingSteps(doneState, satisfiedCtx)).toContain(
+      "features",
+    );
+  });
+
+  it("never triggers auto-open on its own after upgrade", () => {
+    const upgraded: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "permissions", "agents", "project"],
+      dismissed: false,
+    };
+    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
+    expect(shouldAutoOpenOnboarding(upgraded, satisfiedCtx)).toBe(false);
+
+    const fresh: OnboardingState = {
+      version: 1,
+      completedSteps: [],
+      dismissed: false,
+    };
+    const openCtx: OnboardingContext = {
+      permissions: macosPermissionsStatus,
+      agents: null,
+      cli: null,
+      projectCount: 0,
+    };
+    expect(shouldAutoOpenOnboarding(fresh, openCtx)).toBe(true);
   });
 });

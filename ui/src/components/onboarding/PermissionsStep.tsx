@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { Check, ExternalLink } from "lucide-react";
 
 import {
   PERMISSION_PRIORITY,
@@ -142,6 +142,17 @@ export function PermissionsStep(props: PermissionsStepProps): JSX.Element {
         >
           {grantedCount} of {visibleKeys.length} granted
         </p>
+      ) : null}
+
+      {visibleKeys.length > 0 &&
+      visibleKeys.every((key) => status?.[key]?.granted === true) ? (
+        <div
+          data-testid="onboarding-permissions-all-set"
+          className="mb-2 flex items-center gap-2 text-[13px] font-medium text-foreground"
+        >
+          <Check className="size-4 shrink-0 text-status-success" aria-hidden="true" />
+          <span>All set. Ferryx has the access it needs.</span>
+        </div>
       ) : null}
 
       {visibleKeys.length === 0 ? (

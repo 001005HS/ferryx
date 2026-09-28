@@ -47,12 +47,13 @@ import { initUpdateToasts } from "./lib/updateToast";
 import {
   OPEN_ONBOARDING_EVENT,
   dismissOnboarding,
+  initialWizardStepIndex,
   loadOnboardingState,
   markOnboardingStepsCompleted,
-  pendingOnboardingSteps,
-  rerunOnboardingSteps,
+  satisfiedOnboardingSteps,
   shouldAutoOpenOnboarding,
   visiblePermissionKeys,
+  wizardSteps,
   type OnboardingContext,
   type OnboardingStepId,
 } from "./lib/onboarding";
@@ -1614,6 +1615,8 @@ function WorkspaceApp({
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
+  const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
+  const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
   const [onboardingPermissions, setOnboardingPermissions] = useState<SystemPermissionsStatus | null>(null);
   const [whatsNew, setWhatsNew] = useState<WhatsNewEntry | null>(null);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
@@ -2522,7 +2525,10 @@ function WorkspaceApp({
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
-        setOnboardingSteps(pendingOnboardingSteps(state, ctx));
+        const wizard = wizardSteps(ctx);
+        setOnboardingDoneSteps(satisfiedOnboardingSteps(state, ctx));
+        setOnboardingInitialStepIndex(initialWizardStepIndex(wizard, state, ctx));
+        setOnboardingSteps(wizard);
       }
     }, 1200);
     return () => {
@@ -2548,7 +2554,9 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
       };
-      setOnboardingSteps(rerunOnboardingSteps(ctx));
+      setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
+      setOnboardingInitialStepIndex(0);
+      setOnboardingSteps(wizardSteps(ctx));
     };
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding);
     return () => {
@@ -3539,6 +3547,8 @@ function WorkspaceApp({
         <Suspense fallback={null}>
           <WelcomeWizard
             steps={onboardingSteps}
+            initialStepIndex={onboardingInitialStepIndex}
+            doneSteps={onboardingDoneSteps}
             permissionsStatus={onboardingPermissions}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
@@ -3556,10 +3566,6 @@ function WorkspaceApp({
             onConnectMachine={() => {
               setOnboardingSteps(null);
               handleOpenSettings("remote");
-            }}
-            onOpenAgentSettings={() => {
-              setOnboardingSteps(null);
-              handleOpenSettings("agents");
             }}
           />
         </Suspense>

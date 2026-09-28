@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, TerminalSquare } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { Check, Plus, RotateCw, TerminalSquare } from "lucide-react";
 
 import {
   isMonochromeAgentLogoByCommandName,
@@ -7,12 +7,18 @@ import {
 } from "../../lib/agentIcon";
 import {
   loadAgentSettings,
+  normalizeCustomAgentName,
   saveAgentSettings,
+  upsertCustomAgent,
+  validateCustomAgent,
+  type CustomAgentValidationError,
   type ResolvedAgent,
 } from "../../lib/agentsSettings";
 import { getCliLauncherStatus, installCliLauncher } from "../../lib/tauri";
 import type { CliLauncherStatus } from "../../lib/types";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
 import {
   WizardRow,
   WizardRowList,
@@ -21,12 +27,24 @@ import {
 
 export type AgentsCliStepProps = {
   agents: ReadonlyArray<ResolvedAgent>;
-  onOpenAgentSettings: () => void;
   loadCliStatus?: () => Promise<CliLauncherStatus>;
   installCli?: () => Promise<CliLauncherStatus>;
 };
 
 const INSTALL_FAILED_MESSAGE = "Installing the Ferryx CLI failed.";
+
+const VALIDATION_MESSAGES: Record<CustomAgentValidationError, string> = {
+  "empty-name": "Enter a name for the agent.",
+  "empty-command": "Enter the command Ferryx should run.",
+  "reserved-name": "That name is reserved for a built-in agent.",
+  "duplicate-name": "A custom agent with that name already exists.",
+};
+
+type CustomAgentDraft = {
+  name: string;
+  command: string;
+  args: string;
+};
 
 const AUTO_VALUE = "__auto__";
 
@@ -62,7 +80,7 @@ function AgentBrandIcon({ name }: { name: string }): JSX.Element {
 }
 
 export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
-  const { agents, onOpenAgentSettings } = props;
+  const { agents } = props;
 
   const [cliStatus, setCliStatus] = useState<CliLauncherStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -70,10 +88,20 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
   const [defaultAgentId, setDefaultAgentId] = useState<string | null>(
     () => loadAgentSettings().defaultAgentId,
   );
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftCommand, setDraftCommand] = useState("");
+  const [draftArgs, setDraftArgs] = useState("");
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const formId = useId();
 
   const mountedRef = useRef(true);
   const loadCliStatusRef = useRef(props.loadCliStatus ?? getCliLauncherStatus);
   const groupRef = useRef<HTMLDivElement>(null);
+  const draftNameRef = useRef<HTMLInputElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  // Set when the draft form closes so focus returns to the add button instead of <body>.
+  const restoreAddFocusRef = useRef(false);
   const installCli = props.installCli ?? installCliLauncher;
 
   const availableAgents = agents.filter((agent) => agent.available);
@@ -118,6 +146,15 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
     };
   }, []);
 
+  useEffect(() => {
+    if (draftOpen) {
+      draftNameRef.current?.focus();
+    } else if (restoreAddFocusRef.current) {
+      restoreAddFocusRef.current = false;
+      addButtonRef.current?.focus();
+    }
+  }, [draftOpen]);
+
   async function handleInstall(): Promise<void> {
     setInstalling(true);
     setInstallError(null);
@@ -157,10 +194,68 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
     selectOption(options[nextIndex].value);
   }
 
+  function handleRescan(): void {
+    // Re-writing the current settings dispatches AGENTS_SETTINGS_CHANGED_EVENT,
+    // which the app listens to in order to re-run agent detection.
+    saveAgentSettings(loadAgentSettings());
+  }
+
+  function cancelDraft(): void {
+    restoreAddFocusRef.current = true;
+    setDraftOpen(false);
+    setDraftName("");
+    setDraftCommand("");
+    setDraftArgs("");
+    setDraftError(null);
+  }
+
+  function handleAddAgent(): void {
+    const settings = loadAgentSettings();
+    const nextDraft: CustomAgentDraft = {
+      name: draftName,
+      command: draftCommand,
+      args: draftArgs,
+    };
+    const failure = validateCustomAgent(nextDraft, settings);
+    if (failure) {
+      setDraftError(VALIDATION_MESSAGES[failure]);
+      return;
+    }
+    const normalized = normalizeCustomAgentName(nextDraft.name);
+    // One write: the new agent and the default land together, so listeners
+    // never see the agent saved under a stale default.
+    saveAgentSettings({
+      ...upsertCustomAgent(settings, nextDraft),
+      defaultAgentId: normalized,
+    });
+    setDefaultAgentId(normalized);
+    cancelDraft();
+  }
+
   const cli = cliStatus;
+  const draftNameId = `${formId}-name`;
+  const draftCommandId = `${formId}-command`;
+  const draftArgsId = `${formId}-args`;
+  const draftErrorId = `${formId}-error`;
+  const draftDescribedBy = draftError ? draftErrorId : undefined;
 
   return (
     <div>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-muted-foreground">
+          Detected on PATH
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-testid="onboarding-rescan-agents"
+          onClick={handleRescan}
+          className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <RotateCw className="size-3" />
+          Rescan
+        </Button>
+      </div>
       {availableAgents.length > 0 ? (
         <>
           <div
@@ -227,21 +322,121 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
         <WizardRowList>
           <WizardRow
             title="No coding agents found on your PATH."
-            description="Install one (for example Claude Code or Codex), or add a custom command in Settings > Agents."
+            description="Install one (for example Claude Code or Codex), or add a custom command below."
           />
         </WizardRowList>
       )}
 
       <div className="mt-3">
-        <Button
-          variant="link"
-          size="sm"
-          data-testid="onboarding-open-agent-settings"
-          onClick={onOpenAgentSettings}
-          className="h-auto p-0 text-[12px] text-foreground hover:underline"
-        >
-          Agent settings
-        </Button>
+        {draftOpen ? (
+          <form
+            className="grid gap-2 rounded-md border border-border bg-background/40 p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleAddAgent();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              // Escape cancels the draft only; it must not reach the wizard dialog.
+              event.preventDefault();
+              event.stopPropagation();
+              cancelDraft();
+            }}
+          >
+            <Label
+              htmlFor={draftNameId}
+              className="text-[11px] text-muted-foreground"
+            >
+              Name
+            </Label>
+            <Input
+              id={draftNameId}
+              ref={draftNameRef}
+              data-testid="onboarding-custom-agent-name"
+              aria-describedby={draftDescribedBy}
+              aria-invalid={draftError ? true : undefined}
+              value={draftName}
+              onChange={(event) => setDraftName(event.target.value)}
+              placeholder="my-agent"
+              className="h-8 text-[12px]"
+            />
+            <Label
+              htmlFor={draftCommandId}
+              className="text-[11px] text-muted-foreground"
+            >
+              Command
+            </Label>
+            <Input
+              id={draftCommandId}
+              data-testid="onboarding-custom-agent-command"
+              aria-describedby={draftDescribedBy}
+              aria-invalid={draftError ? true : undefined}
+              value={draftCommand}
+              onChange={(event) => setDraftCommand(event.target.value)}
+              placeholder="my-agent"
+              className="h-8 text-[12px] font-mono"
+            />
+            <Label
+              htmlFor={draftArgsId}
+              className="text-[11px] text-muted-foreground"
+            >
+              Arguments (optional)
+            </Label>
+            <Input
+              id={draftArgsId}
+              data-testid="onboarding-custom-agent-args"
+              value={draftArgs}
+              onChange={(event) => setDraftArgs(event.target.value)}
+              placeholder="--continue"
+              className="h-8 text-[12px] font-mono"
+            />
+            {draftError ? (
+              <p
+                id={draftErrorId}
+                role="alert"
+                data-testid="onboarding-custom-agent-error"
+                className="text-[11px] text-status-warning"
+              >
+                {draftError}
+              </p>
+            ) : null}
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="onboarding-custom-agent-cancel"
+                onClick={cancelDraft}
+                className="h-7 text-[11px]"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                data-testid="onboarding-custom-agent-add"
+                className="h-7 text-[11px]"
+              >
+                Add
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <Button
+            ref={addButtonRef}
+            variant="ghost"
+            size="sm"
+            data-testid="onboarding-add-custom-agent"
+            onClick={() => {
+              setDraftError(null);
+              setDraftOpen(true);
+            }}
+            className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            <Plus className="size-3" />
+            Add custom agent
+          </Button>
+        )}
       </div>
 
       {cli && cli.isSupported ? (
