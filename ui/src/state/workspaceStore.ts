@@ -28,6 +28,7 @@ import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
+import { disambiguateFileTabLabels } from "../lib/fileTabLabels";
 import { createBrowserPaneContent, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
@@ -1379,6 +1380,24 @@ export function useWorkspaceStore({
         });
         return existing.id;
       }
+
+      for (const [wtPath, parkedLayout] of Object.entries(snapshot.worktreeLayouts ?? {})) {
+        const parkedTab = parkedLayout.tabs.find(
+          (tab) => tab.kind === "file" && tab.path === request.path,
+        );
+        if (parkedTab && parkedTab.kind === "file") {
+          dispatch({ type: "SELECT_WORKTREE", path: wtPath });
+          retainFilePreview(parkedTab.previewId, source, request);
+          dispatch({
+            type: "UPDATE_FILE_TAB",
+            tabId: parkedTab.id,
+            line: request.line,
+            col: request.col,
+          });
+          return parkedTab.id;
+        }
+      }
+
       const tabId = createId("tab");
       const label = request.path.split(/[/\\]/).pop() || request.path;
       const tab: FileTab = {
@@ -1394,6 +1413,31 @@ export function useWorkspaceStore({
       };
       retainFilePreview(tabId, source, request);
       dispatch({ type: "ADD_TAB_WITH_SESSION", tab });
+
+      const updatedSnapshot = stateRef.current;
+      const allFileTabs = updatedSnapshot.layout.tabs.filter(
+        (t): t is FileTab => t.kind === "file",
+      );
+      const hasDuplicateBasename = allFileTabs.some(
+        (t) => t.id !== tabId && (t.path.split(/[/\\]/).pop() || t.path) === label,
+      );
+      if (hasDuplicateBasename) {
+        const disambiguatedLabels = disambiguateFileTabLabels(
+          allFileTabs.map((t) => t.path),
+        );
+        for (let i = 0; i < allFileTabs.length; i++) {
+          const fileTab = allFileTabs[i];
+          const nextLabel = disambiguatedLabels[i];
+          if (fileTab.label !== nextLabel) {
+            dispatch({
+              type: "RENAME_TAB",
+              tabId: fileTab.id,
+              label: nextLabel,
+            });
+          }
+        }
+      }
+
       return tabId;
     },
     [dispatch],

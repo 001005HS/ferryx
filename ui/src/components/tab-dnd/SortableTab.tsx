@@ -1,13 +1,40 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FileText, Globe, Pin, TerminalSquare, X } from "lucide-react";
+import {
+  File,
+  FileAudio,
+  FileCode,
+  FileImage,
+  FileText,
+  FileVideo,
+  Globe,
+  NotebookPen,
+  Pin,
+  Sheet,
+  TerminalSquare,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { memo, useMemo, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../../lib/activity";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
+import { fileTabIconKind, type FileTabIconKind } from "../../lib/fileTabIcon";
 import type { WorkspaceTab } from "../../lib/types";
 import { StatusDot } from "../ui/StatusDot";
+
+const FILE_ICON_MAP: Record<FileTabIconKind, LucideIcon> = {
+  image: FileImage,
+  video: FileVideo,
+  audio: FileAudio,
+  pdf: FileText,
+  markdown: FileText,
+  code: FileCode,
+  table: Sheet,
+  notebook: NotebookPen,
+  text: File,
+};
 
 type SortableTabProps = {
   tab: WorkspaceTab;
@@ -19,6 +46,7 @@ type SortableTabProps = {
   activity?: ActivitySummary;
   displayText?: string;
   displayTooltip?: string;
+  fileTitle?: string;
   isRenaming: boolean;
   renameValue: string;
   onRenameValueChange: (value: string) => void;
@@ -39,6 +67,7 @@ export const SortableTab = memo(function SortableTab({
   activity,
   displayText,
   displayTooltip,
+  fileTitle,
   isRenaming,
   renameValue,
   onRenameValueChange,
@@ -63,6 +92,8 @@ export const SortableTab = memo(function SortableTab({
   const agentType = activity?.agentType;
   const agentLogo = resolveAgentLogo(agentType);
   const isMonochrome = isMonochromeAgentLogo(agentType);
+  const fileIconKind = tab.kind === "file" ? fileTabIconKind(tab.path) : null;
+  const FileIcon = fileIconKind ? FILE_ICON_MAP[fileIconKind] : FileText;
 
   const style = {
     transform: CSS.Transform.toString(sortable.transform),
@@ -79,7 +110,7 @@ export const SortableTab = memo(function SortableTab({
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
-      title={displayTooltip}
+      title={tab.kind === "file" ? (fileTitle ?? tab.path) : displayTooltip}
       data-tab-dnd-id={tab.id}
       data-tab-group-id={groupId}
       data-tab-index={index}
@@ -87,6 +118,18 @@ export const SortableTab = memo(function SortableTab({
       draggable={false}
       onContextMenu={(event) => onContextMenu(event, tab)}
       onClick={() => onActivate(tab.id)}
+      onAuxClick={(e) => {
+        if (e.button === 1 && !isPinned) {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose(tab.id);
+        }
+      }}
+      onMouseDown={(e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+        }
+      }}
       onKeyDown={(event: KeyboardEvent) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -103,7 +146,11 @@ export const SortableTab = memo(function SortableTab({
       {tab.kind === "browser" ? (
         <Globe className="size-3 shrink-0 text-primary" />
       ) : tab.kind === "file" ? (
-        <FileText data-testid="tab-file-icon" className="size-3 shrink-0 text-primary" />
+        <FileIcon
+          data-testid="tab-file-icon"
+          data-file-icon={fileIconKind}
+          className="size-3 shrink-0 text-primary"
+        />
       ) : (
         <>
           {agentLogo ? (

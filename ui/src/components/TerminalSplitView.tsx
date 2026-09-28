@@ -38,6 +38,9 @@ import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalize
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
 import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
+import { createFileTabMenuHandlers } from "../lib/fileTabPaths";
+import { getFilePreview } from "../lib/filePreviewTabRegistry";
+import { revealPath } from "../lib/tauri";
 import {
   isRedundantSplit as isRedundantPaneSplit,
   resolveSeam,
@@ -170,6 +173,7 @@ type SplitPaneOptions = { position?: "first" | "second" };
 type TerminalSplitViewProps = {
   layout: LayoutState;
   sessions: Record<string, TerminalSession>;
+  fileTabWorktreePath?: string | null;
   onActivateTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
   onCloseOtherTabs?: (tabId: string) => void;
@@ -238,6 +242,7 @@ type DragFocusSnapshot = {
 export function TerminalSplitView({
   layout,
   sessions,
+  fileTabWorktreePath = null,
   onActivateTab = () => undefined,
   onCloseTab = () => undefined,
   onCloseOtherTabs,
@@ -481,6 +486,7 @@ export function TerminalSplitView({
     layout: normalizedLayout,
     groups,
     sessions,
+    fileTabWorktreePath,
     onActivateTab,
     onCloseTab,
     onCloseOtherTabs,
@@ -664,6 +670,7 @@ type TabGroupViewProps = {
   layout: LayoutState;
   groups: Record<string, TabGroup>;
   sessions: Record<string, TerminalSession>;
+  fileTabWorktreePath?: string | null;
   leadingSpacer: number;
   onActivateTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
@@ -722,6 +729,7 @@ function TabGroupView({
   layout,
   groups,
   sessions,
+  fileTabWorktreePath = null,
   leadingSpacer,
   onActivateTab,
   onCloseTab,
@@ -779,6 +787,17 @@ function TabGroupView({
     onMoveTabToSplit?.(tabId, groupId, direction, position);
   };
 
+  const fileTabMenuHandlers = useMemo(
+    () =>
+      createFileTabMenuHandlers({
+        tabs,
+        worktreePath: fileTabWorktreePath,
+        getController: getFilePreview,
+        reveal: revealPath,
+      }),
+    [tabs, fileTabWorktreePath],
+  );
+
   return (
     <div
       className={`relative flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden bg-terminal ${isFocused ? "" : "opacity-95"}`}
@@ -794,6 +813,7 @@ function TabGroupView({
         unreadTabIds={unreadTabIds}
         activityByTabId={activityByTabId}
         tabDisplayById={tabDisplayById}
+        {...fileTabMenuHandlers}
         onActivate={onActivateTab}
         onClose={onCloseTab}
         onCloseOthers={onCloseOtherTabs}

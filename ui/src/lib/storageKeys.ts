@@ -17,6 +17,7 @@ export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
 export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
+export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],
@@ -88,5 +89,9 @@ export const ONBOARDING_STORAGE_KEY = "ferryx.onboarding.v1";
 export const WHATS_NEW_SEEN_VERSION_STORAGE_KEY = "ferryx.whatsNew.seenVersion";
 export const WHATS_NEW_PENDING_STORAGE_KEY = "ferryx.whatsNew.pending";
 export const NOTIFICATION_PERMISSION_HINT_STORAGE_KEY = "ferryx.hints.notificationPermission";
+export const FILE_PREVIEW_WORD_WRAP_STORAGE_KEY = "ferryx.filePreview.wordWrap";
+export const FILE_PREVIEW_MARKDOWN_FONT_SIZE_STORAGE_KEY = "ferryx.filePreview.markdownFontSize";
+export const FILE_PREVIEW_MARKDOWN_WIDE_STORAGE_KEY = "ferryx.filePreview.markdownWide";
+
 
 

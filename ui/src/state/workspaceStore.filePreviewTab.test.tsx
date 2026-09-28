@@ -94,4 +94,90 @@ describe("file preview tabs", () => {
     expect(releaseFilePreview).toHaveBeenCalledWith(firstId);
     expect(result.current.state.layout.tabs.some((item) => item.id === firstId)).toBe(false);
   });
+
+  it("disambiguates duplicate basenames across file tabs", () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+
+    let firstId = "";
+    act(() => {
+      firstId = result.current.openFilePreviewTab(source, {
+        path: "/a/src/index.ts",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    let tab1 = result.current.state.layout.tabs.find((item) => item.id === firstId);
+    expect(tab1?.label).toBe("index.ts");
+
+    let secondId = "";
+    act(() => {
+      secondId = result.current.openFilePreviewTab(source, {
+        path: "/b/ui/index.ts",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    tab1 = result.current.state.layout.tabs.find((item) => item.id === firstId);
+    const tab2 = result.current.state.layout.tabs.find((item) => item.id === secondId);
+    expect(tab1?.label).toBe("src/index.ts");
+    expect(tab2?.label).toBe("ui/index.ts");
+  });
+
+  it("reuses an existing file tab when it lives in a parked worktree layout", () => {
+    const otherWorktree: Worktree = {
+      path: "/repo/feature",
+      head: "def",
+      branch: "refs/heads/feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, otherWorktree], services }),
+    );
+
+    let tabId = "";
+    act(() => {
+      tabId = result.current.openFilePreviewTab(source, {
+        path: "/repo/shared.ts",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    act(() => {
+      result.current.dispatchWorkspaceAction({ type: "SELECT_WORKTREE", path: otherWorktree.path });
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(otherWorktree.path);
+    expect(result.current.state.layout.tabs.some((t) => t.id === tabId)).toBe(false);
+    expect(result.current.state.worktreeLayouts?.[worktree.path]?.tabs.some((t) => t.id === tabId)).toBe(true);
+
+    let reopenedId = "";
+    act(() => {
+      reopenedId = result.current.openFilePreviewTab(source, {
+        path: "/repo/shared.ts",
+        backendSessionId: "back-1",
+        line: 25,
+        col: 4,
+      });
+    });
+
+    expect(reopenedId).toBe(tabId);
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    const reopenedTab = result.current.state.layout.tabs.find((t) => t.id === tabId);
+    expect(reopenedTab?.kind).toBe("file");
+    if (reopenedTab?.kind === "file") {
+      expect(reopenedTab.line).toBe(25);
+      expect(reopenedTab.col).toBe(4);
+    }
+  });
 });
+

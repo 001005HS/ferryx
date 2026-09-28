@@ -30,7 +30,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
-import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
+import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
@@ -142,6 +142,7 @@ import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
+import { createClosedTabStack } from "./lib/closedTabStack";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
@@ -2152,7 +2153,7 @@ function WorkspaceApp({
     };
   }, [handleAddTerminalTab]);
 
-  const closedBrowserTabsRef = useRef<Array<{ url: string; profileId?: string; worktreePath?: string }>>([]);
+  const closedTabStackRef = useRef(createClosedTabStack());
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
@@ -2160,10 +2161,27 @@ function WorkspaceApp({
       const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab || tab.pinned) return;
       if (tab.kind === "browser" && tab.url) {
-        closedBrowserTabsRef.current.push({
+        closedTabStackRef.current.push({
+          kind: "browser",
           url: tab.url,
           profileId: tab.profileId,
           worktreePath: tab.worktreePath,
+        });
+      } else if (tab.kind === "file") {
+        closedTabStackRef.current.push({
+          kind: "file",
+          source: {
+            leafId: tab.previewId,
+            sessionId: tab.previewId,
+            backendSessionId: tab.backendSessionId,
+            workspaceId: tab.workspaceId,
+          },
+          request: {
+            path: tab.path,
+            backendSessionId: tab.backendSessionId,
+            line: tab.line,
+            col: tab.col,
+          },
         });
       }
       const currentState = stateRef.current;
@@ -2185,13 +2203,17 @@ function WorkspaceApp({
 
   const handleReopenClosedBrowserTab = useCallback(() => {
     if (activeRemoteHostRef.current) return;
-    const lastClosed = closedBrowserTabsRef.current.pop();
-    if (!lastClosed?.url) return;
-    void createBrowserTab(lastClosed.url, undefined, {
-      profileId: lastClosed.profileId,
-      worktreePath: lastClosed.worktreePath,
+    const entry = closedTabStackRef.current.pop();
+    if (!entry) return;
+    if (entry.kind === "file") {
+      openFilePreviewTab(entry.source, entry.request);
+      return;
+    }
+    void createBrowserTab(entry.url, undefined, {
+      profileId: entry.profileId,
+      worktreePath: entry.worktreePath,
     }).catch(reportRuntimeError);
-  }, [createBrowserTab, reportRuntimeError]);
+  }, [createBrowserTab, openFilePreviewTab, reportRuntimeError]);
 
   const handleBrowserZoom = useCallback(
     async (browserId: string, direction: "in" | "out" | "reset") => {
@@ -2833,6 +2855,25 @@ function WorkspaceApp({
   }, [createBrowserTab, reportRuntimeError]);
 
   useEffect(() => {
+    return registerWorktreePathOpener((path) => {
+      if (activeRemoteHostRef.current) return false;
+      const norm = (p: string) => {
+        const cleaned = p.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+        return /^[A-Za-z]:/.test(cleaned) ? cleaned.toLowerCase() : cleaned;
+      };
+      const target = norm(path);
+      const all = [
+        ...stateRef.current.worktrees,
+        ...Object.values(inactiveProjectWorktreesRef.current ?? {}).flat(),
+      ];
+      const match = all.find((w) => norm(w.path) === target);
+      if (!match) return false;
+      handleSelectWorktree(match);
+      return true;
+    });
+  }, [handleSelectWorktree]);
+
+  useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     // Cmd+1..9 never reaches the webview because the macOS Window menu claims it,
@@ -3312,6 +3353,7 @@ function WorkspaceApp({
         ) : activeWorktree ? (
           <TerminalSplitView
             layout={state.layout}
+            fileTabWorktreePath={activeWorktree.path}
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}

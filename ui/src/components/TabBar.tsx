@@ -19,11 +19,12 @@ import {
 } from "../lib/sessionLifecycle";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 import { getSystemPermissionsStatus } from "../lib/tauri";
-import { isTerminalTab, type WorkspaceTab } from "../lib/types";
+import { isTerminalTab, type FileTab, type WorkspaceTab } from "../lib/types";
 import type { TerminalTabDisplay } from "../state/tabDisplay";
 import { SortableTab } from "./tab-dnd/SortableTab";
 import type { TabDropEdge } from "./tab-dnd/tabDragTypes";
 import { IconButton } from "./ui/IconButton";
+import { fileManagerActionLabel } from "./WorktreeList";
 
 type TabBarProps = {
   groupId?: string;
@@ -41,6 +42,10 @@ type TabBarProps = {
   sessionIdForLifecycle?: (tab: WorkspaceTab) => string | null;
   /** One-line debug identity of the tab's focused pane; enables "Copy Debug Info". */
   debugInfoForTab?: (tab: WorkspaceTab) => string | null;
+  filePathsForTab?: (tab: FileTab) => { absolute: string; relative: string | null };
+  onReloadFileTab?: (tabId: string) => void;
+  onOpenFileExternally?: (tabId: string) => void;
+  onRevealFileTab?: (tabId: string) => void;
   /** Terminal-pane split. Intentionally separate from whole-tab group split. */
   onSplitRight?: (tabId: string) => void;
   onSplitDown?: (tabId: string) => void;
@@ -85,6 +90,10 @@ export function TabBar({
   onResetAgentState,
   sessionIdForLifecycle,
   debugInfoForTab,
+  filePathsForTab,
+  onReloadFileTab,
+  onOpenFileExternally,
+  onRevealFileTab,
   onSplitRight,
   onSplitDown,
   onMoveTabToSplit,
@@ -325,6 +334,55 @@ export function TabBar({
         actions[`move:${edge}`] = () => onMoveTabToSplit(tab.id, edge);
       }
     }
+    if (tab.kind === "file") {
+      const filePaths = filePathsForTab ? filePathsForTab(tab) : null;
+      const fileItems: NativeMenuEntry[] = [];
+      if (filePaths) {
+        fileItems.push({ kind: "item", id: "copy-path", label: "Copy Path" });
+        actions["copy-path"] = () => {
+          void copyTextToClipboard(filePaths.absolute);
+        };
+        fileItems.push({
+          kind: "item",
+          id: "copy-relative-path",
+          label: "Copy Relative Path",
+          enabled: filePaths.relative !== null,
+        });
+        if (filePaths.relative !== null) {
+          actions["copy-relative-path"] = () => {
+            void copyTextToClipboard(filePaths.relative!);
+          };
+        }
+      }
+      if (onRevealFileTab) {
+        fileItems.push({
+          kind: "item",
+          id: "reveal",
+          label: fileManagerActionLabel(),
+        });
+        actions["reveal"] = () => onRevealFileTab(tab.id);
+      }
+      if (onOpenFileExternally) {
+        fileItems.push({
+          kind: "item",
+          id: "open-externally",
+          label: "Open Externally",
+        });
+        actions["open-externally"] = () => onOpenFileExternally(tab.id);
+      }
+      if (onReloadFileTab) {
+        fileItems.push({
+          kind: "item",
+          id: "reload",
+          label: "Reload",
+        });
+        actions["reload"] = () => onReloadFileTab(tab.id);
+      }
+      if (fileItems.length > 0) {
+        items.push({ kind: "separator" });
+        items.push(...fileItems);
+      }
+    }
     items.push({ kind: "separator" });
     if (onTogglePin) {
       items.push({ kind: "item", id: "pin", label: tab.pinned ? "Unpin tab" : "Pin tab" });
@@ -374,7 +432,7 @@ export function TabBar({
       actions["close-left"] = () => onCloseToLeft(tab.id);
     }
     openMenu("cmd_native_tab_context_menu", items, { x: event.clientX, y: event.clientY }, actions);
-  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, debugInfoForTab]);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, debugInfoForTab, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;
@@ -432,6 +490,7 @@ export function TabBar({
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
             const sleeping = tab.kind !== "browser" && tab.kind !== "file" && sleepingSessionIds.has(tab.sessionId);
+            const fileTitle = tab.kind === "file" && filePathsForTab ? filePathsForTab(tab).absolute : undefined;
             return (
               <SortableTab
                 key={tab.id}
@@ -444,6 +503,7 @@ export function TabBar({
                 activity={activityByTabId?.[tab.id]}
                 displayText={tabDisplayById?.[tab.id]?.text}
                 displayTooltip={tabDisplayById?.[tab.id]?.tooltip}
+                fileTitle={fileTitle}
                 isRenaming={renamingTabId === tab.id}
                 renameValue={renameValue}
                 onRenameValueChange={setRenameValue}
