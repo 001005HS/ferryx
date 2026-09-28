@@ -1,4 +1,5 @@
 import { filePreviewController } from "../lib/filePreview";
+import * as switchDebugModule from "../lib/switchDebug";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1456,6 +1457,40 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     vi.unstubAllGlobals();
   });
 
+  async function withMacHost<T>(fn: () => T | Promise<T>): Promise<T> {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "darwin",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "MacIntel",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        configurable: true,
+      });
+      return await fn();
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  }
+
   it("focuses the hidden input sink and notifies native focus after successful attach", async () => {
     const session = createSession("term-session-1", "daemon-pty-123");
     const { getByTestId } = render(
@@ -1551,6 +1586,42 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("records an intercepted pointer even when pane input is disabled", () => {
+    const debugSpy = vi.spyOn(switchDebugModule, "switchDebug");
+    try {
+      const session = createSession("term-session-intercepted");
+      render(
+        <NativeTerminalVisibilityProvider visible={false}>
+          <NativeTerminalPane session={session} />
+        </NativeTerminalVisibilityProvider>,
+      );
+      const overlay = document.createElement("div");
+      overlay.setAttribute("data-testid", "intercepting-overlay");
+      document.body.appendChild(overlay);
+      try {
+        fireEvent(overlay, new MouseEvent("pointerdown", {
+          bubbles: true,
+          clientX: 24,
+          clientY: 36,
+        }));
+        expect(debugSpy).toHaveBeenCalledWith(
+          "terminal.surface.input.gate.pointer",
+          expect.objectContaining({
+            backendSessionId: "term-session-intercepted",
+            visible: false,
+            reachesPane: false,
+            targetTestId: "intercepting-overlay",
+          }),
+        );
+        expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_native_terminal_mouse")).toBe(false);
+      } finally {
+        overlay.remove();
+      }
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
   it("forwards a primary pointer press for native selection without cancelling the gesture", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,
@@ -1594,6 +1665,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     );
     expect(pressCall?.[1]).toEqual({
       sessionId: "term-session-1",
+      requestId: expect.stringMatching(/^req-.*-term-session-1-\d+$/),
       event: {
         action: "Press",
         button: "Left",
@@ -1681,6 +1753,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       );
       expect(mouseCalls.find(([, args]) => args.event.action === "Motion")?.[1]).toEqual({
         sessionId: "term-session-1",
+        requestId: expect.stringMatching(/^req-/),
         event: {
           action: "Motion",
           button: null,
@@ -1698,6 +1771,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       });
       expect(mouseCalls.find(([, args]) => args.event.action === "Release")?.[1]).toEqual({
         sessionId: "term-session-1",
+        requestId: expect.stringMatching(/^req-/),
         event: {
           action: "Release",
           button: null,
@@ -1882,6 +1956,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -1915,6 +1990,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -1967,6 +2043,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(event.defaultPrevented).toBe(true);
       await waitFor(() => {
         expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+          requestId: expect.stringMatching(/^req-/),
           sessionId: "term-session-1",
           input: {
             keyEvent: {
@@ -2018,6 +2095,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       await waitFor(() => {
         expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+          requestId: expect.stringMatching(/^req-/),
           sessionId: "term-session-1",
           input: {
             keyEvent: {
@@ -2058,6 +2136,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -2215,7 +2294,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-native-image-paste" });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-image-paste",
         text: "/tmp/ferryx-paste/local-img.png ",
@@ -2324,7 +2403,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-local-image-paste" });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-local-image-paste",
         text: "/tmp/ferryx-paste/local-pane.png ",
@@ -2542,7 +2621,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-native-image-paste-ctrl-v" });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-image-paste-ctrl-v",
         text: "/tmp/ferryx-paste/ctrl-v.png ",
@@ -2584,7 +2663,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-native-menu-paste-right" });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-menu-paste-right",
         text: "/tmp/ferryx-paste/right.png ",
@@ -3153,7 +3232,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-image-dom" });
   });
 
   it("forwards a fixture PNG paste at the DOM paste seam through the agent's Ctrl+V shortcut", () => {
@@ -3190,7 +3269,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: "term-session-fixture-png" });
   });
 
   it("routes an image-only paste targeting the terminal pane when the focus sink is not active exclusively through Ctrl+V exactly once", () => {
@@ -3336,7 +3415,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pasteEvent.defaultPrevented).toBe(true);
 
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: sessionId });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId,
         text: "/tmp/ferryx-paste/dom-local.png ",
@@ -3418,7 +3497,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pasteEvent.defaultPrevented).toBe(true);
 
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: sessionId });
       const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
         ([cmd, args]) =>
           cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
@@ -3428,6 +3507,146 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     expect(toastMocks.error).not.toHaveBeenCalled();
   });
+
+  function dispatchImageDomPaste(target: HTMLElement) {
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+    act(() => {
+      target.dispatchEvent(pasteEvent);
+    });
+  }
+
+  it.each([
+    {
+      description: "a POSIX path on a manually typed SSH host",
+      localPath: "/home/dev/.cache/ferryx-paste/a1.png",
+      expectedPaste: "/home/dev/.cache/ferryx-paste/a1.png ",
+    },
+    {
+      description: "a Windows path on a manually typed SSH host",
+      localPath: "C:\\Users\\dev\\AppData\\Local\\Temp\\ferryx-paste\\a1.png",
+      expectedPaste: "'C:\\Users\\dev\\AppData\\Local\\Temp\\ferryx-paste\\a1.png' ",
+    },
+  ])(
+    "sends the pane's backend session ID (not the frontend ID) and pastes $description",
+    async ({ localPath, expectedPaste }) => {
+      const session = createSession("pane-frontend-id", "daemon-backend-id");
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_local_paste_clipboard_image") return { localPath, byteLength: 10 };
+        return undefined;
+      });
+
+      const { getByTestId } = render(<NativeTerminalPane sessionId="pane-frontend-id" session={session} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      dispatchImageDomPaste(textarea);
+
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+          sessionId: "daemon-backend-id",
+          text: expectedPaste,
+        });
+      });
+      const localCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_local_paste_clipboard_image",
+      );
+      expect(localCalls).toEqual([["cmd_local_paste_clipboard_image", { sessionId: "daemon-backend-id" }]]);
+      expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_ssh_paste_clipboard_image", expect.anything());
+    },
+  );
+
+  it("does not paste any path when the session-aware upload fails", async () => {
+    const session = createSession("pane-upload-fail", "daemon-upload-fail");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        throw { code: "INTERNAL_ERROR", message: "remote upload failed", details: {} };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId="pane-upload-fail" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+    toastMocks.error.mockClear();
+
+    dispatchImageDomPaste(textarea);
+
+    await waitFor(() => {
+      expect(toastMocks.error).toHaveBeenCalledTimes(1);
+    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", {
+      sessionId: "daemon-upload-fail",
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
+    const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+    );
+    expect(chordCalls).toHaveLength(0);
+  });
+
+  it.each([
+    { transition: "none", expectPaste: true },
+    { transition: "rebind", expectPaste: false },
+    { transition: "unmount", expectPaste: false },
+  ] as const)(
+    "a clipboard upload resolving after transition=$transition pastes only into the pane that requested it",
+    async ({ transition, expectPaste }) => {
+      const session = createSession("pane-late-upload", "daemon-late-a");
+      let resolveUpload: (value: { localPath: string; byteLength: number }) => void = () => {};
+      const upload = new Promise<{ localPath: string; byteLength: number }>((resolve) => {
+        resolveUpload = resolve;
+      });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_local_paste_clipboard_image") return upload;
+        return undefined;
+      });
+
+      const { getByTestId, rerender, unmount } = render(
+        <NativeTerminalPane sessionId="pane-late-upload" session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      dispatchImageDomPaste(textarea);
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", {
+          sessionId: "daemon-late-a",
+        });
+      });
+
+      if (transition === "rebind") {
+        rerender(
+          <NativeTerminalPane
+            sessionId="pane-late-upload"
+            session={{ ...session, backendSessionId: "daemon-late-b" }}
+          />,
+        );
+      } else if (transition === "unmount") {
+        unmount();
+      }
+
+      await act(async () => {
+        resolveUpload({ localPath: "/home/dev/.cache/ferryx-paste/late.png", byteLength: 10 });
+        await upload;
+        // Drain the microtask chain (invoke -> adapter -> then handler -> input queue pump). No
+        // timers are involved; the transition=none case proves this drain reaches the paste IPC.
+        for (let i = 0; i < 50; i += 1) await Promise.resolve();
+      });
+
+      const pastes = tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_paste");
+      expect(pastes).toEqual(
+        expectPaste
+          ? [["cmd_native_terminal_paste", { sessionId: "daemon-late-a", text: "/home/dev/.cache/ferryx-paste/late.png " }]]
+          : [],
+      );
+    },
+  );
 
   it("routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste", () => {
     const session = createSession("term-session-text-pane-target");
@@ -3653,113 +3872,187 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("subscribes to Tauri onDragDropEvent, atomically pasting dropped files inside bounds and ignoring drops outside bounds", async () => {
-    const originalDpr = window.devicePixelRatio;
-    Object.defineProperty(window, "devicePixelRatio", {
-      configurable: true,
-      value: 2,
-    });
-
-    try {
-      const session = createSession("term-session-tauri-dnd");
-      const { unmount } = render(<NativeTerminalPane sessionId="term-session-tauri-dnd" session={session} />);
-
-      await waitFor(() => {
-        expect(tauriWindowMocks.onDragDropEvent).toHaveBeenCalled();
-      });
-
-      const listener = tauriWindowMocks.getDragDropListener();
-      expect(listener).not.toBeNull();
-      tauriCoreMocks.invoke.mockClear();
-
-      // 1. Drop inside the pane (bounds left: 10, top: 32, size 800x588) pastes the
-      // shell-quoted path. Raw payload read verbatim (macOS contract).
-      const insidePayload = { x: 50, y: 100 };
-      const insideLogical = dragDropPositionToLogical(insidePayload, 2, true);
-      expect(insideLogical).toEqual(insidePayload);
-      act(() => {
-        listener?.({
-          payload: {
-            type: "drop",
-            paths: ["/Users/indo/Inside/file.txt"],
-            position: insidePayload,
-          },
-        });
-      });
-
-      await waitFor(() => {
-        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
-          sessionId: "term-session-tauri-dnd",
-          text: "/Users/indo/Inside/file.txt ",
-        });
-      });
-
-      // 1b. Regression discriminator: raw (19, 100) is INSIDE on macOS (19 >= 10),
-      // but the pre-fix ÷DPR code misread it as (9.5, 50) and wrongly dropped it.
-      const boundaryPayload = { x: 19, y: 100 };
-      act(() => {
-        listener?.({
-          payload: {
-            type: "drop",
-            paths: ["/Users/indo/Boundary/file.txt"],
-            position: boundaryPayload,
-          },
-        });
-      });
-
-      await waitFor(() => {
-        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
-          sessionId: "term-session-tauri-dnd",
-          text: "/Users/indo/Boundary/file.txt ",
-        });
-      });
-
-      // 2. Point outside the pane (left of left edge 10 / above top 32); macOS reads
-      // the raw payload with no DPR halving. Must not paste.
-      const outsidePayload = { x: 5, y: 20 };
-      const outsideLogical = dragDropPositionToLogical(outsidePayload, 2, true);
-      expect(outsideLogical).toEqual(outsidePayload);
-
-      // 2. Event inside pane bounds -> raw payload (100, 100) read as logical (100, 100) on
-      // macOS (wry forwards AppKit points verbatim; the pre-fix code would have halved it to
-      // (50, 50)), inside bounds [10..810, 32..620], atomically pasted with shell-safe quoting
-      act(() => {
-        listener?.({
-          payload: {
-            type: "drop",
-            paths: ["/Users/indo/Documents/project report.pdf", "/Users/indo/file2.txt"],
-            position: { x: 100, y: 100 },
-          },
-        });
-      });
-
-      await waitFor(() => {
-        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
-          sessionId: "term-session-tauri-dnd",
-          text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt ",
-        });
-      });
-
-      // 3. Unmount -> invokes unlisten callback
-      unmount();
-      expect(tauriWindowMocks.unlisten).toHaveBeenCalled();
-    } finally {
+  it("subscribes to Tauri onDragDropEvent, atomically pasting dropped files inside bounds and ignoring drops outside bounds", () =>
+    withMacHost(async () => {
+      const originalDpr = window.devicePixelRatio;
       Object.defineProperty(window, "devicePixelRatio", {
         configurable: true,
-        value: originalDpr,
+        value: 2,
       });
-    }
-  });
 
-  it("handles Cmd+click to resolve line text and open URLs", async () => {
-    const session = createSession("term-session-cmd-click");
-    let openedUrl: string | null = null;
-    saveBrowserSettings({ showTerminalLinkActions: false, openLinksInBuiltInBrowser: true });
-    const unregister = registerBuiltInBrowserLinkOpener((url) => {
-      openedUrl = url;
-    });
+      try {
+        const session = createSession("term-session-tauri-dnd");
+        const { unmount } = render(<NativeTerminalPane sessionId="term-session-tauri-dnd" session={session} />);
 
-    try {
+        await waitFor(() => {
+          expect(tauriWindowMocks.onDragDropEvent).toHaveBeenCalled();
+        });
+
+        const listener = tauriWindowMocks.getDragDropListener();
+        expect(listener).not.toBeNull();
+        tauriCoreMocks.invoke.mockClear();
+
+        // 1. Drop inside the pane (bounds left: 10, top: 32, size 800x588) pastes the
+        // shell-quoted path. Raw payload read verbatim (macOS contract).
+        const insidePayload = { x: 50, y: 100 };
+        const insideLogical = dragDropPositionToLogical(insidePayload, 2, true);
+        expect(insideLogical).toEqual(insidePayload);
+        act(() => {
+          listener?.({
+            payload: {
+              type: "drop",
+              paths: ["/Users/indo/Inside/file.txt"],
+              position: insidePayload,
+            },
+          });
+        });
+
+        await waitFor(() => {
+          expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+            sessionId: "term-session-tauri-dnd",
+            text: "/Users/indo/Inside/file.txt ",
+          });
+        });
+
+        // 1b. Regression discriminator: raw (19, 100) is INSIDE on macOS (19 >= 10),
+        // but the pre-fix ÷DPR code misread it as (9.5, 50) and wrongly dropped it.
+        const boundaryPayload = { x: 19, y: 100 };
+        act(() => {
+          listener?.({
+            payload: {
+              type: "drop",
+              paths: ["/Users/indo/Boundary/file.txt"],
+              position: boundaryPayload,
+            },
+          });
+        });
+
+        await waitFor(() => {
+          expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+            sessionId: "term-session-tauri-dnd",
+            text: "/Users/indo/Boundary/file.txt ",
+          });
+        });
+
+        // 2. Point outside the pane (left of left edge 10 / above top 32); macOS reads
+        // the raw payload with no DPR halving. Must not paste.
+        const outsidePayload = { x: 5, y: 20 };
+        const outsideLogical = dragDropPositionToLogical(outsidePayload, 2, true);
+        expect(outsideLogical).toEqual(outsidePayload);
+
+        // 2. Event inside pane bounds -> raw payload (100, 100) read as logical (100, 100) on
+        // macOS (wry forwards AppKit points verbatim; the pre-fix code would have halved it to
+        // (50, 50)), inside bounds [10..810, 32..620], atomically pasted with shell-safe quoting
+        act(() => {
+          listener?.({
+            payload: {
+              type: "drop",
+              paths: ["/Users/indo/Documents/project report.pdf", "/Users/indo/file2.txt"],
+              position: { x: 100, y: 100 },
+            },
+          });
+        });
+
+        await waitFor(() => {
+          expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+            sessionId: "term-session-tauri-dnd",
+            text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt ",
+          });
+        });
+
+        // 3. Unmount -> invokes unlisten callback
+        unmount();
+        expect(tauriWindowMocks.unlisten).toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(window, "devicePixelRatio", {
+          configurable: true,
+          value: originalDpr,
+        });
+      }
+    }));
+
+  it("handles Cmd+click to resolve line text and open URLs", () =>
+    withMacHost(async () => {
+      const session = createSession("term-session-cmd-click");
+      let openedUrl: string | null = null;
+      saveBrowserSettings({ showTerminalLinkActions: false, openLinksInBuiltInBrowser: true });
+      const unregister = registerBuiltInBrowserLinkOpener((url) => {
+        openedUrl = url;
+      });
+
+      try {
+        tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+          if (command === "cmd_native_terminal_attach") {
+            return {
+              cellWidthPx: 10,
+              cellHeightPx: 20,
+              cursorCol: 0,
+              cursorRow: 0,
+              cols: 80,
+              rows: 24,
+            };
+          }
+          if (command === "cmd_native_terminal_line_at") {
+            return {
+              text: "See https://ferryx.dev/guide for details",
+              col: args.col,
+              row: args.row,
+            };
+          }
+          return undefined;
+        });
+
+        const { getByTestId } = render(
+          <NativeTerminalPane sessionId="term-session-cmd-click" session={session} />,
+        );
+        const pane = getByTestId("native-terminal-pane");
+        const viewport = getByTestId("native-terminal-viewport");
+
+        // Mock bounding client rects
+        vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+          left: 0,
+          top: 0,
+          right: 800,
+          bottom: 480,
+          width: 800,
+          height: 480,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        });
+
+        // Simulate Cmd+click on the URL (col ~10)
+        act(() => {
+          fireEvent.pointerDown(pane, {
+            button: 0,
+            clientX: 100,
+            clientY: 20,
+            metaKey: true,
+          });
+          window.dispatchEvent(
+            new PointerEvent("pointerup", {
+              clientX: 100,
+              clientY: 20,
+              bubbles: true,
+            }),
+          );
+        });
+
+        // Assert that the real browser opener was invoked with the exact target URL
+        await waitFor(() => {
+          expect(openedUrl).toBe("https://ferryx.dev/guide");
+        });
+      } finally {
+        unregister();
+      }
+    }));
+
+  it("handles Cmd+click to resolve line text and open file paths with line/column", () =>
+    withMacHost(async () => {
+      const session = {
+        ...createSession("term-session-file-click", "daemon-file-click"),
+        cwd: "/Users/indo/code/project",
+      };
       tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
         if (command === "cmd_native_terminal_attach") {
           return {
@@ -3773,21 +4066,23 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         }
         if (command === "cmd_native_terminal_line_at") {
           return {
-            text: "See https://ferryx.dev/guide for details",
+            text: "ERROR at src/components/App.tsx:42:10 in test",
             col: args.col,
             row: args.row,
           };
+        }
+        if (command === "cmd_open_file_path") {
+          return true;
         }
         return undefined;
       });
 
       const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-cmd-click" session={session} />,
+        <NativeTerminalPane sessionId="term-session-file-click" session={session} />,
       );
       const pane = getByTestId("native-terminal-pane");
       const viewport = getByTestId("native-terminal-viewport");
 
-      // Mock bounding client rects
       vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
         left: 0,
         top: 0,
@@ -3800,301 +4095,231 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         toJSON: () => ({}),
       });
 
-      // Simulate Cmd+click on the URL (col ~10)
+      // Simulate Shift+Cmd+click on the file path
       act(() => {
         fireEvent.pointerDown(pane, {
           button: 0,
-          clientX: 100,
+          clientX: 120,
           clientY: 20,
           metaKey: true,
+          shiftKey: true,
         });
         window.dispatchEvent(
           new PointerEvent("pointerup", {
-            clientX: 100,
+            clientX: 120,
             clientY: 20,
+            shiftKey: true,
             bubbles: true,
           }),
         );
       });
 
-      // Assert that the real browser opener was invoked with the exact target URL
       await waitFor(() => {
-        expect(openedUrl).toBe("https://ferryx.dev/guide");
+        const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
+          ([command]) => command === "cmd_open_file_path",
+        );
+        expect(openCalls.length).toBeGreaterThanOrEqual(1);
+        expect(openCalls[0]?.[1]).toEqual({
+          path: "src/components/App.tsx",
+          cwd: "/Users/indo/code/project",
+          sessionId: "daemon-file-click",
+          editor: "system",
+          line: 42,
+          col: 10,
+        });
       });
-    } finally {
-      unregister();
-    }
-  });
+    }));
 
-  it("handles Cmd+click to resolve line text and open file paths with line/column", async () => {
-    const session = {
-      ...createSession("term-session-file-click", "daemon-file-click"),
-      cwd: "/Users/indo/code/project",
-    };
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
-      if (command === "cmd_native_terminal_attach") {
-        return {
-          cellWidthPx: 10,
-          cellHeightPx: 20,
-          cursorCol: 0,
-          cursorRow: 0,
-          cols: 80,
-          rows: 24,
-        };
-      }
-      if (command === "cmd_native_terminal_line_at") {
-        return {
-          text: "ERROR at src/components/App.tsx:42:10 in test",
-          col: args.col,
-          row: args.row,
-        };
-      }
-      if (command === "cmd_open_file_path") {
-        return true;
-      }
-      return undefined;
-    });
-
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-file-click" session={session} />,
-    );
-    const pane = getByTestId("native-terminal-pane");
-    const viewport = getByTestId("native-terminal-viewport");
-
-    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 800,
-      bottom: 480,
-      width: 800,
-      height: 480,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
-
-    // Simulate Shift+Cmd+click on the file path
-    act(() => {
-      fireEvent.pointerDown(pane, {
-        button: 0,
-        clientX: 120,
-        clientY: 20,
-        metaKey: true,
-        shiftKey: true,
-      });
-      window.dispatchEvent(
-        new PointerEvent("pointerup", {
-          clientX: 120,
-          clientY: 20,
-          shiftKey: true,
-          bubbles: true,
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
-        ([command]) => command === "cmd_open_file_path",
-      );
-      expect(openCalls.length).toBeGreaterThanOrEqual(1);
-      expect(openCalls[0]?.[1]).toEqual({
-        path: "src/components/App.tsx",
+  it("handles Cmd+click without Shift by opening a file tab instead of the preview modal", () =>
+    withMacHost(async () => {
+      const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
+      const events: Array<CustomEvent> = [];
+      const onOpen = (event: Event) => events.push(event as CustomEvent);
+      window.addEventListener("ferryx:open-file-preview", onOpen);
+      const session = {
+        ...createSession("term-session-preview-click", "daemon-preview-click"),
         cwd: "/Users/indo/code/project",
-        sessionId: "daemon-file-click",
-        editor: "system",
-        line: 42,
-        col: 10,
+      };
+      tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+        if (command === "cmd_native_terminal_attach") {
+          return {
+            cellWidthPx: 10,
+            cellHeightPx: 20,
+            cursorCol: 0,
+            cursorRow: 0,
+            cols: 80,
+            rows: 24,
+          };
+        }
+        if (command === "cmd_native_terminal_line_at") {
+          return {
+            text: "ERROR at src/components/App.tsx:42:10 in test",
+            col: args.col,
+            row: args.row,
+          };
+        }
+        return undefined;
       });
-    });
-  });
 
-  it("handles Cmd+click without Shift by opening a file tab instead of the preview modal", async () => {
-    const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
-    const events: Array<CustomEvent> = [];
-    const onOpen = (event: Event) => events.push(event as CustomEvent);
-    window.addEventListener("ferryx:open-file-preview", onOpen);
-    const session = {
-      ...createSession("term-session-preview-click", "daemon-preview-click"),
-      cwd: "/Users/indo/code/project",
-    };
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
-      if (command === "cmd_native_terminal_attach") {
-        return {
-          cellWidthPx: 10,
-          cellHeightPx: 20,
-          cursorCol: 0,
-          cursorRow: 0,
-          cols: 80,
-          rows: 24,
-        };
-      }
-      if (command === "cmd_native_terminal_line_at") {
-        return {
-          text: "ERROR at src/components/App.tsx:42:10 in test",
-          col: args.col,
-          row: args.row,
-        };
-      }
-      return undefined;
-    });
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-preview-click" session={session} />,
+      );
+      const pane = getByTestId("native-terminal-pane");
+      const viewport = getByTestId("native-terminal-viewport");
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-preview-click" session={session} />,
-    );
-    const pane = getByTestId("native-terminal-pane");
-    const viewport = getByTestId("native-terminal-viewport");
-
-    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 800,
-      bottom: 480,
-      width: 800,
-      height: 480,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
-
-    act(() => {
-      fireEvent.pointerDown(pane, {
-        button: 0,
-        clientX: 120,
-        clientY: 20,
-        metaKey: true,
-        shiftKey: false,
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 480,
+        width: 800,
+        height: 480,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
       });
-      window.dispatchEvent(
-        new PointerEvent("pointerup", {
+
+      act(() => {
+        fireEvent.pointerDown(pane, {
+          button: 0,
           clientX: 120,
           clientY: 20,
+          metaKey: true,
           shiftKey: false,
-          bubbles: true,
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      expect(events).toHaveLength(1);
-    });
-    expect(openSpy).not.toHaveBeenCalled();
-    expect(events[0]?.detail).toEqual({
-      source: expect.objectContaining({
-        sessionId: "term-session-preview-click",
-        backendSessionId: "daemon-preview-click",
-      }),
-      request: expect.objectContaining({
-        path: "src/components/App.tsx",
-        backendSessionId: "daemon-preview-click",
-        line: 42,
-        col: 10,
-      }),
-    });
-    window.removeEventListener("ferryx:open-file-preview", onOpen);
-    openSpy.mockRestore();
-  });
-  it("shows a link underline only while hovering a token with the modifier", async () => {
-    const session = createSession("hover-file", "hover-backend");
-    tauriCoreMocks.invoke.mockImplementation(async (command) => {
-      if (command === "cmd_native_terminal_line_at") return { text: "src/a.ts plain", col: 2, row: 0 };
-      if (command === "cmd_file_preview_resolve") return { resolvedPath: "/workspace/src/a.ts", exists: true, isDirectory: false };
-      return undefined;
-    });
-    const view = render(<NativeTerminalPane session={session} />);
-    const pane = view.getByTestId("native-terminal-pane");
-    vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
-      .mockReturnValue(new DOMRect(0, 0, 800, 480));
-    await act(async () => {
-      fireEvent.pointerMove(pane, { pointerId: 1, clientX: 16, clientY: 5, metaKey: true, buttons: 0 });
-    });
-    expect(view.getByTestId("terminal-link-underline")).toBeTruthy();
-    expect(pane.classList.contains("cursor-pointer")).toBe(true);
-    act(() => { fireEvent.pointerLeave(pane); });
-    expect(view.queryByTestId("terminal-link-underline")).toBeNull();
-    expect(pane.classList.contains("cursor-pointer")).toBe(false);
-  });
-
-  it("handles Cmd+click on indented lines without coordinate drift", async () => {
-    const session = {
-      ...createSession("term-session-indented-click", "daemon-indented-click"),
-      cwd: "/Users/indo/code/project",
-    };
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
-      if (command === "cmd_native_terminal_attach") {
-        return {
-          cellWidthPx: 10,
-          cellHeightPx: 20,
-          cursorCol: 0,
-          cursorRow: 0,
-          cols: 80,
-          rows: 24,
-        };
-      }
-      if (command === "cmd_native_terminal_line_at") {
-        return {
-          text: "        alpha/one.ts:1:1 and beta/two.ts:2:2",
-          col: args.col,
-          row: args.row,
-        };
-      }
-      if (command === "cmd_open_file_path") {
-        return true;
-      }
-      return undefined;
-    });
-
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-indented-click" session={session} />,
-    );
-    const pane = getByTestId("native-terminal-pane");
-    const viewport = getByTestId("native-terminal-viewport");
-
-    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 800,
-      bottom: 480,
-      width: 800,
-      height: 480,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
-
-    // Grid col 8 corresponds to x=80 (cellWidth=10) -> start of alpha/one.ts
-    act(() => {
-      fireEvent.pointerDown(pane, {
-        button: 0,
-        clientX: 80,
-        clientY: 20,
-        metaKey: true,
-        shiftKey: true,
+        });
+        window.dispatchEvent(
+          new PointerEvent("pointerup", {
+            clientX: 120,
+            clientY: 20,
+            shiftKey: false,
+            bubbles: true,
+          }),
+        );
       });
-      window.dispatchEvent(
-        new PointerEvent("pointerup", {
+
+      await waitFor(() => {
+        expect(events).toHaveLength(1);
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+      expect(events[0]?.detail).toEqual({
+        source: expect.objectContaining({
+          sessionId: "term-session-preview-click",
+          backendSessionId: "daemon-preview-click",
+        }),
+        request: expect.objectContaining({
+          path: "src/components/App.tsx",
+          backendSessionId: "daemon-preview-click",
+          line: 42,
+          col: 10,
+        }),
+      });
+      window.removeEventListener("ferryx:open-file-preview", onOpen);
+      openSpy.mockRestore();
+    }));
+  it("shows a link underline only while hovering a token with the modifier", () =>
+    withMacHost(async () => {
+      const session = createSession("hover-file", "hover-backend");
+      tauriCoreMocks.invoke.mockImplementation(async (command) => {
+        if (command === "cmd_native_terminal_line_at") return { text: "src/a.ts plain", col: 2, row: 0 };
+        if (command === "cmd_file_preview_resolve") return { resolvedPath: "/workspace/src/a.ts", exists: true, isDirectory: false };
+        return undefined;
+      });
+      const view = render(<NativeTerminalPane session={session} />);
+      const pane = view.getByTestId("native-terminal-pane");
+      vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
+        .mockReturnValue(new DOMRect(0, 0, 800, 480));
+      await act(async () => {
+        fireEvent.pointerMove(pane, { pointerId: 1, clientX: 16, clientY: 5, metaKey: true, buttons: 0 });
+      });
+      expect(view.getByTestId("terminal-link-underline")).toBeTruthy();
+      expect(pane.classList.contains("cursor-pointer")).toBe(true);
+      act(() => { fireEvent.pointerLeave(pane); });
+      expect(view.queryByTestId("terminal-link-underline")).toBeNull();
+      expect(pane.classList.contains("cursor-pointer")).toBe(false);
+    }));
+
+  it("handles Cmd+click on indented lines without coordinate drift", () =>
+    withMacHost(async () => {
+      const session = {
+        ...createSession("term-session-indented-click", "daemon-indented-click"),
+        cwd: "/Users/indo/code/project",
+      };
+      tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+        if (command === "cmd_native_terminal_attach") {
+          return {
+            cellWidthPx: 10,
+            cellHeightPx: 20,
+            cursorCol: 0,
+            cursorRow: 0,
+            cols: 80,
+            rows: 24,
+          };
+        }
+        if (command === "cmd_native_terminal_line_at") {
+          return {
+            text: "        alpha/one.ts:1:1 and beta/two.ts:2:2",
+            col: args.col,
+            row: args.row,
+          };
+        }
+        if (command === "cmd_open_file_path") {
+          return true;
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-indented-click" session={session} />,
+      );
+      const pane = getByTestId("native-terminal-pane");
+      const viewport = getByTestId("native-terminal-viewport");
+
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 480,
+        width: 800,
+        height: 480,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+
+      // Grid col 8 corresponds to x=80 (cellWidth=10) -> start of alpha/one.ts
+      act(() => {
+        fireEvent.pointerDown(pane, {
+          button: 0,
           clientX: 80,
           clientY: 20,
+          metaKey: true,
           shiftKey: true,
-          bubbles: true,
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
-        ([command]) => command === "cmd_open_file_path",
-      );
-      expect(openCalls.length).toBeGreaterThanOrEqual(1);
-      expect(openCalls[0]?.[1]).toEqual({
-        path: "alpha/one.ts",
-        cwd: "/Users/indo/code/project",
-        sessionId: "daemon-indented-click",
-        editor: "system",
-        line: 1,
-        col: 1,
+        });
+        window.dispatchEvent(
+          new PointerEvent("pointerup", {
+            clientX: 80,
+            clientY: 20,
+            shiftKey: true,
+            bubbles: true,
+          }),
+        );
       });
-    });
-  });
+
+      await waitFor(() => {
+        const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
+          ([command]) => command === "cmd_open_file_path",
+        );
+        expect(openCalls.length).toBeGreaterThanOrEqual(1);
+        expect(openCalls[0]?.[1]).toEqual({
+          path: "alpha/one.ts",
+          cwd: "/Users/indo/code/project",
+          sessionId: "daemon-indented-click",
+          editor: "system",
+          line: 1,
+          col: 1,
+        });
+      });
+    }));
 
   it("handles onWheel scrolling by issuing native scroll IPC command", async () => {
     const session = createSession("term-session-1");
@@ -4425,53 +4650,54 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     }
   });
 
-  it("copies native selection on macOS Korean layout Cmd+C (ㅊ and Process)", async () => {
-    const session = createSession("term-session-korean-copy");
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: vi.fn(), writeText: writeTextSpy },
-    });
+  it("copies native selection on macOS Korean layout Cmd+C (ㅊ and Process)", () =>
+    withMacHost(async () => {
+      const session = createSession("term-session-korean-copy");
+      const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
 
-    let resolveCopySelection: ((value: string) => void) | undefined;
-    const copyPromise = new Promise<string>((resolve) => {
-      resolveCopySelection = resolve;
-    });
+      let resolveCopySelection: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopySelection = resolve;
+      });
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_copy_selection") {
-        return copyPromise;
-      }
-      return undefined;
-    });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-copy" session={session} />);
-    const textarea = getByTestId("native-terminal-focus-sink");
+      const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-copy" session={session} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
 
-    const copyShortcut = new KeyboardEvent("keydown", {
-      key: "ㅊ",
-      code: "KeyC",
-      metaKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    act(() => {
-      textarea.dispatchEvent(copyShortcut);
-    });
+      const copyShortcut = new KeyboardEvent("keydown", {
+        key: "ㅊ",
+        code: "KeyC",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        textarea.dispatchEvent(copyShortcut);
+      });
 
-    expect(copyShortcut.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-      sessionId: "term-session-korean-copy",
-    });
+      expect(copyShortcut.defaultPrevented).toBe(true);
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-korean-copy",
+      });
 
-    await act(async () => {
-      resolveCopySelection!("selected korean copy text");
-      await copyPromise;
-    });
+      await act(async () => {
+        resolveCopySelection!("selected korean copy text");
+        await copyPromise;
+      });
 
-    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
-    expect(writeTextSpy).not.toHaveBeenCalled();
-  });
+      // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+      expect(writeTextSpy).not.toHaveBeenCalled();
+    }));
 
   it("copy-or-interrupt event with empty selection does not send input to PTY", async () => {
     const session = createSession("term-session-copy-interrupt-empty");
@@ -4518,54 +4744,55 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(writeTextSpy).not.toHaveBeenCalled();
   });
 
-  it("copy-or-interrupt event with selection copies", async () => {
-    const session = createSession("term-session-copy-interrupt-with-text");
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: vi.fn(), writeText: writeTextSpy },
-    });
+  it("copy-or-interrupt event with selection copies", () =>
+    withMacHost(async () => {
+      const session = createSession("term-session-copy-interrupt-with-text");
+      const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
 
-    let resolveCopySelection: ((value: string) => void) | undefined;
-    const copyPromise = new Promise<string>((resolve) => {
-      resolveCopySelection = resolve;
-    });
+      let resolveCopySelection: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopySelection = resolve;
+      });
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_copy_selection") {
-        return copyPromise;
-      }
-      return undefined;
-    });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
 
-    render(<NativeTerminalPane sessionId="term-session-copy-interrupt-with-text" session={session} />);
-    tauriCoreMocks.invoke.mockClear();
+      render(<NativeTerminalPane sessionId="term-session-copy-interrupt-with-text" session={session} />);
+      tauriCoreMocks.invoke.mockClear();
 
-    act(() => {
-      for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
-        listener();
-      }
-    });
+      act(() => {
+        for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
+          listener();
+        }
+      });
 
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-      sessionId: "term-session-copy-interrupt-with-text",
-    });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-copy-interrupt-with-text",
+      });
 
-    await act(async () => {
-      resolveCopySelection!("some selection");
-      await copyPromise;
-    });
+      await act(async () => {
+        resolveCopySelection!("some selection");
+        await copyPromise;
+      });
 
-    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
-    expect(writeTextSpy).not.toHaveBeenCalled();
+      // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+      expect(writeTextSpy).not.toHaveBeenCalled();
 
-    const sendInputCallsWithC = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd, args]) =>
-        cmd === "cmd_native_terminal_send_input" &&
-        (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "c",
-    );
-    expect(sendInputCallsWithC).toHaveLength(0);
-  });
+      const sendInputCallsWithC = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" &&
+          (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "c",
+      );
+      expect(sendInputCallsWithC).toHaveLength(0);
+    }));
 
   it("delivers copy request on first native copy event without depending on browser clipboard user activation on macOS", async () => {
     const originalPlatform = navigator.platform;
@@ -4777,6 +5004,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         preedit: null,
       });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: { text: "한글" },
       });
@@ -4811,6 +5039,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: { text: "a" },
       });
@@ -4829,6 +5058,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-1",
       input: {
         text: "a",
@@ -4857,6 +5087,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(keyEvent.defaultPrevented).toBe(true);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledTimes(1);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-1",
       input: {
         text: "a",
@@ -5193,6 +5424,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     expect(chord.defaultPrevented).toBe(true);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-plain-ctrlalt",
       input: {
         keyEvent: {
@@ -5425,6 +5657,7 @@ describe("active prop and pane focus event dispatch", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "backend-claim-test",
         input: { text: "a" },
       });
@@ -5454,6 +5687,7 @@ describe("active prop and pane focus event dispatch", () => {
     });
 
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "backend-inactive-test",
       input: { text: "z" },
     });
@@ -5484,6 +5718,40 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     resetNativeTerminalPaneForTest();
     resetNativeTerminalLifecycleForTest();
   });
+
+  async function withMacHost<T>(fn: () => T | Promise<T>): Promise<T> {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "darwin",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "MacIntel",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        configurable: true,
+      });
+      return await fn();
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  }
 
   it("routes attach, bounds, focus, input, and detach to backendSessionId when id and backendSessionId intentionally differ", async () => {
     const frontendId = "frontend-pane-leaf-abc";
@@ -5544,6 +5812,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: daemonSessionId,
       input: { text: "echo hi\n" },
     });
@@ -5641,6 +5910,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "daemon-pty-fresh-123",
       input: { text: "resumed input" },
     });
@@ -5683,6 +5953,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       leftInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "backend-resumed-left",
       input: { text: "left only" },
     });
@@ -5830,6 +6101,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-capture-fallback",
         input: { text: "a" },
       });
@@ -5872,6 +6144,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     // The store-derived `active` prop must keep deciding body-targeted keydowns even when this
     // pane was the last natively focused terminal (mixed terminal+browser splits).
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: backendSessionId,
       input: { text: "a" },
     });
@@ -6011,6 +6284,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "switch-session-incoming",
         input: { text: "x" },
       });
@@ -6110,6 +6384,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "daemon-native-ime-switch",
         input: { text: "가" },
       });
@@ -6138,6 +6413,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-plain-ctrlc",
         input: {
           keyEvent: {
@@ -6189,6 +6465,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await act(async () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-waiting-ctrlc",
         input: {
           keyEvent: {
@@ -6540,6 +6817,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-working-ctrlc",
         input: {
           keyEvent: {
@@ -6582,6 +6860,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(koreanCtrlC.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-korean-ctrlc",
         input: {
           keyEvent: {
@@ -6631,6 +6910,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(koreanCtrlL.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-korean-ctrll",
         input: {
           keyEvent: {
@@ -6679,6 +6959,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await act(async () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-no-activity-ctrlc",
         input: {
           keyEvent: {
@@ -6733,6 +7014,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-working-override-ctrlc",
         input: {
           keyEvent: {
@@ -6806,71 +7088,72 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
   });
 
-  it("copies selection to clipboard on Cmd+C with non-empty selection without sending input when agent is waiting", async () => {
-    const session = {
-      ...createSession("term-session-cmdc-selection-agent"),
-      agentType: "claude",
-    };
-    const activity: TerminalActivity = {
-      isAgent: true,
-      state: "waiting",
-      title: "Agent Waiting",
-    };
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: vi.fn(), writeText: writeTextSpy },
-    });
+  it("copies selection to clipboard on Cmd+C with non-empty selection without sending input when agent is waiting", () =>
+    withMacHost(async () => {
+      const session = {
+        ...createSession("term-session-cmdc-selection-agent"),
+        agentType: "claude",
+      };
+      const activity: TerminalActivity = {
+        isAgent: true,
+        state: "waiting",
+        title: "Agent Waiting",
+      };
+      const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
 
-    let resolveCopySelection: ((value: string) => void) | undefined;
-    const copyPromise = new Promise<string>((resolve) => {
-      resolveCopySelection = resolve;
-    });
+      let resolveCopySelection: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopySelection = resolve;
+      });
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_copy_selection") {
-        return copyPromise;
-      }
-      return undefined;
-    });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane
-        sessionId="term-session-cmdc-selection-agent"
-        session={session}
-        activity={activity}
-      />,
-    );
-    const textarea = getByTestId("native-terminal-focus-sink");
-    tauriCoreMocks.invoke.mockClear();
+      const { getByTestId } = render(
+        <NativeTerminalPane
+          sessionId="term-session-cmdc-selection-agent"
+          session={session}
+          activity={activity}
+        />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
 
-    const copyShortcut = new KeyboardEvent("keydown", {
-      key: "c",
-      metaKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    act(() => {
-      textarea.dispatchEvent(copyShortcut);
-    });
+      const copyShortcut = new KeyboardEvent("keydown", {
+        key: "c",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        textarea.dispatchEvent(copyShortcut);
+      });
 
-    expect(copyShortcut.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-      sessionId: "term-session-cmdc-selection-agent",
-    });
+      expect(copyShortcut.defaultPrevented).toBe(true);
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-cmdc-selection-agent",
+      });
 
-    await act(async () => {
-      resolveCopySelection!("copied selection text");
-      await copyPromise;
-    });
+      await act(async () => {
+        resolveCopySelection!("copied selection text");
+        await copyPromise;
+      });
 
-    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
-    expect(writeTextSpy).not.toHaveBeenCalled();
-    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd]) => cmd === "cmd_native_terminal_send_input",
-    );
-    expect(sendInputCalls).toHaveLength(0);
-  });
+      // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+      expect(writeTextSpy).not.toHaveBeenCalled();
+      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sendInputCalls).toHaveLength(0);
+    }));
 
   it("copies selection to clipboard on Ctrl+Shift+C without sending input", async () => {
     const originalPlatform = navigator.platform;
