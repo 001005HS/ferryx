@@ -371,7 +371,7 @@ fn missing_files_produce_structured_errors_instead_of_a_silent_false() {
     assert_eq!(details["reason"].as_str(), Some("missing"));
     assert_eq!(
         details["path"].as_str(),
-        Some(cwd.path().join("missing/app.rs").to_string_lossy().as_ref())
+        Some(cwd.path().join("missing").join("app.rs").to_string_lossy().as_ref())
     );
 }
 
@@ -623,3 +623,13 @@ async fn session_id_resolves_the_live_local_terminal_cwd() {
     attachment.stream_task.abort();
     server_task.abort();
 }
+
+#[test]
+fn resolve_file_link_relative_normalizes_slashes_to_native_separators() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path().to_string_lossy().to_string();
+    let resolved = resolve_file_link("src/a/b.rs", Some(&cwd), None);
+    let expected = temp.path().join("src").join("a").join("b.rs");
+    assert_eq!(resolved, expected);
+}
+

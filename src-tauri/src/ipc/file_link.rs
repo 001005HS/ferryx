@@ -187,7 +187,7 @@ pub fn is_absolute_token(token: &str) -> bool {
     if Path::new(token).is_absolute() {
         return true;
     }
-    if token.starts_with("\\\\") || token.starts_with("//") {
+    if token.starts_with('/') || token.starts_with('\\') {
         return true;
     }
     let bytes = token.as_bytes();
@@ -224,7 +224,15 @@ pub fn resolve_file_link(token: &str, cwd: Option<&str>, home: Option<PathBuf>) 
         return PathBuf::from(token);
     }
     match cwd {
-        Some(cwd) if !cwd.trim().is_empty() => Path::new(cwd).join(token),
+        Some(cwd) if !cwd.trim().is_empty() => {
+            let mut path = PathBuf::from(cwd);
+            for component in token.split(['/', '\\']) {
+                if !component.is_empty() {
+                    path.push(component);
+                }
+            }
+            path
+        }
         _ => PathBuf::from(token),
     }
 }
