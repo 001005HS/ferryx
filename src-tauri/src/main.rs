@@ -13,6 +13,19 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "open") {
+        let outcome = std::env::current_dir()
+            .map_err(|e| format!("failed to determine current directory: {e}"))
+            .and_then(|cwd| parse_open_cli(&args, &cwd))
+            .and_then(run_open_cli);
+        match outcome {
+            Ok(()) => return,
+            Err(error) => {
+                print_browser_cli_error("OPEN_CLI_FAILED", error);
+                std::process::exit(2);
+            }
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "browser") {
         match parse_browser_cli(&args).and_then(run_browser_cli) {
             Ok(()) => return,

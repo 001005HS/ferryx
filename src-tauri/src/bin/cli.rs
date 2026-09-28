@@ -1,11 +1,24 @@
 use ferryx_lib::cli::{
-    parse_account_cli, parse_browser_cli, parse_handover_from, parse_launch_mode, parse_pair_cli,
-    parse_remote_cli, print_browser_cli_error, run_account_cli, run_browser_cli,
-    run_daemon_headless, run_pair_cli, run_remote_cli, LaunchMode,
+    parse_account_cli, parse_browser_cli, parse_handover_from, parse_launch_mode, parse_open_cli,
+    parse_pair_cli, parse_remote_cli, print_browser_cli_error, run_account_cli, run_browser_cli,
+    run_daemon_headless, run_open_cli, run_pair_cli, run_remote_cli, LaunchMode,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "open") {
+        let outcome = std::env::current_dir()
+            .map_err(|e| format!("failed to determine current directory: {e}"))
+            .and_then(|cwd| parse_open_cli(&args, &cwd))
+            .and_then(run_open_cli);
+        match outcome {
+            Ok(()) => return,
+            Err(error) => {
+                print_browser_cli_error("OPEN_CLI_FAILED", error);
+                std::process::exit(2);
+            }
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "account") {
         match parse_account_cli(&args).and_then(run_account_cli) {
             Ok(()) => return,

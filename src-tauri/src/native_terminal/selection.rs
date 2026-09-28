@@ -8,11 +8,11 @@ use super::guards::{SelectionGestureEventGuard, SelectionGestureGuard};
 use super::mouse::{MouseAction, MouseButton, MouseEvent};
 use super::search::screen_cell_text;
 use super::sys::ffi::{
-    ghostty_free, ghostty_selection_gesture_event, ghostty_selection_gesture_event_new,
-    ghostty_selection_gesture_event_set, ghostty_selection_gesture_get,
-    ghostty_selection_gesture_new, ghostty_selection_gesture_reset, ghostty_terminal_get,
-    ghostty_terminal_grid_ref, ghostty_terminal_point_from_grid_ref, ghostty_terminal_select_all,
-    ghostty_terminal_select_line, ghostty_terminal_select_word,
+    ghostty_free, ghostty_grid_ref_hyperlink_uri, ghostty_selection_gesture_event,
+    ghostty_selection_gesture_event_new, ghostty_selection_gesture_event_set,
+    ghostty_selection_gesture_get, ghostty_selection_gesture_new, ghostty_selection_gesture_reset,
+    ghostty_terminal_get, ghostty_terminal_grid_ref, ghostty_terminal_point_from_grid_ref,
+    ghostty_terminal_select_all, ghostty_terminal_select_line, ghostty_terminal_select_word,
     ghostty_terminal_selection_format_alloc, ghostty_terminal_selection_ordered,
     ghostty_terminal_set,
 };
@@ -21,10 +21,11 @@ use super::sys::types::{
     GhosttySelectionGesture, GhosttySelectionGestureEvent, GhosttySelectionGestureGeometry,
     GhosttySurfacePosition, GhosttyTerminalImpl, GhosttyTerminalSelectLineOptions,
     GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions,
-    GHOSTTY_FORMATTER_FORMAT_PLAIN, GHOSTTY_NO_VALUE, GHOSTTY_POINT_TAG_SCREEN,
-    GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT,
-    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION,
-    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
+    GHOSTTY_FORMATTER_FORMAT_PLAIN, GHOSTTY_NO_VALUE, GHOSTTY_OUT_OF_SPACE,
+    GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_POINT_TAG_VIEWPORT,
+    GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG,
     GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE,
@@ -418,6 +419,53 @@ pub fn line_text_at(
     } else {
         Ok(text)
     }
+}
+
+/// Returns the OSC 8 hyperlink URI associated with the cell at (col, row) in viewport coordinates, if any.
+pub fn hyperlink_uri_at(
+    handle: NonNull<GhosttyTerminalImpl>,
+    col: u16,
+    row: u16,
+) -> Result<Option<String>, NativeTerminalError> {
+    let grid_ref = viewport_ref(handle, col, row)?;
+    let mut buf = vec![0u8; 2048];
+    let mut out_len: usize = 0;
+
+    // SAFETY: Category: Foreign Hyperlink Query.
+    // Invariant: grid_ref was produced by this terminal and is valid; buf points to writable heap storage of 2048 bytes; out_len is valid writable stack storage.
+    let mut result = unsafe {
+        ghostty_grid_ref_hyperlink_uri(
+            &grid_ref,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut out_len,
+        )
+    };
+
+    if (result == GHOSTTY_OUT_OF_SPACE || out_len > buf.len()) && out_len > 0 {
+        let retry_len = out_len.min(65536);
+        buf.resize(retry_len, 0);
+        // SAFETY: Category: Foreign Hyperlink Query Retry.
+        // Invariant: grid_ref is unchanged and valid; buf is resized to retry_len bytes; out_len is valid writable stack storage.
+        result = unsafe {
+            ghostty_grid_ref_hyperlink_uri(
+                &grid_ref,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut out_len,
+            )
+        };
+    }
+
+    NativeTerminalError::from_c_result(result, "ghostty_grid_ref_hyperlink_uri")?;
+
+    if out_len == 0 {
+        return Ok(None);
+    }
+
+    let actual_len = out_len.min(buf.len());
+    buf.truncate(actual_len);
+    Ok(String::from_utf8(buf).ok())
 }
 
 pub fn clear_selection(handle: NonNull<GhosttyTerminalImpl>) -> Result<(), NativeTerminalError> {

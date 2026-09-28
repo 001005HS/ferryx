@@ -26,6 +26,7 @@ use super::queries::{
 };
 use super::render_pass::capture_render_snapshot;
 use super::search::search_grid;
+use super::selection;
 use super::selection::{
     apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
     reset_selection_gesture, select_all, select_line_at, select_word_at, selection_range,
@@ -363,6 +364,15 @@ impl NativeTerminal {
             )
         };
         NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ScrollbackMaxBytes)")
+    }
+
+    /// Returns the OSC 8 hyperlink URI of the cell at viewport coordinates (col, row), if any.
+    pub fn hyperlink_uri_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Result<Option<String>, NativeTerminalError> {
+        selection::hyperlink_uri_at(self.handle, col, row)
     }
 }
 
@@ -1386,5 +1396,18 @@ mod tests {
             terminal.scrollback_rows().expect("query scrollback") > 0,
             "full-screen scrolling must retain scrollback history"
         );
+    }
+
+    #[test]
+    fn native_terminal_hyperlink_uri_at() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"\x1b]8;;file:///tmp/a.txt\x1b\\LINK\x1b]8;;\x1b\\ plain")
+            .expect("feed OSC 8 hyperlink");
+        assert_eq!(
+            terminal.hyperlink_uri_at(1, 0).unwrap().as_deref(),
+            Some("file:///tmp/a.txt")
+        );
+        assert_eq!(terminal.hyperlink_uri_at(5, 0).unwrap(), None);
     }
 }

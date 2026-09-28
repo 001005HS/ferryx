@@ -9,6 +9,7 @@ pub mod design_feedback;
 pub mod diagnostics;
 pub mod error;
 pub mod file_link;
+pub mod file_open_with;
 pub mod file_preview;
 pub mod file_preview_contract;
 pub mod native_menu;
@@ -16,6 +17,8 @@ pub mod native_menu;
 pub mod native_terminal;
 #[cfg(not(feature = "native-terminal"))]
 pub mod native_terminal_disabled;
+#[cfg(feature = "native-terminal")]
+pub mod native_terminal_hyperlink;
 pub mod notifications;
 pub mod paired_host;
 pub mod permissions;
@@ -23,6 +26,7 @@ pub mod preferences;
 pub mod project;
 pub mod project_remote;
 pub mod remote;
+pub mod remote_file;
 pub mod session;
 pub mod ssh;
 pub mod terminal;
@@ -59,6 +63,8 @@ pub use native_menu::*;
 pub use native_terminal::*;
 #[cfg(not(feature = "native-terminal"))]
 pub use native_terminal_disabled::*;
+#[cfg(feature = "native-terminal")]
+pub use native_terminal_hyperlink::*;
 pub use notifications::*;
 pub use permissions::*;
 pub use preferences::*;

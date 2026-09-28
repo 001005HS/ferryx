@@ -11,6 +11,13 @@ pub enum LaunchMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFileCliCommand {
+    pub path: String,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserCliCommand {
     List,
     Open {
@@ -2594,12 +2601,110 @@ fn format_browser_cli_response(
             }))
             .map_err(|error| error.to_string())
         }
+        BrowserCliResponse::FileOpened { path } => Ok(format!("opened {path}")),
         BrowserCliResponse::Error { code, message } => {
             print_browser_cli_error(&code, &message);
             Err(message)
         }
         #[allow(unreachable_patterns)]
         _ => Ok(String::new()),
+    }
+}
+
+pub const OPEN_CLI_USAGE: &str = "usage: ferryx open <path>[:line[:col]]";
+
+fn is_single_drive_letter(s: &str) -> bool {
+    s.len() == 1 && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+fn split_path_line_col(target: &str) -> (&str, Option<u32>, Option<u32>) {
+    if let Some((rest, last_segment)) = target.rsplit_once(':') {
+        if !last_segment.is_empty() && last_segment.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(last_num) = last_segment.parse::<u32>() {
+                if let Some((prefix, mid_segment)) = rest.rsplit_once(':') {
+                    if !mid_segment.is_empty() && mid_segment.chars().all(|c| c.is_ascii_digit()) {
+                        if let Ok(mid_num) = mid_segment.parse::<u32>() {
+                            if !prefix.is_empty() && !is_single_drive_letter(prefix) {
+                                return (prefix, Some(mid_num), Some(last_num));
+                            } else {
+                                return (target, None, None);
+                            }
+                        }
+                    }
+                }
+                if !rest.is_empty() && !is_single_drive_letter(rest) {
+                    return (rest, Some(last_num), None);
+                } else {
+                    return (target, None, None);
+                }
+            }
+        }
+    }
+    (target, None, None)
+}
+
+pub fn parse_open_cli<I, T>(args: I, cwd: &std::path::Path) -> Result<OpenFileCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if args.len() != 3 || args.get(1).map(String::as_str) != Some("open") {
+        return Err(OPEN_CLI_USAGE.to_string());
+    }
+
+    let target = &args[2];
+    let (parsed_path, line, col) = split_path_line_col(target);
+
+    let path_obj = std::path::Path::new(parsed_path);
+    let resolved = if path_obj.is_absolute() {
+        path_obj.to_path_buf()
+    } else {
+        cwd.join(path_obj)
+    };
+
+    let metadata = match std::fs::metadata(&resolved) {
+        Ok(m) if m.is_file() => m,
+        _ => return Err(format!("file not found: {}", resolved.display())),
+    };
+    let _ = metadata;
+
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|e| format!("file not found: {}: {e}", resolved.display()))?;
+
+    let path = canonical
+        .to_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+
+    Ok(OpenFileCliCommand { path, line, col })
+}
+
+pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let request = BrowserCliRequest::OpenFile {
+        path: command.path,
+        line: command.line,
+        col: command.col,
+    };
+    let response = runtime
+        .block_on(send_browser_cli_request(request))
+        .map_err(|error| error.to_string())?;
+    match response {
+        BrowserCliResponse::FileOpened { path } => {
+            println!("opened {path}");
+            Ok(())
+        }
+        BrowserCliResponse::Error { code, message } => Err(format!("{code}: {message}")),
+        other => Err(format!("unexpected response: {other:?}")),
     }
 }
 
@@ -2918,6 +3023,139 @@ mod tests {
             parse_browser_cli(&args).expect("parse browser list"),
             BrowserCliCommand::List
         );
+    }
+
+    #[test]
+    fn open_cli_parses_absolute_file() {
+        let temp_file = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = temp_file.path().canonicalize().expect("canonicalize");
+        let path_str = path.to_str().expect("path utf8");
+        let dummy_cwd = std::path::Path::new("/dummy");
+
+        let parsed = parse_open_cli(&["ferryx", "open", path_str], dummy_cwd).expect("parse open");
+        assert_eq!(parsed.path, path_str);
+        assert_eq!(parsed.line, None);
+        assert_eq!(parsed.col, None);
+    }
+
+    #[test]
+    fn open_cli_parses_file_with_line() {
+        let temp_file = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = temp_file.path().canonicalize().expect("canonicalize");
+        let path_str = path.to_str().expect("path utf8");
+        let target = format!("{path_str}:12");
+        let dummy_cwd = std::path::Path::new("/dummy");
+
+        let parsed = parse_open_cli(&["ferryx", "open", &target], dummy_cwd).expect("parse open");
+        assert_eq!(parsed.path, path_str);
+        assert_eq!(parsed.line, Some(12));
+        assert_eq!(parsed.col, None);
+    }
+
+    #[test]
+    fn open_cli_parses_file_with_line_and_col() {
+        let temp_file = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = temp_file.path().canonicalize().expect("canonicalize");
+        let path_str = path.to_str().expect("path utf8");
+        let target = format!("{path_str}:12:3");
+        let dummy_cwd = std::path::Path::new("/dummy");
+
+        let parsed = parse_open_cli(&["ferryx", "open", &target], dummy_cwd).expect("parse open");
+        assert_eq!(parsed.path, path_str);
+        assert_eq!(parsed.line, Some(12));
+        assert_eq!(parsed.col, Some(3));
+    }
+
+    #[test]
+    fn open_cli_resolves_relative_path_against_cwd() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let file_name = "example.txt";
+        let file_path = temp_dir.path().join(file_name);
+        std::fs::write(&file_path, "hello ferryx").expect("write test file");
+        let expected_canonical = file_path.canonicalize().expect("canonicalize");
+        let expected_str = expected_canonical.to_str().expect("path utf8");
+
+        let parsed = parse_open_cli(&["ferryx", "open", file_name], temp_dir.path())
+            .expect("parse open relative");
+        assert_eq!(parsed.path, expected_str);
+        assert_eq!(parsed.line, None);
+        assert_eq!(parsed.col, None);
+
+        let target = format!("{file_name}:42:7");
+        let parsed_line_col = parse_open_cli(&["ferryx", "open", &target], temp_dir.path())
+            .expect("parse open relative with line and col");
+        assert_eq!(parsed_line_col.path, expected_str);
+        assert_eq!(parsed_line_col.line, Some(42));
+        assert_eq!(parsed_line_col.col, Some(7));
+    }
+
+    #[test]
+    fn open_cli_missing_file_errors_with_file_not_found() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let err = parse_open_cli(
+            &["ferryx", "open", "does_not_exist_file.txt"],
+            temp_dir.path(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("file not found"),
+            "expected 'file not found' in '{err}'"
+        );
+    }
+
+    #[test]
+    fn open_cli_directory_errors_with_file_not_found() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let subdir = temp_dir.path().join("subdir");
+        std::fs::create_dir(&subdir).expect("create subdir");
+        let err = parse_open_cli(&["ferryx", "open", "subdir"], temp_dir.path()).unwrap_err();
+        assert!(
+            err.contains("file not found"),
+            "expected 'file not found' in '{err}'"
+        );
+    }
+
+    #[test]
+    fn open_cli_missing_arg_errors_with_usage() {
+        let dummy_cwd = std::path::Path::new("/dummy");
+        let err_missing = parse_open_cli(&["ferryx", "open"], dummy_cwd).unwrap_err();
+        assert!(
+            err_missing.contains("usage"),
+            "expected 'usage' in '{err_missing}'"
+        );
+
+        let err_no_open = parse_open_cli(&["ferryx"], dummy_cwd).unwrap_err();
+        assert!(
+            err_no_open.contains("usage"),
+            "expected 'usage' in '{err_no_open}'"
+        );
+
+        let err_extra =
+            parse_open_cli(&["ferryx", "open", "file.txt", "extra"], dummy_cwd).unwrap_err();
+        assert!(
+            err_extra.contains("usage"),
+            "expected 'usage' in '{err_extra}'"
+        );
+    }
+
+    #[test]
+    fn open_cli_target_suffix_parsing_rules() {
+        assert_eq!(
+            split_path_line_col("C:\\path\\file.rs"),
+            ("C:\\path\\file.rs", None, None)
+        );
+        assert_eq!(
+            split_path_line_col("C:\\path\\file.rs:10"),
+            ("C:\\path\\file.rs", Some(10), None)
+        );
+        assert_eq!(
+            split_path_line_col("C:\\path\\file.rs:10:5"),
+            ("C:\\path\\file.rs", Some(10), Some(5))
+        );
+        assert_eq!(split_path_line_col("C:10"), ("C:10", None, None));
+        assert_eq!(split_path_line_col("C:10:5"), ("C:10:5", None, None));
+        assert_eq!(split_path_line_col(":10"), (":10", None, None));
+        assert_eq!(split_path_line_col(":10:5"), (":10:5", None, None));
     }
 
     #[test]

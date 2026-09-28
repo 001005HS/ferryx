@@ -96,6 +96,11 @@ pub async fn cmd_native_terminal_line_at() -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_hyperlink_at() -> Result<Option<String>, IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_clipboard_content(
 ) -> Result<NativeTerminalClipboardContent, IpcError> {
     Err(IpcError::native_terminal_unsupported())
@@ -124,6 +129,7 @@ mod tests {
             cmd_native_terminal_paste().await,
             cmd_native_terminal_mouse().await,
             cmd_native_terminal_search().await,
+            cmd_native_terminal_hyperlink_at().await.map(|_| ()),
             cmd_native_terminal_clipboard_content().await.map(|_| ()),
         ];
 

@@ -57,6 +57,12 @@ extern "C" {
         buf_len: usize,
         out_len: *mut usize,
     ) -> c_int;
+    pub fn ghostty_grid_ref_hyperlink_uri(
+        r: *const GhosttyGridRef,
+        buf: *mut u8,
+        buf_len: usize,
+        out_len: *mut usize,
+    ) -> c_int;
 
     pub fn ghostty_terminal_select_all(
         terminal: GhosttyTerminal,

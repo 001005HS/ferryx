@@ -30,6 +30,14 @@ pub enum BrowserCliRequest {
         request: BrowserAutomationRequest,
     },
     #[serde(rename_all = "camelCase")]
+    OpenFile {
+        path: String,
+        #[serde(default)]
+        line: Option<u32>,
+        #[serde(default)]
+        col: Option<u32>,
+    },
+    #[serde(rename_all = "camelCase")]
     Open {
         url: String,
         #[serde(default, alias = "workspace_id")]
@@ -1590,10 +1598,24 @@ pub enum BrowserCliResponse {
     Highlighted {
         highlight: crate::browser::picker::BrowserHighlightResult,
     },
+    #[serde(rename_all = "camelCase")]
+    FileOpened {
+        path: String,
+    },
     Error {
         code: String,
         message: String,
     },
+}
+
+pub const CLI_OPEN_FILE_EVENT: &str = "ferryx:cli-open-file";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliOpenFilePayload {
+    pub path: String,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
 }
 
 #[cfg(unix)]
@@ -2719,6 +2741,47 @@ async fn execute_request<R: tauri::Runtime>(
                 protocol_version: protocol_version.unwrap_or(1),
             }
         }
+        BrowserCliRequest::OpenFile { path, line, col } => {
+            let path_clone = path.clone();
+            let validation = crate::ipc::run_blocking(move || {
+                let p = Path::new(&path_clone);
+                if !p.is_absolute() {
+                    return Err(IpcError::new(IpcErrorCode::NotFound, "file not found"));
+                }
+                match fs::metadata(p) {
+                    Ok(meta) if meta.is_file() => Ok(()),
+                    _ => Err(IpcError::new(IpcErrorCode::NotFound, "file not found")),
+                }
+            })
+            .await;
+
+            if let Err(error) = validation {
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                };
+            }
+
+            let payload = CliOpenFilePayload {
+                path: path.clone(),
+                line,
+                col,
+            };
+
+            if let Err(error) = app.emit(CLI_OPEN_FILE_EVENT, payload) {
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(IpcErrorCode::BrowserHostUnavailable),
+                    message: format!("failed to deliver open file event to the GUI: {error}"),
+                };
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
+            BrowserCliResponse::FileOpened { path }
+        }
     }
 }
 
@@ -2817,6 +2880,31 @@ async fn send_browser_cli_request_at_path(
 mod tests {
     use super::*;
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};
+
+    #[test]
+    fn test_browser_cli_open_file_request_serialization() {
+        let json = r#"{"command":"openFile","path":"/x","line":3}"#;
+        let parsed: BrowserCliRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            BrowserCliRequest::OpenFile {
+                path: "/x".into(),
+                line: Some(3),
+                col: None,
+            }
+        );
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let roundtrip: BrowserCliRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtrip, parsed);
+
+        let response = BrowserCliResponse::FileOpened { path: "/x".into() };
+        let resp_json = serde_json::to_string(&response).unwrap();
+        assert_eq!(resp_json, r#"{"type":"fileOpened","path":"/x"}"#);
+        assert_eq!(
+            serde_json::from_str::<BrowserCliResponse>(&resp_json).unwrap(),
+            response
+        );
+    }
 
     #[test]
     fn test_browser_cli_list_request_serialization() {
