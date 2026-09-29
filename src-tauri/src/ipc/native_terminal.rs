@@ -852,6 +852,30 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     scale_factor: Option<f64>,
     after_sequence: Option<String>,
 ) -> Result<(), IpcError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
+            scale_factor, after_sequence),
+    )
+    .await
+    .map_err(|_| {
+        IpcError::new(
+            IpcErrorCode::Timeout,
+            "Terminal attachment timed out. Retry reconnecting this pane.",
+        )
+        .with_details(serde_json::json!({ "sessionId": session_id, "phase": "attach" }))
+    })?
+}
+
+async fn native_terminal_attach<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    bounds: Option<NativeTerminalLogicalRect>,
+    scale_factor: Option<f64>,
+    after_sequence: Option<String>,
+) -> Result<(), IpcError> {
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
         (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
@@ -2251,6 +2275,59 @@ fn into_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn native_reconnect_attach_settles_when_daemon_never_answers_handshake() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        // Given an isolated endpoint that accepts but never answers the handshake.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("silent-native-attach");
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(not(unix))]
+        let listener = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            listener
+        };
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(path)))
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (observed, handshake) = oneshot::channel();
+        let peer = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            observed.send(()).unwrap();
+            line.clear();
+            // Cancellation releases the attachment connection without closing the PTY.
+            assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+        };
+        let action = async {
+            // When the native IPC entry point attempts attachment.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                cmd_native_terminal_attach(
+                    app.handle().clone(), app.state::<Arc<DaemonClient>>(),
+                    app.state::<NativeTerminalSurfaceHostState>(),
+                    "qa-existing-session".into(), None, None, None,
+                ),
+            ).await;
+            // Then the command settles before the test's safety deadline.
+            assert!(result.is_ok(), "native reconnect attach exceeded its bounded-error contract");
+            let error = result.unwrap().err().expect("attachment must fail");
+            assert_eq!(error.code, IpcErrorCode::Timeout);
+        };
+        let clock = async {
+            handshake.await.unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        };
+        tokio::join!(peer, action, clock);
+    }
 
     #[test]
     fn resident_replay_watermark_overrides_stale_explicit_cursor() {
