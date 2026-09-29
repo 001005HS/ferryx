@@ -1,4 +1,5 @@
 import {
+  closeTerminal,
   describeTerminal,
   spawnTerminalDetailed,
   toIpcError,
@@ -63,9 +64,14 @@ export function withAgentConflictAdoption(
   options?: ConflictAdoptionOptions,
 ): AgentReconnectDependencies {
   const originalSpawn = base.spawn ?? spawnTerminalDetailed;
+  const adoptedSessionIds = new Set<string>();
 
   return {
     ...base,
+    close: async (sessionId) => {
+      if (adoptedSessionIds.has(sessionId)) return;
+      await (base.close ?? closeTerminal)(sessionId);
+    },
     spawn: async (request) => {
       try {
         return await originalSpawn(request);
@@ -135,6 +141,7 @@ export function withAgentConflictAdoption(
           },
         };
 
+        adoptedSessionIds.add(existingSessionId);
         return adopted;
       }
     },

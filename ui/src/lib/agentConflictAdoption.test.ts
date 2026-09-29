@@ -4,6 +4,7 @@ import {
   withAgentConflictAdoption,
 } from "./agentConflictAdoption";
 import type { AgentReconnectDependencies } from "./agentReconnect";
+import { reconnectAgentSession } from "./agentReconnect";
 import type { TerminalSession } from "./types";
 import type { TerminalDescribeResult } from "./tauri";
 
@@ -23,6 +24,31 @@ function mockSession(overrides: Partial<TerminalSession> = {}): TerminalSession 
 }
 
 describe("agentConflictAdoption", () => {
+  it.each(["attach", "persist"] as const)("preserves the adopted live session when %s fails", async (stage) => {
+    // Given: the daemon already owns the requested conversation.
+    const session = mockSession({ id: `adopt-failure-${stage}` });
+    const liveSessions = new Set(["existing-backend"]);
+    const failure = { code: "IO_ERROR", message: "Recovery transport failed" };
+    const dependencies = withAgentConflictAdoption({
+      getSessions: () => ({ [session.id]: session }),
+      dispatch: vi.fn(),
+      spawn: async () => {
+        throw { code: "AGENT_SESSION_CONFLICT", message: "Already running", details: { existingSessionId: "existing-backend" } };
+      },
+      attach: async () => { if (stage === "attach") throw failure; },
+      persist: async () => { if (stage === "persist") throw failure; },
+      close: async (id) => { liveSessions.delete(id); },
+    }, {
+      describe: async () => ({ sessionId: "existing-backend", workspaceId: "ws-1", worktree: null, cwd: "/repo", cols: 80, rows: 24, running: true }),
+    });
+
+    // When: recovery fails after adopting the pre-existing session.
+    await expect(reconnectAgentSession(session.id, dependencies)).rejects.toMatchObject(failure);
+
+    // Then: the conversation remains alive for a subsequent reconnect.
+    expect([...liveSessions]).toEqual(["existing-backend"]);
+  });
+
   describe("extractConflictingBackendSessionId", () => {
     it("(i) extracts existingSessionId from structured conflict error", () => {
       const error = {
