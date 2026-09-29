@@ -3016,6 +3016,41 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string(),),
                     }
                 }
+                Ok(DaemonRequest::DetectManualSsh { session_id }) => {
+                    if let Some(session) = self.terminal_service.get_session(&session_id) {
+                        let detected = crate::ipc::run_blocking(move || {
+                            Ok(crate::terminal::manual_ssh::detect(&session))
+                        })
+                        .await;
+                        match detected {
+                            Ok(Ok(ssh)) => DaemonResponse::ManualSshOk { ssh },
+                            Ok(Err(error)) => DaemonResponse::Error {
+                                message: error.message(),
+                                code: Some(error.code().to_string()),
+                                details: None,
+                            },
+                            Err(error) => DaemonResponse::Error {
+                                message: error.message,
+                                code: Some(crate::terminal::manual_ssh::CODE_IO.to_string()),
+                                details: None,
+                            },
+                        }
+                    } else if self.session_router.is_local_session(&session_id) {
+                        // Remote/paired sessions have registered upload routes of their own.
+                        DaemonResponse::Error {
+                            message: "Session is not a local terminal".into(),
+                            code: Some(crate::terminal::manual_ssh::CODE_UNSUPPORTED.into()),
+                            details: None,
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.send_request(&DaemonRequest::DetectManualSsh { session_id: session_id.clone() }).await {
+                            Ok(response) => response,
+                            Err(error) => daemon_error(format!("Legacy peer manual SSH detection failed: {error}")),
+                        }
+                    } else {
+                        daemon_session_not_found(&session_id, "daemon_detect_manual_ssh")
+                    }
+                }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
                         let mut response = self.handle_describe_session(&session_id);

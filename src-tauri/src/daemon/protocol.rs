@@ -244,6 +244,10 @@ pub enum DaemonRequest {
         session_id: String,
     },
     #[serde(rename_all = "camelCase")]
+    DetectManualSsh {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     RemoteWrite {
         session_id: String,
         generation: u64,
@@ -533,6 +537,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     DescribeSessionOk {
         session: DaemonSessionDetails,
+    },
+    #[serde(rename_all = "camelCase")]
+    ManualSshOk {
+        ssh: Option<crate::terminal::manual_ssh::ManualSshProcess>,
     },
     #[serde(rename_all = "camelCase")]
     DiscoverAgentSessionOk {

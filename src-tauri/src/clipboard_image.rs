@@ -585,11 +585,47 @@ pub struct LocalClipboardImagePaste {
 #[tauri::command]
 pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    session_id: Option<String>,
 ) -> Result<Option<LocalClipboardImagePaste>, IpcError> {
+    use tauri::Manager;
+    let daemon = session_id
+        .as_ref()
+        .map(|_| app.state::<std::sync::Arc<crate::daemon::client::DaemonClient>>().inner().clone());
     let Some(image) = read_clipboard_image_for_app(&app).await? else {
         return Ok(None);
     };
+    let detect = |id: String| {
+        let daemon = daemon.clone();
+        async move {
+            match daemon {
+                Some(daemon) => daemon.detect_manual_ssh(&id).await,
+                None => Ok(None),
+            }
+        }
+    };
+    paste_image_for_session(image, session_id, detect, |ssh, name, bytes| async move {
+        let target = crate::ssh::manual::target_for(&ssh)?;
+        crate::ssh::manual::upload(&target, &name, bytes).await
+    })
+    .await
+    .map(Some)
+}
 
+/// Routes a paste to the destination that can read it. A detected manual SSH must be the same
+/// process before and after the transfer, so an ssh that exits or is replaced mid-upload never
+/// inserts a path from the wrong host. Detection failures never degrade to a local save.
+async fn paste_image_for_session<D, DF, U, UF>(
+    image: ClipboardImage,
+    session_id: Option<String>,
+    detect: D,
+    upload: U,
+) -> Result<LocalClipboardImagePaste, IpcError>
+where
+    D: Fn(String) -> DF,
+    DF: std::future::Future<Output = Result<Option<crate::terminal::manual_ssh::ManualSshProcess>, IpcError>>,
+    U: FnOnce(crate::terminal::manual_ssh::ManualSshProcess, String, Vec<u8>) -> UF,
+    UF: std::future::Future<Output = Result<String, IpcError>>,
+{
     let byte_length = image.bytes.len();
     if byte_length > MAX_CLIPBOARD_IMAGE_BYTES {
         return Err(IpcError::new(
@@ -602,17 +638,121 @@ pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
     }
 
     let file_name = format!("{}.{}", uuid::Uuid::new_v4(), image.extension);
-    let path = save_paste_file(&file_name, &image.bytes)?;
-
-    Ok(Some(LocalClipboardImagePaste {
-        local_path: path.to_string_lossy().to_string(),
+    let before = match session_id.clone() {
+        Some(id) => detect(id).await?,
+        None => None,
+    };
+    let Some(before) = before else {
+        let path = crate::ipc::run_blocking(move || save_paste_file(&file_name, &image.bytes)).await?;
+        // An ssh started while the file was written would receive a path its host cannot read.
+        if let Some(id) = session_id {
+            if detect(id).await?.is_some() {
+                return Err(changed_during_paste());
+            }
+        }
+        return Ok(LocalClipboardImagePaste {
+            local_path: path.to_string_lossy().to_string(),
+            byte_length,
+        });
+    };
+    let remote_path = upload(before.clone(), file_name, image.bytes).await?;
+    let after = detect(session_id.unwrap_or_default()).await?;
+    if after.as_ref() != Some(&before) {
+        return Err(changed_during_paste());
+    }
+    Ok(LocalClipboardImagePaste {
+        local_path: remote_path,
         byte_length,
-    }))
+    })
+}
+
+fn changed_during_paste() -> IpcError {
+    IpcError::new(
+        crate::ipc::error::IpcErrorCode::Unsupported,
+        "The SSH session changed during the image paste",
+    )
+    .with_details(serde_json::json!({ "code": crate::terminal::manual_ssh::CODE_CHANGED }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::manual_ssh::ManualSshProcess;
+    use std::sync::Mutex as StdMutex;
+
+    fn ssh(pid: u32) -> ManualSshProcess {
+        ManualSshProcess { pid, foreground_group: pid, argv: vec!["ssh".into(), "box".into()], executable: None, cwd: None }
+    }
+
+    fn png() -> ClipboardImage {
+        ClipboardImage { bytes: vec![1, 2, 3], extension: "png" }
+    }
+
+    async fn route(answers: Vec<Result<Option<ManualSshProcess>, IpcError>>) -> Result<LocalClipboardImagePaste, IpcError> {
+        let answers = StdMutex::new(answers.into_iter());
+        paste_image_for_session(
+            png(),
+            Some("s1".into()),
+            |_| {
+                let next = answers.lock().unwrap().next().expect("unexpected detect call");
+                async move { next }
+            },
+            |_, name, _| async move { Ok(format!("/tmp/ferryx-paste/{name}")) },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn manual_ssh_returns_remote_path_when_owner_is_unchanged() {
+        let paste = route(vec![Ok(Some(ssh(7))), Ok(Some(ssh(7)))]).await.unwrap();
+        assert!(paste.local_path.starts_with("/tmp/ferryx-paste/"));
+        assert_eq!(paste.byte_length, 3);
+    }
+
+    #[tokio::test]
+    async fn manual_ssh_replaced_during_upload_fails() {
+        for after in [None, Some(ssh(8))] {
+            let err = route(vec![Ok(Some(ssh(7))), Ok(after)]).await.unwrap_err();
+            assert_eq!(err.details.unwrap()["code"], crate::terminal::manual_ssh::CODE_CHANGED);
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_started_during_local_save_fails() {
+        let err = route(vec![Ok(None), Ok(Some(ssh(9)))]).await.unwrap_err();
+        assert_eq!(err.details.unwrap()["code"], crate::terminal::manual_ssh::CODE_CHANGED);
+    }
+
+    #[tokio::test]
+    async fn detection_errors_never_fall_back_to_local_save() {
+        let old_daemon = crate::daemon::client::manual_ssh_response(crate::daemon::protocol::DaemonResponse::Error {
+            message: "Malformed request: unknown variant".into(),
+            code: None,
+            details: None,
+        })
+        .unwrap_err();
+        assert!(matches!(old_daemon.code, crate::ipc::error::IpcErrorCode::DaemonProtocolMismatch));
+        let err = route(vec![Err(old_daemon)]).await.unwrap_err();
+        assert!(matches!(err.code, crate::ipc::error::IpcErrorCode::DaemonProtocolMismatch));
+    }
+
+    #[test]
+    fn structured_detection_codes_map_to_unsupported() {
+        let err = crate::daemon::client::manual_ssh_response(crate::daemon::protocol::DaemonResponse::Error {
+            message: "Multiple SSH clients own this terminal".into(),
+            code: Some(crate::terminal::manual_ssh::CODE_AMBIGUOUS.into()),
+            details: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err.code, crate::ipc::error::IpcErrorCode::Unsupported));
+        let io = crate::daemon::client::manual_ssh_response(crate::daemon::protocol::DaemonResponse::Error {
+            message: "proc_listpgrppids failed".into(),
+            code: Some(crate::terminal::manual_ssh::CODE_IO.into()),
+            details: None,
+        })
+        .unwrap_err();
+        assert!(matches!(io.code, crate::ipc::error::IpcErrorCode::IoError));
+    }
 
     fn bitmap_info_header(width: i32, height: i32, bit_count: u16, compression: u32) -> Vec<u8> {
         let mut header = Vec::new();

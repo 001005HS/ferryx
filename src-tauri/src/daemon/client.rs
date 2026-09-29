@@ -286,6 +286,30 @@ impl RequestAttemptError {
     }
 }
 
+pub(crate) fn manual_ssh_response(
+    resp: DaemonResponse,
+) -> Result<Option<crate::terminal::manual_ssh::ManualSshProcess>, IpcError> {
+    use crate::terminal::manual_ssh::{CODE_AMBIGUOUS, CODE_CHANGED, CODE_IO, CODE_UNSUPPORTED};
+    match resp {
+        DaemonResponse::ManualSshOk { ssh } => Ok(ssh),
+        DaemonResponse::Error { message, code, .. } => Err(match code.as_deref() {
+            Some(CODE_AMBIGUOUS | CODE_CHANGED | CODE_UNSUPPORTED) => {
+                IpcError::new(IpcErrorCode::Unsupported, message)
+                    .with_details(serde_json::json!({ "code": code }))
+            }
+            Some("SESSION_NOT_FOUND") => IpcError::new(IpcErrorCode::SessionNotFound, message),
+            Some(CODE_IO) => IpcError::new(IpcErrorCode::IoError, message)
+                .with_details(serde_json::json!({ "code": code })),
+            Some(_) => IpcError::new(IpcErrorCode::InternalError, message),
+            None => IpcError::new(
+                IpcErrorCode::DaemonProtocolMismatch,
+                format!("Daemon cannot inspect manual SSH sessions: {message}"),
+            ),
+        }),
+        _ => Err(IpcError::internal("Unexpected daemon response")),
+    }
+}
+
 fn request_is_retry_safe(req: &DaemonRequest) -> bool {
     matches!(
         req,
@@ -319,6 +343,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::MachineMetadataSubscribe { .. } => "machineMetadataSubscribe",
         DaemonRequest::RetryRemoteSession { .. } => "retryRemoteSession",
         DaemonRequest::RemoteSessionDetails { .. } => "remoteSessionDetails",
+        DaemonRequest::DetectManualSsh { .. } => "detectManualSsh",
         DaemonRequest::RemoteWrite { .. } => "remoteWrite",
         DaemonRequest::RemoteResize { .. } => "remoteResize",
         DaemonRequest::CreateWorktree { .. } => "createWorktree",
@@ -2201,6 +2226,20 @@ impl DaemonClient {
                 "Unexpected daemon response",
             )),
         }
+    }
+
+    /// Old daemons answer an unknown request with an uncoded Error; that is a protocol gap,
+    /// never evidence of a local shell, so it must not fall back to a local save.
+    pub async fn detect_manual_ssh(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::terminal::manual_ssh::ManualSshProcess>, IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::DetectManualSsh {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+        manual_ssh_response(resp)
     }
 
     pub async fn describe_session(

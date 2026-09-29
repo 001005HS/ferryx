@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  pasteClipboardImageLocally,
+  pasteClipboardImageToRemote,
   registerRemoteProject,
   toRegisteredProject,
   type RegisterRemoteProjectRequest,
@@ -134,6 +136,40 @@ describe("remoteProject adapter", () => {
       gitBranch: null, gitHead: null, hostLabel: "Linux",
       target: { kind: "ssh", hostId: "linux" },
     });
+  });
+
+  it("passes the backend session ID to cmd_local_paste_clipboard_image and returns its path", async () => {
+    invokeMock.mockResolvedValueOnce({ localPath: "C:\\Users\\dev\\a.png", byteLength: 3 });
+
+    await expect(pasteClipboardImageLocally("daemon-backend-1")).resolves.toEqual({
+      localPath: "C:\\Users\\dev\\a.png",
+      byteLength: 3,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", {
+      sessionId: "daemon-backend-1",
+    });
+  });
+
+  it("maps a null local clipboard result to null and propagates upload errors", async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(pasteClipboardImageLocally(null)).resolves.toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId: null });
+
+    const ipcError = { code: "INTERNAL_ERROR", message: "upload failed", details: {} };
+    invokeMock.mockRejectedValueOnce(ipcError);
+    await expect(pasteClipboardImageLocally("daemon-backend-1")).rejects.toEqual(ipcError);
+  });
+
+  it("keeps registered ssh:/daemon: clipboard routing keyed by workspace only", async () => {
+    invokeMock.mockResolvedValue({ remotePath: "/tmp/x.png", byteLength: 1 });
+
+    await pasteClipboardImageToRemote("ssh:abc");
+    await pasteClipboardImageToRemote("daemon:def");
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["cmd_ssh_paste_clipboard_image", { workspaceId: "ssh:abc" }],
+      ["cmd_daemon_paste_clipboard_image", { workspaceId: "daemon:def" }],
+    ]);
   });
 
   it("maps remote gitBranch and gitHead through to RegisteredProject", () => {

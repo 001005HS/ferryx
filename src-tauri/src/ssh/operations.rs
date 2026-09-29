@@ -138,6 +138,19 @@ pub async fn upload(
     file_name: &str,
     bytes: Vec<u8>,
 ) -> Result<String, IpcError> {
+    upload_with(environment, file_name, bytes, |command| {
+        direct::ssh_plan(host, command, false)
+    })
+    .await
+}
+
+/// Same upload script over a caller-built SSH plan (manual terminal SSH keeps its own options).
+pub(crate) async fn upload_with(
+    environment: &RemoteEnvironment,
+    file_name: &str,
+    bytes: Vec<u8>,
+    plan: impl FnOnce(String) -> Result<ShellCommandPlan, IpcError>,
+) -> Result<String, IpcError> {
     let posix = direct::upload_temp_command(file_name)?;
     let marker = format!("FERRYX_UPLOAD_V1_{}", uuid::Uuid::new_v4().simple());
     let script = match environment.platform {
@@ -159,7 +172,7 @@ pub async fn upload(
              [Console]::Write(('{marker}',$p,'' -join [char]0))"
         ),
     };
-    let output = data_output(host, environment, &script, bytes, Duration::from_secs(60))
+    let output = data_output_with(environment, &script, bytes, Duration::from_secs(60), plan)
         .await
         .map_err(|mut err| {
             if let Some(details) = err.details.as_mut() {
@@ -320,6 +333,19 @@ async fn data_output(
     bytes: Vec<u8>,
     deadline: Duration,
 ) -> Result<Vec<u8>, IpcError> {
+    data_output_with(environment, script, bytes, deadline, |command| {
+        direct::ssh_plan(host, command, false)
+    })
+    .await
+}
+
+async fn data_output_with(
+    environment: &RemoteEnvironment,
+    script: &str,
+    bytes: Vec<u8>,
+    deadline: Duration,
+    plan: impl FnOnce(String) -> Result<ShellCommandPlan, IpcError>,
+) -> Result<Vec<u8>, IpcError> {
     let (command, input) = match environment.platform {
         RemotePlatform::Posix => (environment.executor.command(script), bytes),
         RemotePlatform::Windows => {
@@ -340,7 +366,7 @@ async fn data_output(
             )
         }
     };
-    let plan = direct::ssh_plan(host, command, false)?;
+    let plan = plan(command)?;
     direct::bounded_output_with_stdin(&plan, deadline, input).await
 }
 

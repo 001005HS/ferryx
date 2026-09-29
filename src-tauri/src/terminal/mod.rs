@@ -28,6 +28,7 @@ pub enum PtyError {
 }
 
 pub(crate) mod foreground;
+pub mod manual_ssh;
 pub(crate) mod metrics;
 pub mod output_hub;
 pub mod paired_daemon;

@@ -1428,8 +1428,15 @@ export function NativeTerminalPane({
           );
         });
     } else {
-      void pasteClipboardImageLocally()
+      // The backend may upload to a manually typed SSH host, which takes long enough for the pane
+      // to rebind or unmount. The owner token is replaced on every rebind/visibility commit, so a
+      // stale result never pastes a path that only the previous destination can read.
+      const requestOwner = surfaceOwnerRef.current;
+      void pasteClipboardImageLocally(targetSessionId)
         .then((result) => {
+          if (requestOwner === null || surfaceOwnerRef.current !== requestOwner) {
+            return;
+          }
           if (!result) {
             // Same degrade as the remote branch: null means no readable image on the clipboard.
             sendImagePasteShortcut();
@@ -1446,7 +1453,7 @@ export function NativeTerminalPane({
           );
         });
     }
-  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste]);
+  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste, targetSessionId]);
 
   const suppressNextPasteRef = useRef(false);
 
