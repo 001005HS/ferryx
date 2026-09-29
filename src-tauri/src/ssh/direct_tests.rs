@@ -1,6 +1,32 @@
 use super::*;
 use crate::ssh::{SshAuthMethod, SshHostSource};
 
+#[test]
+fn diagnostic_colors_are_removed_without_changing_unicode() {
+    assert_eq!(strip_ansi_colors("\u{1b}[31;1msh: 명령을 찾을 수 없습니다\u{1b}[0m"), "sh: 명령을 찾을 수 없습니다");
+    assert_eq!(strip_ansi_colors("plain [error]\nnext line"), "plain [error]\nnext line");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn failed_windows_probe_keeps_raw_stderr_but_displays_plain_text() {
+    let raw = "\u{1b}[31;1msh: 명령을 찾을 수 없습니다\u{1b}[0m";
+    let encoded = super::super::runtime::powershell_data(raw);
+    let command = super::super::runtime::RemoteExecutor::Powershell.command(
+        &format!("[Console]::Error.Write({encoded}); exit 7"),
+    );
+    let mut args = command.split_whitespace();
+    let plan = ShellCommandPlan {
+        program: args.next().unwrap().into(),
+        args: args.map(String::from).collect(),
+    };
+    let failure = bounded_output(&plan, Duration::from_secs(15)).await.unwrap_err();
+    assert!(!failure.message.contains('\u{1b}'));
+    let details = failure.details.unwrap();
+    assert_eq!(details["stderr"], raw);
+    assert_eq!(details["exitCode"], 7);
+}
+
 fn host() -> SshHost {
     SshHost {
         id: "host-one".into(),

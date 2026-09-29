@@ -742,7 +742,7 @@ pub async fn cmd_ssh_list_remote_worktrees<R: Runtime>(
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
     let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
-    let environment = crate::ssh::runtime::detect(&host).await?;
+    let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
     crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await
 }
 
@@ -756,7 +756,7 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
     let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
-    let environment = crate::ssh::runtime::detect(&host).await?;
+    let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
     let ws_segment = crate::ssh::worktree::derive_ws_segment(&workspace_id)?;
     let wt_path =
         crate::ssh::worktree::remote_worktree_path(environment.platform, &project.repo_root, &slug);
@@ -808,7 +808,7 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
     let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
-    let environment = crate::ssh::runtime::detect(&host).await?;
+    let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
     crate::ssh::worktree::validate_path_inside_root(
         environment.platform,
         &project.repo_root,

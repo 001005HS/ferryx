@@ -299,6 +299,24 @@ pub(crate) fn spawn_child(
         .map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to start SSH: {e}")))
 }
 
+fn strip_ansi_colors(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            plain.push(ch);
+        }
+    }
+    plain
+}
+
 pub(crate) async fn bounded_output(
     plan: &ShellCommandPlan,
     deadline: Duration,
@@ -382,7 +400,7 @@ async fn collect_output(
                     "Remote stderr was empty; raw bytes are available in details".to_string()
                 } else {
                     match text.map(str::trim) {
-                        Some(s) if !s.is_empty() => s.to_string(),
+                        Some(s) if !s.is_empty() => strip_ansi_colors(s),
                         Some(_) => "Remote stderr was whitespace only; raw bytes are available in details".to_string(),
                         None => "Remote stderr contained non-UTF-8 data; raw bytes are available in details".to_string(),
                     }

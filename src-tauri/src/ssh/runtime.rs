@@ -167,6 +167,29 @@ pub fn parse_fields<'a>(
 }
 
 pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
+    detect_for(host, None).await
+}
+
+pub async fn detect_for(
+    host: &SshHost,
+    platform: Option<RemotePlatform>,
+) -> Result<RemoteEnvironment, IpcError> {
+    detect_with(host, platform, |executor, script, timeout| async move {
+        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+        direct::bounded_output(&plan, timeout).await
+    })
+    .await
+}
+
+async fn detect_with<F, Fut>(
+    host: &SshHost,
+    platform: Option<RemotePlatform>,
+    mut run: F,
+) -> Result<RemoteEnvironment, IpcError>
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
     let credential_generation = super::password::generation(host)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -187,12 +210,13 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
             ),
         }
     };
-    let executors = [
-        RemoteExecutor::Powershell,
-        RemoteExecutor::Pwsh,
-        RemoteExecutor::Sh,
-    ];
+    let executors: &[RemoteExecutor] = match platform {
+        Some(RemotePlatform::Windows) => &[RemoteExecutor::Powershell, RemoteExecutor::Pwsh],
+        Some(RemotePlatform::Posix) => &[RemoteExecutor::Sh],
+        None => &[RemoteExecutor::Powershell, RemoteExecutor::Pwsh, RemoteExecutor::Sh],
+    };
     let mut last_error: Option<IpcError> = None;
+    let mut attempts = Vec::new();
 
     for (index, &executor) in executors.iter().enumerate() {
         let script = probe_script(executor);
@@ -208,17 +232,12 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
             ));
         }
 
-        // Divide remaining deadline among executors (e.g. up to 4s per probe)
+        // Divide the remaining deadline among compatible executors
         // so that a hanging/non-responsive executor does not starve subsequent executors.
         let probes_left = (executors.len() - index) as u32;
-        let step_timeout = if probes_left > 1 {
-            remaining.min(Duration::from_secs(4))
-        } else {
-            remaining
-        };
+        let step_timeout = remaining / probes_left;
 
-        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        match direct::bounded_output(&plan, step_timeout).await {
+        match run(executor, script, step_timeout).await {
             Ok(output) => {
                 let fields = parse_fields(
                     &output,
@@ -271,11 +290,8 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                             let remaining =
                                 deadline.saturating_duration_since(tokio::time::Instant::now());
                             if !remaining.is_zero() {
-                                let step = remaining.min(Duration::from_secs(4));
                                 let script2 = probe_script(preferred);
-                                let plan =
-                                    direct::ssh_plan(host, preferred.command(&script2), false)?;
-                                if let Ok(output2) = direct::bounded_output(&plan, step).await {
+                                if let Ok(output2) = run(preferred, script2, remaining).await {
                                     environment = parse_fields(&output2, &marker, 6)
                                         .ok()
                                         .filter(|fields| fields[0] == "windows")
@@ -350,7 +366,19 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                     details["stage"] = "environment".into();
                     details["executor"] = executor.program().into();
                 }
-                last_error = Some(err);
+                attempts.push(serde_json::json!({
+                    "executor": executor.program(),
+                    "message": err.message,
+                    "details": err.details,
+                }));
+                // A failed fallback must not hide a preceding timeout.
+                if last_error.is_none() || exit_code.is_none() {
+                    last_error = Some(err);
+                }
+                if let Some(selected) = last_error.as_mut() {
+                    let details = selected.details.get_or_insert_with(|| serde_json::json!({}));
+                    details["attempts"] = serde_json::json!(attempts);
+                }
             }
         }
     }
@@ -389,6 +417,103 @@ function Invoke-FerryxGit([string[]]$GitArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe_host() -> SshHost {
+        SshHost {
+            id: "environment-probe-test".into(),
+            label: "Probe".into(),
+            hostname: "example.test".into(),
+            username: None,
+            port: None,
+            identity_file: None,
+            jump_host: None,
+            source: super::super::SshHostSource::Manual,
+            auth_method: super::super::SshAuthMethod::Agent,
+            disabled: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn windows_probe_can_finish_after_four_seconds() {
+        let environment = detect_with(
+            &probe_host(),
+            Some(RemotePlatform::Windows),
+            |executor, script, budget| async move {
+                assert_eq!(executor, RemoteExecutor::Powershell);
+                let marker = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\'').next().unwrap();
+                tokio::time::timeout(budget, async {
+                    tokio::time::sleep(Duration::from_millis(4300)).await;
+                    format!("FERRYX_ENV_V1_{marker}\0windows\05.1\0C:\\Users\\test\0C:\\Temp\01\0\0").into_bytes()
+                })
+                .await
+                .map_err(|_| error(IpcErrorCode::IoError, "transport", "probe deadline"))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(environment.platform, RemotePlatform::Windows);
+        assert!(environment.git);
+    }
+
+    #[tokio::test]
+    async fn windows_failures_preserve_timeout_without_probing_sh() {
+        let mut executors = Vec::new();
+        let failure = detect_with(
+            &probe_host(),
+            Some(RemotePlatform::Windows),
+            |executor, _, _| {
+                executors.push(executor);
+                std::future::ready(Err(match executor {
+                    RemoteExecutor::Powershell => error(IpcErrorCode::IoError, "transport", "probe deadline"),
+                    RemoteExecutor::Pwsh => error(IpcErrorCode::IoError, "execution", "missing executor")
+                        .with_details(serde_json::json!({"exitCode": 1})),
+                    RemoteExecutor::Sh => panic!("Windows must not probe sh"),
+                }))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(executors, [RemoteExecutor::Powershell, RemoteExecutor::Pwsh]);
+        let details = failure.details.unwrap();
+        assert_eq!(details["executor"], "powershell.exe");
+        assert_eq!(details["attempts"].as_array().unwrap().len(), 2);
+        assert!(details.get("exitCode").is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires FERRYX_SSH_WORKTREE_PROBE_ROOT pointing to a Windows Git repository"]
+    async fn live_windows_environment_and_worktree_listing() {
+        let root = std::env::var("FERRYX_SSH_WORKTREE_PROBE_ROOT").unwrap();
+        let environment = detect_with(
+            &probe_host(),
+            Some(RemotePlatform::Windows),
+            |executor, script, budget| async move {
+                let command = executor.command(&script);
+                let mut args = command.split_whitespace();
+                let plan = crate::terminal::shell::ShellCommandPlan {
+                    program: args.next().unwrap().into(),
+                    args: args.map(String::from).collect(),
+                };
+                direct::bounded_output(&plan, budget).await
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(environment.platform, RemotePlatform::Windows);
+        let marker = "FERRYX_LIVE_WORKTREE_PROBE";
+        let script = super::super::worktree::worktree_list_script(environment.platform, &root, marker);
+        let command = environment.executor.command(&script);
+        let mut args = command.split_whitespace();
+        let plan = crate::terminal::shell::ShellCommandPlan {
+            program: args.next().unwrap().into(),
+            args: args.map(String::from).collect(),
+        };
+        let output = direct::bounded_output(&plan, Duration::from_secs(30)).await.unwrap();
+        let fields = parse_fields(&output, marker, 1).unwrap();
+        let worktrees = super::super::worktree::parse_worktree_porcelain(fields[0]);
+        assert!(worktrees.iter().any(|worktree| worktree.path.replace('\\', "/") == root.replace('\\', "/")));
+    }
 
     #[test]
     fn paths_are_interpreted_by_the_remote_platform() {

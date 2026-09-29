@@ -91,7 +91,7 @@ pub async fn cmd_worktree_list<R: Runtime>(
         let id = workspace_id.clone();
         let (project, host) =
             run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
-        let environment = crate::ssh::runtime::detect(&host).await?;
+        let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
         let remote_worktrees =
             crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await?;
         let worktrees = remote_worktrees
