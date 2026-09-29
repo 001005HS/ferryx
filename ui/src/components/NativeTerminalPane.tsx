@@ -2520,22 +2520,28 @@ export function NativeTerminalPane({
     window.addEventListener("resize", updateDeviceScale);
     let unlistenStreamEnded: (() => void) | undefined;
     let streamRecoveryPending = false;
+    let streamRecoveryRequested = false;
     let streamRecoveries = 0;
     streamListenerReadyRef.current = listen<{ sessionId: string }>("native_terminal_stream_ended", (event) => {
-      if (!isSubscribed || event.payload.sessionId !== targetSessionId || streamRecoveryPending) return;
+      if (!isSubscribed || event.payload.sessionId !== targetSessionId) return;
+      streamRecoveryRequested = true;
+      if (streamRecoveryPending) return;
       const streamOwner = attachmentOwnerRef.current;
       streamRecoveryPending = true;
       void (async () => {
         try {
           await inFlightAttempt;
-          if (!isSubscribed || attachmentOwnerRef.current !== streamOwner) return;
-          if (streamRecoveries >= maxRetries) {
-            setError("Terminal output disconnected. Click to reconnect.");
-            return;
+          while (streamRecoveryRequested) {
+            if (!isSubscribed || attachmentOwnerRef.current !== streamOwner) return;
+            streamRecoveryRequested = false;
+            if (streamRecoveries >= maxRetries) {
+              setError("Terminal output disconnected. Click to reconnect.");
+              return;
+            }
+            streamRecoveries += 1;
+            isAttached = false;
+            await attemptAttach(streamRecoveries, true);
           }
-          streamRecoveries += 1;
-          isAttached = false;
-          await attemptAttach(streamRecoveries, true);
         } finally {
           streamRecoveryPending = false;
         }

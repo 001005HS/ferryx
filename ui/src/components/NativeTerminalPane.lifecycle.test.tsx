@@ -223,6 +223,31 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("recovers a stream that ends while its recovery attachment is pending", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    const recovery = deferred<void>();
+    let attachments = 0;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_attach" && ++attachments === 2) return recovery.promise;
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const view = render(<NativeTerminalPane session={session("overlapping-stream-end")} />);
+    await act(async () => {});
+    await act(async () => { ended!({ payload: { sessionId: "overlapping-stream-end" } }); });
+    expect(attachments).toBe(2);
+    await act(async () => {
+      ended!({ payload: { sessionId: "overlapping-stream-end" } });
+      recovery.resolve();
+    });
+    expect(attachments).toBe(3);
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
   it("waits for the output recovery listener before starting the stream", async () => {
     const registration = deferred<() => void>();
     tauriListen.mockImplementation(async (event) =>
