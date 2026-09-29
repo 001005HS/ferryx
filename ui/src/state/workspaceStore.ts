@@ -366,6 +366,25 @@ export function useWorkspaceStore({
       if (action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY") {
         emitActivityChanges(previous, nextState);
       }
+
+      // Explicit user navigation boundary: acknowledge notifications for the newly active session
+      // directly and synchronously, independent of agent classifier activity.
+      if (action.type === "ACTIVATE_TAB" || action.type === "FOCUS_PANE" || action.type === "SELECT_WORKTREE") {
+        const activeTabId = nextState.layout.activeTabId;
+        const activeTab = activeTabId ? nextState.layout.tabs.find((t) => t.id === activeTabId) : undefined;
+        if (activeTab && isTerminalTab(activeTab)) {
+          const tabLayout = nextState.layout.layoutsByTabId?.[activeTab.id];
+          const activeLeafId = tabLayout?.activeLeafId;
+          const activeSessionId = activeLeafId ? tabLayout?.sessionIdsByLeafId?.[activeLeafId] : activeTab.sessionId;
+          if (activeSessionId) {
+            window.dispatchEvent(
+              new CustomEvent("ferryx:session-interacted", {
+                detail: { sessionId: activeSessionId },
+              }),
+            );
+          }
+        }
+      }
     },
     [],
   );
@@ -558,7 +577,6 @@ export function useWorkspaceStore({
     void onNativeTerminalFocus((backendSessionId) => {
       const resolved = resolveSession(backendSessionId);
       if (!resolved) return;
-      dispatch({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: resolved.sessionId });
 
       // Native-surface clicks can only originate from panes of the currently visible active
       // layout. A hit that only exists in a parked worktree layout means the event sat in flight
@@ -567,6 +585,9 @@ export function useWorkspaceStore({
       // already that tab's active pane, so it is dropped as well.
       const found = locateSessionAcrossLayouts(stateRef.current, resolved.sessionId);
       if (!found?.leafId || found.worktreePath) return;
+
+      dispatch({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: resolved.sessionId });
+
       const isAlreadyActive =
         stateRef.current.layout.activeTabId === found.tabId &&
         stateRef.current.layout.layoutsByTabId[found.tabId]?.activeLeafId === found.leafId;

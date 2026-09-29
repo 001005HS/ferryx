@@ -38,7 +38,7 @@ import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
-import { notificationEntryId, type ReadAcknowledgement } from "./lib/notificationCenter/types";
+import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
@@ -171,15 +171,6 @@ import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, se
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 type InboxNavigationTarget = NotificationTarget & { revision?: number };
-
-function findTabIdForSession(state: WorkspaceState, sessionId: string): string | null {
-  const tabs = [...state.layout.tabs, ...Object.values(state.worktreeLayouts ?? {}).flatMap((l) => l.tabs)];
-  for (const tab of tabs) {
-    if (tab.kind === "browser") continue;
-    if (getTabSessionIds(state, tab.id).has(sessionId)) return tab.id;
-  }
-  return null;
-}
 
 function acknowledgeNotificationTarget(target: InboxNavigationTarget): void {
   notificationCenterStore.markEntriesRead([{
@@ -895,50 +886,24 @@ function WorkspaceApp({
     isObserved: isNotificationObserved,
   }), [handleTerminalBell, subscribeTerminalBell, isNotificationObserved]);
 
-  // Synchronize workspace attention/seen state with the notification center inbox:
-  // When an agent's completion is seen (user viewed the tab / focused the pane),
-  // mark the matching inbox entry as read so it immediately disappears.
+  // Acknowledge session notifications when user interacts with a pane (focus, input, paste, navigation)
   useEffect(() => {
-    const syncInbox = () => {
-      if (!state.workspaceId) return;
-      const workspaceId = state.workspaceId;
-      const entries = notificationCenterStore.getSnapshot().entries;
-      const toMarkRead: ReadAcknowledgement[] = [];
+    const onSessionInteracted = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; revision?: number }>).detail;
+      const sessionId = detail?.sessionId;
+      if (!sessionId || !state.workspaceId) return;
+      if (!state.sessions[sessionId]) return;
 
-      for (const entry of entries) {
-        if (entry.workspaceId !== workspaceId) continue;
-        if ("seen" in entry.read) continue;
-
-        if (entry.subject === "agent") {
-          const activity = state.activityBySessionId?.[entry.sessionId];
-          if (activity?.seen === true) {
-            toMarkRead.push({ id: entry.id, expectedRevision: entry.revision });
-            continue;
-          }
-        } else if (entry.reason === "bell") {
-          const tabId = findTabIdForSession(state, entry.sessionId);
-          if (tabId && state.layout.activeTabId === tabId && !state.unreadTabIds?.[tabId] && !state.bellUnreadTabIds?.[tabId]) {
-            toMarkRead.push({ id: entry.id, expectedRevision: entry.revision });
-            continue;
-          }
-        }
-      }
-
-      if (toMarkRead.length > 0) {
-        notificationCenterStore.markEntriesRead(toMarkRead);
+      const entryId = notificationEntryId(state.workspaceId, sessionId);
+      const entry = notificationCenterStore.getSnapshot().entries.find((e) => e.id === entryId);
+      if (entry && !("seen" in entry.read)) {
+        notificationCenterStore.markEntriesRead([{ id: entry.id, expectedRevision: entry.revision }]);
       }
     };
 
-    syncInbox();
-    return notificationCenterStore.subscribe(syncInbox);
-  }, [
-    state.workspaceId,
-    state.sessions,
-    state.activityBySessionId,
-    state.unreadTabIds,
-    state.bellUnreadTabIds,
-    state.layout,
-  ]);
+    window.addEventListener("ferryx:session-interacted", onSessionInteracted);
+    return () => window.removeEventListener("ferryx:session-interacted", onSessionInteracted);
+  }, [state.workspaceId, state.sessions]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,

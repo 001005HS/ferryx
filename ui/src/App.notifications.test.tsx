@@ -1107,25 +1107,18 @@ describe("App notification coordinator wiring", () => {
       expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
     });
 
-    it("automatically marks inbox entry read when agent completion is marked seen in workspaceStore", async () => {
+    it("marks inbox entry read when session is interacted via custom event", async () => {
       seedUnread("default", "sess-1");
       expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
 
-      const original = storeSpy.getMockImplementation();
-      storeSpy.mockImplementation((options: { workspaceId: string }) => {
-        const base = original(options);
-        return {
-          ...base,
-          state: {
-            ...base.state,
-            activityBySessionId: {
-              "sess-1": { state: "done", seen: true, isAgent: true },
-            },
-          },
-        };
-      });
-
       await act(async () => { render(<App />); });
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
+          detail: { sessionId: "sess-1" },
+        }));
+      });
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
     });
   });
@@ -1201,6 +1194,193 @@ describe("App notification coordinator wiring", () => {
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).not.toBe("other");
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("default");
       expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+    });
+
+    it("clears inbox entry on user interaction even when session has no agent activity", async () => {
+      // Seed an unread inbox entry with subject "agent" (e.g. from an agent whose activity was not detected or cleared)
+      // for a valid session sess-1 in the current workspace, but with NO entry in activityBySessionId.
+      inbox.recordActivity({
+        workspaceId: "default",
+        sessionId: "sess-1",
+        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
+        subject: "agent",
+        previousState: "working",
+        state: "done",
+        occurredAt: 100,
+        observed: false,
+      });
+      expect(inbox.getSnapshot().entries).toHaveLength(1);
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      await act(async () => { render(<App />); });
+
+      // Verify still unread before interaction
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      // Dispatch session interaction event (as NativeTerminalPane would on sendInput/sendPaste/focus)
+      act(() => {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
+          detail: { sessionId: "sess-1" },
+        }));
+      });
+
+      // Under current implementation, syncInbox only checks activity.seen === true,
+      // and state.activityBySessionId?.["sess-1"] is undefined, so the inbox entry stays unread.
+      // This assertion FAILS on baseline, proving the defect.
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+    });
+
+    it("does not clear inbox entry of another session or background pane when interaction happens in focused pane", async () => {
+      // Seed two unread entries: sess-1 (focused) and sess-2 (background / other split)
+      inbox.recordActivity({
+        workspaceId: "default",
+        sessionId: "sess-1",
+        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
+        subject: "agent",
+        previousState: "working",
+        state: "done",
+        occurredAt: 100,
+        observed: false,
+      });
+      inbox.recordActivity({
+        workspaceId: "default",
+        sessionId: "sess-2",
+        labels: { terminalTitle: "Terminal 2", agentLabel: "Claude" },
+        subject: "agent",
+        previousState: "working",
+        state: "done",
+        occurredAt: 100,
+        observed: false,
+      });
+      expect(inbox.getSnapshot().entries).toHaveLength(2);
+
+      await act(async () => { render(<App />); });
+
+      expect(inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1")?.read).toEqual({ unread: true });
+      expect(inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-2")?.read).toEqual({ unread: true });
+
+      // Dispatch session interaction event for sess-1 only
+      act(() => {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
+          detail: { sessionId: "sess-1" },
+        }));
+      });
+
+      const entry1 = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1");
+      const entry2 = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-2");
+      expect(entry1?.read).toMatchObject({ seen: true });
+      expect(entry2?.read).toEqual({ unread: true });
+    });
+
+    it("uses frontend workspaceId rather than remote session.workspaceId when acknowledging", async () => {
+      // Identity triad test: frontend workspace is "default", but the session is a remote session
+      // where session.workspaceId = "daemon:remote-host-uuid:/repo/remote".
+      // We configure storeState with remote session "sess-remote-1".
+      const remoteSessionId = "sess-remote-1";
+      const remoteSession = {
+        id: remoteSessionId,
+        cwd: "/remote/repo",
+        worktreePath: "/remote/repo",
+        workspaceId: "daemon:remote-uuid-1234:/remote/repo",
+        backendSessionId: "backend-remote-1",
+      };
+      const origStoreImplementation = storeSpy.getMockImplementation();
+      storeSpy.mockImplementation((options: { workspaceId?: string }) => {
+        const base = origStoreImplementation(options);
+        return {
+          ...base,
+          state: {
+            ...base.state,
+            sessions: {
+              ...base.state.sessions,
+              [remoteSessionId]: remoteSession,
+            },
+          },
+        };
+      });
+
+      inbox.recordActivity({
+        workspaceId: "default",
+        sessionId: remoteSessionId,
+        labels: { terminalTitle: "Remote Terminal", agentLabel: "Codex" },
+        subject: "agent",
+        previousState: "working",
+        state: "done",
+        occurredAt: 100,
+        observed: false,
+      });
+      expect(inbox.getSnapshot().entries).toHaveLength(1);
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      await act(async () => { render(<App />); });
+
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
+          detail: { sessionId: remoteSessionId },
+        }));
+      });
+
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+    });
+
+    it("does not acknowledge newer revision if a later notification arrives after interaction", async () => {
+      // Seed activityBySessionId sess-1 with { state: "done", seen: true, isAgent: true, title: "" }
+      // via storeSpy before render to cover that the removed stale syncInbox bridge does not auto-ack.
+      const original = storeSpy.getMockImplementation();
+      storeSpy.mockImplementation((options: { workspaceId: string }) => {
+        const base = original(options);
+        return {
+          ...base,
+          state: {
+            ...base.state,
+            activityBySessionId: {
+              "sess-1": { state: "done", seen: true, isAgent: true, title: "" },
+            },
+          },
+        };
+      });
+
+      inbox.recordActivity({
+        workspaceId: "default",
+        sessionId: "sess-1",
+        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
+        subject: "agent",
+        previousState: "working",
+        state: "done",
+        occurredAt: 100,
+        observed: false,
+      });
+      const initialEntry = inbox.getSnapshot().entries[0];
+      expect(initialEntry.revision).toBe(1);
+
+      await act(async () => { render(<App />); });
+
+      // User interacts with sess-1 pane, acknowledging revision 1
+      act(() => {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
+          detail: { sessionId: "sess-1" },
+        }));
+      });
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+
+      // Later, a new notification arrives for the SAME session sess-1 while activity.seen is true from earlier
+      act(() => {
+        inbox.recordBell({
+          workspaceId: "default",
+          sessionId: "sess-1",
+          labels: { terminalTitle: "Terminal 1" },
+          subject: "terminal",
+          occurredAt: 300,
+          observed: false,
+        });
+      });
+
+      // The new occurrence (revision 2) must remain unread and NOT be swallowed by stale seen: true
+      const updatedEntry = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1");
+      expect(updatedEntry?.revision).toBe(2);
+      expect(updatedEntry?.read).toEqual({ unread: true });
     });
   });
 });

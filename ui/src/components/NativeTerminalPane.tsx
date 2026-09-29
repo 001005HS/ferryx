@@ -1164,6 +1164,9 @@ export function NativeTerminalPane({
       });
       return;
     }
+    if (paneIdentity) {
+      window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: paneIdentity } }));
+    }
 
     const isRemote = isRemoteWorkspaceId(session?.workspaceId);
     const isOutage = isRemote && (
@@ -1306,7 +1309,7 @@ export function NativeTerminalPane({
     };
 
     void executeInput(false);
-  }, [bindingKey, performAttach, remoteConnectionState, remoteGeneration, targetSessionId, visible]);
+  }, [bindingKey, paneIdentity, performAttach, remoteConnectionState, remoteGeneration, targetSessionId, visible]);
 
   const sendCtrlC = useCallback(() => {
     sendInput({
@@ -1354,6 +1357,9 @@ export function NativeTerminalPane({
       if (!visible || !isTauri() || !targetSessionId) {
         return;
       }
+      if (paneIdentity) {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: paneIdentity } }));
+      }
       const isRemote = isRemoteWorkspaceId(session?.workspaceId);
       const isOutage = isRemote && (
         session?.remoteConnectionState === "disconnected" ||
@@ -1382,7 +1388,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_paste", error);
         });
     },
-    [remoteConnectionState, remoteGeneration, targetSessionId, visible],
+    [paneIdentity, remoteConnectionState, remoteGeneration, targetSessionId, visible],
   );
 
   const sendImagePasteShortcut = useCallback(() => {
@@ -2034,6 +2040,9 @@ export function NativeTerminalPane({
     let focusTimer: number | undefined;
     void onNativeTerminalFocus((sessionId) => {
       if (disposed || sessionId !== targetSessionId) return;
+      if (paneIdentity) {
+        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: paneIdentity } }));
+      }
       lastFocusedNativeTerminalSessionId = targetSessionId;
       inputRef.current?.focus();
       switchDebug("terminal.surface.focus.native", {
@@ -2067,7 +2076,7 @@ export function NativeTerminalPane({
       if (focusTimer !== undefined) clearTimeout(focusTimer);
       unlisten?.();
     };
-  }, [targetSessionId, visible]);
+  }, [paneIdentity, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !isTauri() || !targetSessionId) {
@@ -2631,6 +2640,9 @@ export function NativeTerminalPane({
       }}
       onPointerDown={(event) => {
         if (!visible) return;
+        if (paneIdentity) {
+          window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: paneIdentity } }));
+        }
         linkHoverRevision.current++;
         setLinkHover(null);
         if (error) {

@@ -8056,4 +8056,67 @@ describe("terminal link UX (U1-U3)", () => {
     expect(view2.queryByTestId("terminal-link-underline")).toBeNull();
     view2.unmount();
   });
+
+  describe("session interaction event dispatch", () => {
+    let interacted: string[] = [];
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId) interacted.push(detail.sessionId);
+    };
+
+    beforeEach(() => {
+      interacted = [];
+      window.addEventListener("ferryx:session-interacted", listener);
+    });
+
+    afterEach(() => {
+      cleanup();
+      window.removeEventListener("ferryx:session-interacted", listener);
+    });
+
+    it("dispatches ferryx:session-interacted on user input", async () => {
+      const session = createSession("session-interact-input");
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="session-interact-input" session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      act(() => {
+        fireEvent.input(textarea, { target: { value: "a" } });
+      });
+      expect(interacted).toContain("session-interact-input");
+    });
+
+    it("dispatches ferryx:session-interacted on paste", async () => {
+      const session = createSession("session-interact-paste");
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="session-interact-paste" session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      act(() => {
+        fireEvent.paste(textarea, { clipboardData: { getData: () => "text" } });
+      });
+      expect(interacted).toContain("session-interact-paste");
+    });
+
+    it("dispatches ferryx:session-interacted on pointer down", async () => {
+      const session = createSession("session-interact-pointer");
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="session-interact-pointer" session={session} />,
+      );
+      const pane = getByTestId("native-terminal-pane");
+      act(() => {
+        fireEvent.pointerDown(pane);
+      });
+      expect(interacted).toContain("session-interact-pointer");
+    });
+
+    it("dispatches ferryx:session-interacted on native terminal focus", async () => {
+      const session = createSession("frontend-focus-session", "backend-focus-session");
+      render(<NativeTerminalPane sessionId="frontend-focus-session" session={session} />);
+      act(() => {
+        nativeTerminalEventMocks.focusListeners.forEach((fn) => fn("backend-focus-session"));
+      });
+      expect(interacted).toContain("frontend-focus-session");
+    });
+  });
 });

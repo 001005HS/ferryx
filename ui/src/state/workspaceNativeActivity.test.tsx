@@ -474,4 +474,73 @@ describe("workspace store native activity subscription", () => {
 
     expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
   });
+
+  it("dispatches ferryx:session-interacted with activeSessionId upon ACTIVATE_TAB, FOCUS_PANE, and SELECT_WORKTREE", async () => {
+    const featureWorktree: Worktree = { ...worktree, path: "/repo/feature" };
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services: services() }),
+    );
+
+    let tab1 = "";
+    let tab2 = "";
+    await act(async () => {
+      tab1 = (await result.current.openTab(worktree))!;
+      tab2 = (await result.current.openTab(worktree))!;
+    });
+
+    const interacted: string[] = [];
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId) interacted.push(detail.sessionId);
+    };
+    window.addEventListener("ferryx:session-interacted", listener);
+
+    try {
+      // 1. ACTIVATE_TAB navigation
+      interacted.length = 0;
+      act(() => {
+        result.current.activateTab(tab1);
+      });
+      const tab1Obj = result.current.state.layout.tabs.find((t) => t.id === tab1);
+      const tab1Session = tab1Obj && "sessionId" in tab1Obj ? tab1Obj.sessionId : undefined;
+      expect(interacted).toContain(tab1Session);
+
+      // 2. FOCUS_PANE navigation after split
+      const primaryLeafId = result.current.state.layout.layoutsByTabId[tab1].activeLeafId!;
+      await act(async () => {
+        await result.current.splitPane(tab1, primaryLeafId, "horizontal");
+      });
+      const splitLayout = result.current.state.layout.layoutsByTabId[tab1];
+      const secondaryLeafId = splitLayout.activeLeafId!;
+      const secondarySession = splitLayout.sessionIdsByLeafId[secondaryLeafId];
+
+      interacted.length = 0;
+      act(() => {
+        result.current.focusPane(tab1, primaryLeafId);
+      });
+      // Primary pane focused: acknowledges tab1Session, does NOT acknowledge sibling secondarySession
+      expect(interacted).toContain(tab1Session);
+      expect(interacted).not.toContain(secondarySession);
+
+      interacted.length = 0;
+      act(() => {
+        result.current.focusPane(tab1, secondaryLeafId);
+      });
+      // Secondary pane focused: acknowledges secondarySession, does NOT acknowledge sibling tab1Session
+      expect(interacted).toContain(secondarySession);
+      expect(interacted).not.toContain(tab1Session);
+
+      // 3. SELECT_WORKTREE navigation: returns to worktree where tab1 had secondaryLeafId focused
+      await act(async () => {
+        await result.current.ensureTabForWorktree(featureWorktree);
+      });
+      interacted.length = 0;
+      act(() => {
+        result.current.dispatchWorkspaceAction({ type: "SELECT_WORKTREE", path: worktree.path });
+      });
+      expect(interacted).toEqual([secondarySession]);
+    } finally {
+      window.removeEventListener("ferryx:session-interacted", listener);
+    }
+  });
 });
