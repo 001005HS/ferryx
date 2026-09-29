@@ -724,7 +724,9 @@ impl RemoteRuntime {
             let f = RemoteFailure::from_bridge(&error);
             let mut s = e.state.lock();
             fail(&mut s, f.clone());
-            s.details.state = RemoteConnectionState::Disconnected;
+            if f.kind == RemoteFailureKind::Transport {
+                s.details.state = RemoteConnectionState::Disconnected;
+            }
             Entry::notify(&s);
             return Err(f);
         }

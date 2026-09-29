@@ -1525,6 +1525,22 @@ async fn ssh_imported_transport_recovers_after_read_disconnect() {
 }
 
 #[tokio::test]
+async fn ssh_close_preserves_expired_target_classification() {
+    let (runtime, _hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    let failure = runtime.close("local-stable").await.unwrap_err();
+    assert_eq!(failure.kind, RemoteFailureKind::Expired);
+    let details = runtime.details("local-stable").unwrap();
+    assert_eq!(details.state, RemoteConnectionState::Expired);
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn ssh_imported_transport_recovers_after_control_disconnect() {
     let (runtime, hub, dialer, tx) = fixture();
     runtime.live_import(RemoteExportState {
