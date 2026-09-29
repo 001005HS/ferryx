@@ -22,7 +22,10 @@ fn ssh_reconnect_safety_setup_error_preserves_structured_fields() {
 
 fn helper_binary_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let debug_path = manifest_dir.join("../remote-helper/target/debug/ferryx-remote-helper");
+    let debug_path = manifest_dir.join(format!(
+        "../remote-helper/target/debug/ferryx-remote-helper{}",
+        std::env::consts::EXE_SUFFIX,
+    ));
     assert!(
         debug_path.is_file(),
         "ferryx-remote-helper debug binary must exist at {}",
