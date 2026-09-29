@@ -52,6 +52,15 @@ fn main() {
             }
         }
     }
+    if args.get(1).is_some_and(|arg| arg == "direct-trust") {
+        match parse_direct_trust_cli(&args).and_then(run_direct_trust_cli) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "remote") {
         match parse_remote_cli(&args).and_then(run_remote_cli) {
             Ok(()) => return,

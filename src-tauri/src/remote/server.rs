@@ -4387,6 +4387,9 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let mut router = Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/capabilities", get(get_capabilities))
+        .route("/api/v1/direct/offer", post(super::direct_api::direct_offer_handler).layer(
+            axum::extract::DefaultBodyLimit::max(crate::paired_host::direct_wire::MAX_DIRECT_BODY_BYTES),
+        ))
         .route(
             "/api/v1/fs/directories",
             get(super::filesystem::directories),

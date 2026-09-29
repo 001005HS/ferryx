@@ -7,6 +7,7 @@ pub const PATH_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AttachPath {
     Lan,
+    Direct,
     Tailscale,
     SshForward,
     Relay,
@@ -16,9 +17,10 @@ impl AttachPath {
     pub fn tie_break_rank(self) -> u8 {
         match self {
             AttachPath::Lan => 0,
-            AttachPath::Tailscale => 1,
-            AttachPath::SshForward => 2,
-            AttachPath::Relay => 3,
+            AttachPath::Direct => 1,
+            AttachPath::Tailscale => 2,
+            AttachPath::SshForward => 3,
+            AttachPath::Relay => 4,
         }
     }
 }
@@ -198,6 +200,18 @@ pub fn release_attach_origin(session_id: &str) -> Option<String> {
     GLOBAL_SESSION_ATTACH_ORIGINS.remove(session_id)
 }
 
+/// A verified direct route for `host_id`, if one is live; never probes.
+pub fn direct_candidate(
+    routes: &super::direct_route::DirectRoutes,
+    host_id: &str,
+    auth_token: Option<String>,
+    expected_machine_id: Option<String>,
+) -> Option<CandidatePath> {
+    routes.origin_for(host_id).map(|origin| {
+        CandidatePath::with_expected_machine_id(AttachPath::Direct, origin, auth_token, expected_machine_id)
+    })
+}
+
 pub fn resolve_attach_base_origin(
     session_id: &str,
     candidates: &[CandidatePath],
@@ -286,6 +300,92 @@ mod tests {
 
         let empty: [PathOutcome; 0] = [];
         assert_eq!(select_path(&empty), None);
+    }
+
+    #[test]
+    fn direct_ranks_between_lan_and_tailscale_on_equal_rtt() {
+        let same = Duration::from_millis(15);
+        let with_lan = [
+            PathOutcome::reachable(AttachPath::Relay, same),
+            PathOutcome::reachable(AttachPath::Direct, same),
+            PathOutcome::reachable(AttachPath::Lan, same),
+        ];
+        assert_eq!(select_path(&with_lan), Some(AttachPath::Lan));
+        let without_lan = [
+            PathOutcome::reachable(AttachPath::Relay, same),
+            PathOutcome::reachable(AttachPath::Tailscale, same),
+            PathOutcome::reachable(AttachPath::Direct, same),
+        ];
+        assert_eq!(select_path(&without_lan), Some(AttachPath::Direct));
+    }
+
+    fn direct_and_relay() -> Vec<CandidatePath> {
+        vec![
+            CandidatePath::new(AttachPath::Direct, "http://127.0.0.1:1", Some("t".into())),
+            CandidatePath::new(AttachPath::Relay, "https://relay.example.com", Some("t".into())),
+        ]
+    }
+
+    #[tokio::test]
+    async fn direct_failure_selects_relay() {
+        let winner = select_and_reuse_channel(&direct_and_relay(), PATH_PROBE_DEADLINE, |c| async move {
+            match c.path {
+                AttachPath::Relay => Ok((c.path, Duration::from_millis(40))),
+                _ => Err(()),
+            }
+        })
+        .await
+        .expect("relay remains available");
+        assert_eq!(winner.path, AttachPath::Relay);
+    }
+
+    #[tokio::test]
+    async fn a_direct_attempt_that_never_answers_cannot_block_relay() {
+        let winner = select_and_reuse_channel(&direct_and_relay(), PATH_PROBE_DEADLINE, |c| async move {
+            match c.path {
+                AttachPath::Relay => Ok((c.path, Duration::from_millis(40))),
+                _ => std::future::pending().await,
+            }
+        })
+        .await
+        .expect("relay wins while direct hangs");
+        assert_eq!(winner.path, AttachPath::Relay);
+
+        let only_direct = vec![direct_and_relay().remove(0)];
+        let none = select_and_reuse_channel(&only_direct, Duration::from_millis(20), |_| async move {
+            std::future::pending::<Result<(AttachPath, Duration), ()>>().await
+        })
+        .await;
+        assert!(none.is_none(), "a hung direct path is bounded by the probe deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reachable_direct_is_preferred_over_a_slower_relay() {
+        // Paused clock: each connect completes exactly at its simulated latency.
+        let winner = select_and_reuse_channel(&direct_and_relay(), PATH_PROBE_DEADLINE, |c| async move {
+            let latency = match c.path {
+                AttachPath::Direct => Duration::from_millis(5),
+                _ => Duration::from_millis(40),
+            };
+            tokio::time::sleep(latency).await;
+            Ok((c.path, latency))
+        })
+        .await
+        .expect("direct wins");
+        assert_eq!(winner.path, AttachPath::Direct);
+    }
+
+    #[test]
+    fn direct_candidate_only_exists_for_a_published_route() {
+        use super::super::direct_route::{DirectGuard, DirectRoutes};
+        let routes = DirectRoutes::new();
+        assert_eq!(direct_candidate(&routes, "h", None, None), None);
+        let epoch = routes.begin_attempt("h", std::time::Instant::now()).unwrap();
+        routes.publish("h", epoch, "http://127.0.0.1:7".into(), DirectGuard::default());
+        let candidate = direct_candidate(&routes, "h", None, Some("m".into())).unwrap();
+        assert_eq!(candidate.path, AttachPath::Direct);
+        assert_eq!(candidate.base_origin, "http://127.0.0.1:7");
+        assert_eq!(candidate.expected_machine_id.as_deref(), Some("m"));
     }
 
     #[tokio::test]
@@ -423,7 +523,7 @@ mod tests {
                             tokio::time::sleep(Duration::from_secs(4)).await;
                             Ok((ch, Duration::from_secs(4)))
                         }
-                        AttachPath::Tailscale => {
+                        AttachPath::Tailscale | AttachPath::Direct => {
                             tokio::time::sleep(Duration::from_secs(4)).await;
                             Err(())
                         }

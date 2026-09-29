@@ -1809,6 +1809,7 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["browser", "sessions" | "identify"])
             | ("POST", ["workspace", "select" | "selection"])
             | ("POST", ["pair", "exchange"])
+            | ("POST", ["direct", "offer"])
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
             | ("GET", ["attach"])

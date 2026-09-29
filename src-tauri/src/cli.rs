@@ -1,6 +1,11 @@
 use std::io::Write;
 use std::sync::Arc;
 
+pub mod direct_trust;
+pub use direct_trust::{
+    parse_direct_trust_cli, run_direct_trust_cli, DirectTrustCliCommand, DIRECT_TRUST_USAGE,
+};
+
 use crate::browser::BrowserAutomationAction;
 use crate::ipc::browser_cli::{send_browser_cli_request, BrowserCliRequest, BrowserCliResponse};
 

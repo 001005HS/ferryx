@@ -292,3 +292,144 @@ async fn native_registry_routes_paired_ids_without_local_fallback() {
     assert!(terminal.pty_manager().list_sessions().is_empty());
     assert!(terminal.list_sessions().is_empty());
 }
+
+/// A live stream on the direct route loses its transport: the proxy retires that
+/// route epoch and resumes over the relay from its cursor, under a new controller
+/// generation, without CreateSession and without resending earlier input.
+#[tokio::test]
+async fn direct_stream_loss_resumes_over_relay_from_cursor() {
+    use super::direct_route::{DirectGuard, GLOBAL_DIRECT_ROUTES};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let bound = Duration::from_secs(10);
+    let caps = || async { Json(json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":["terminalCreateV1","terminalStreamV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}})) };
+    let session = || async { Json(json!({"status":"running","session":{"target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"workspaceId":"w","worktree":null,"cwd":"/fixture","cols":80,"rows":24,"running":true,"providerSession":null,"startSequence":"10","endSequence":"11"}})) };
+    let attached = |generation: &str| Message::Text(json!({"type":"attached","target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"generation":generation,"cols":80,"rows":24,"startSequence":"10","endSequence":"11","replayGap":null}).to_string().into());
+
+    // Direct adapter: one stream that takes one input, emits sequence 11, then dies.
+    let (direct_input_tx, direct_input_rx) = tokio::sync::oneshot::channel::<Message>();
+    let direct_input_tx = Arc::new(tokio::sync::Mutex::new(Some(direct_input_tx)));
+    let direct_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let direct_origin = format!("http://{}", direct_listener.local_addr().unwrap());
+    let direct_router = Router::new()
+        .route("/api/v1/capabilities", get(caps))
+        .route("/api/v1/sessions/s", get(session))
+        .route("/api/v1/terminal/s", get(move |ws: WebSocketUpgrade| {
+            let direct_input_tx = direct_input_tx.clone();
+            async move {
+                ws.on_upgrade(move |mut socket| async move {
+                    socket.send(attached("7")).await.unwrap();
+                    socket.send(Message::Binary(encode_frame(Metadata::Replay { start: Some(10), end: Some(10), gap: None }, b"hello", false).unwrap().into())).await.unwrap();
+                    let input = socket.recv().await.unwrap().unwrap();
+                    socket.send(Message::Binary(encode_frame(Metadata::Output { sequence: 11, gap: None }, b"direct", false).unwrap().into())).await.unwrap();
+                    direct_input_tx.lock().await.take().unwrap().send(input).unwrap();
+                    // Abrupt loss: no Close frame, no exit.
+                    drop(socket);
+                })
+            }
+        }));
+    let direct = tokio::spawn(async move { axum::serve(direct_listener, direct_router).await.unwrap() });
+
+    // Relay: must see the retained cursor, and only input written after recovery.
+    let relay_attaches = Arc::new(AtomicUsize::new(0));
+    let creates = Arc::new(AtomicUsize::new(0));
+    let (relay_inputs_tx, relay_inputs_rx) = tokio::sync::oneshot::channel::<Vec<Message>>();
+    let relay_inputs_tx = Arc::new(tokio::sync::Mutex::new(Some(relay_inputs_tx)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (attaches, created) = (relay_attaches.clone(), creates.clone());
+    let router = Router::new()
+        .route("/api/v1/pair/exchange", post(|| async { Json(json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}})) }))
+        .route("/host/a/api/v1/capabilities", get(caps))
+        .route("/host/a/api/v1/sessions", post(move || {
+            let created = created.clone();
+            async move { created.fetch_add(1, SeqCst); axum::http::StatusCode::INTERNAL_SERVER_ERROR }
+        }))
+        .route("/host/a/api/v1/sessions/s", get(session))
+        .route("/host/a/api/v1/socket-ticket", post(|| async { Json(json!({"ticket":"fixture-ticket"})) }))
+        .route("/host/a/api/v1/terminal/s", get(move |ws: WebSocketUpgrade, uri: axum::http::Uri| {
+            let attaches = attaches.clone();
+            let relay_inputs_tx = relay_inputs_tx.clone();
+            async move {
+                attaches.fetch_add(1, SeqCst);
+                assert_eq!(uri.query(), Some("daemonEpoch=1&afterSequence=11&ticket=fixture-ticket"));
+                ws.on_upgrade(move |mut socket| async move {
+                    socket.send(attached("8")).await.unwrap();
+                    socket.send(Message::Binary(encode_frame(Metadata::Replay { start: Some(12), end: Some(12), gap: None }, b"relay", false).unwrap().into())).await.unwrap();
+                    let mut inputs = Vec::new();
+                    while let Some(Ok(message)) = socket.recv().await {
+                        match message {
+                            Message::Close(_) => break,
+                            Message::Binary(_) => inputs.push(message),
+                            _ => {}
+                        }
+                    }
+                    relay_inputs_tx.lock().await.take().unwrap().send(inputs).unwrap();
+                })
+            }
+        }));
+    let relay = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let root = tempfile::tempdir().unwrap();
+    let service = super::service::PairedHostService::open_test_loopback(root.path().join("data"));
+    let host = service
+        .pair(super::service::PairRequest {
+            relay_origin: format!("http://{address}"),
+            pin: super::service::Secret("fixture".into()),
+            display_label: "fixture".into(),
+        })
+        .await
+        .unwrap();
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    let route_epoch = GLOBAL_DIRECT_ROUTES
+        .begin_attempt(&host.host_id, std::time::Instant::now())
+        .unwrap();
+    assert!(GLOBAL_DIRECT_ROUTES.publish(&host.host_id, route_epoch, direct_origin, DirectGuard::default()));
+
+    let descriptor = Descriptor {
+        host_id: host.host_id.clone(),
+        generation: host.generation,
+        target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "s".into() },
+        after_sequence: None,
+    };
+    let hub = Arc::new(TerminalOutputHub::new(32));
+    let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();
+    let mut output = hub.subscribe_with_sequence(proxy.id(), None).unwrap().receiver;
+    tokio::time::timeout(bound, proxy.reattach(&MachineClient::new(), &service)).await.unwrap().unwrap();
+    assert_eq!(proxy.controller(), Some(Epoch(7)));
+    proxy.write(Epoch(7), b"input").await.unwrap();
+    assert_eq!(tokio::time::timeout(bound, direct_input_rx).await.unwrap().unwrap(), Message::Binary(b"input".to_vec().into()));
+    for _ in 0..2 {
+        tokio::time::timeout(bound, proxy.receive()).await.unwrap().unwrap();
+    }
+    assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(11)));
+
+    // Direct dies: receive recovers over the relay instead of ending the stream.
+    assert!(tokio::time::timeout(bound, proxy.receive()).await.unwrap().unwrap().is_none());
+    assert_eq!(proxy.controller(), Some(Epoch(8)));
+    assert_eq!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id), None);
+    assert_eq!(proxy.write(Epoch(7), b"stale").await.unwrap_err().code, "STALE_GENERATION");
+    tokio::time::timeout(bound, proxy.receive()).await.unwrap().unwrap();
+    assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(12)));
+    proxy.write(Epoch(8), b"after").await.unwrap();
+    proxy.detach().await.unwrap();
+
+    // The hub kept one continuous stream: its cursor was not reset by the reattach.
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let chunk = tokio::time::timeout(bound, output.recv()).await.unwrap().unwrap();
+        seen.push((chunk.sequence, chunk.bytes.to_vec()));
+    }
+    assert!(seen.windows(2).all(|pair| pair[1].0 > pair[0].0));
+    assert_eq!(seen.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>(), vec![b"hello".to_vec(), b"direct".to_vec(), b"relay".to_vec()]);
+
+    let relay_inputs = tokio::time::timeout(bound, relay_inputs_rx).await.unwrap().unwrap();
+    assert_eq!(relay_inputs, vec![Message::Binary(b"after".to_vec().into())]);
+    assert_eq!(relay_attaches.load(SeqCst), 1);
+    assert_eq!(creates.load(SeqCst), 0);
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    drop(proxy);
+    direct.abort();
+    relay.abort();
+    drop(service);
+    root.close().unwrap();
+}

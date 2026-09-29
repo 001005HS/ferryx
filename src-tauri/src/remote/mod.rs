@@ -12,6 +12,7 @@ pub mod browser_protocol;
 pub mod browser_security;
 pub mod browser_ws;
 pub mod dag_api;
+pub mod direct_api;
 pub mod discovery;
 pub(crate) mod filesystem;
 pub mod machine_events;

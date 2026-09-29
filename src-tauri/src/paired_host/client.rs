@@ -587,7 +587,6 @@ impl MachineClient {
         service: &PairedHostService,
         descriptor: &crate::terminal::paired_daemon::Descriptor,
     ) -> Result<crate::terminal::paired_daemon::Transport> {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let response = self
             .execute_with_capability(
                 service,
@@ -610,128 +609,38 @@ impl MachineClient {
         let (host, lease) = service
             .capture_operation(descriptor.host_id.clone(), descriptor.generation)
             .await?;
-        let mut url =
-            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        let is_relay = is_relay_transport(&url);
-        url.path_segments_mut()
-            .map_err(|_| ClientError::local("INVALID_REQUEST"))?
-            .extend(["api", "v1", "terminal", &descriptor.target.session_id]);
-        url.query_pairs_mut()
-            .append_pair("daemonEpoch", &descriptor.target.daemon_epoch.0.to_string());
+        let segments = [
+            "api".to_owned(),
+            "v1".to_owned(),
+            "terminal".to_owned(),
+            descriptor.target.session_id.clone(),
+        ];
+        let mut query = vec![(
+            "daemonEpoch".to_owned(),
+            descriptor.target.daemon_epoch.0.to_string(),
+        )];
         if let Some(cursor) = descriptor.after_sequence {
-            url.query_pairs_mut()
-                .append_pair("afterSequence", &cursor.0.to_string());
+            query.push(("afterSequence".to_owned(), cursor.0.to_string()));
         }
-
-        // Mint a single-use socket ticket if the host/relay endpoint supports it (relay requires ticket for upgrade).
-        let ticket: Option<String> = {
-            let mut t_url =
-                Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-            t_url
-                .path_segments_mut()
-                .map_err(|_| ClientError::local("INVALID_REQUEST"))?
-                .extend(["api", "v1", "socket-ticket"]);
-            let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
-            let body = serde_json::json!({ "target": target_path }).to_string();
-            let token = lease.token()?;
-            let request_build = self
-                .http
-                .post(t_url)
-                .bearer_auth(token)
-                .header("content-type", "application/json")
-                .body(body);
-            let resp = match request_build.send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    let code = if err.is_timeout() {
-                        "TIMEOUT"
-                    } else {
-                        "HOST_UNAVAILABLE"
-                    };
-                    return Err(ClientError::local(code));
-                }
-            };
-            let status = resp.status();
-            if status.is_success() {
-                if resp.content_length().is_some_and(|n| n > 64 * 1024) {
-                    return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
-                }
-                let mut bytes = Vec::new();
-                let mut resp = resp;
-                while let Some(chunk) = resp
-                    .chunk()
-                    .await
-                    .map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?
-                {
-                    if bytes.len() + chunk.len() > 64 * 1024 {
-                        return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                #[derive(serde::Deserialize)]
-                struct TicketResp {
-                    ticket: String,
-                }
-                let tr = serde_json::from_slice::<TicketResp>(&bytes)
-                    .map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
-                if tr.ticket.is_empty() || tr.ticket.len() > 1024 {
-                    return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
-                }
-                Some(tr.ticket)
-            } else {
-                // The Authorization-header fallback is allowed ONLY on the direct path
-                // when the server explicitly signals the legacy capability (404).
-                let legacy_direct = !is_relay && status == reqwest::StatusCode::NOT_FOUND;
-                if legacy_direct {
-                    None
-                } else {
-                    let mut bytes = Vec::new();
-                    let mut resp = resp;
-                    while let Ok(Some(chunk)) = resp.chunk().await {
-                        if bytes.len() + chunk.len() > 16 * 1024 {
-                            break;
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    return Err(map_ticket_error(status, &bytes));
-                }
-            }
-        };
-
-        if let Some(ref t) = ticket {
-            url.query_pairs_mut().append_pair("ticket", t);
-        }
-
-        let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-        url.set_scheme(scheme)
-            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        request.headers_mut().insert(
-            "authorization",
-            format!("Bearer {}", lease.token()?)
-                .parse()
-                .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
-        );
-        let mut cancelled = lease.cancellation();
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(crate::remote::terminal_wire::MAX_FRAME_BYTES))
-            .max_frame_size(Some(crate::remote::terminal_wire::MAX_FRAME_BYTES));
-        let (socket, _) = tokio::select! { biased;
-            _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
-                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|e| {
-                    tracing::error!("Failed to connect to paired host websocket: {:?}", e);
-                    eprintln!("Failed to connect to paired host websocket: {:?}", e);
-                    ClientError::local("HOST_UNAVAILABLE")
-                })?,
-        };
+        let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
+        let (socket, direct_epoch) = self
+            .open_socket(
+                &host,
+                &lease,
+                &segments,
+                &query,
+                &target_path,
+                crate::remote::terminal_wire::MAX_FRAME_BYTES,
+            )
+            .await?;
         service
             .current_generation(descriptor.host_id.clone(), descriptor.generation)
             .await?;
-        Ok(crate::terminal::paired_daemon::Transport { socket, lease })
+        Ok(crate::terminal::paired_daemon::Transport {
+            socket,
+            lease,
+            direct_epoch,
+        })
     }
 
     /// Opens an authenticated DAG stream on the paired host.
@@ -748,7 +657,6 @@ impl MachineClient {
         generation: Epoch,
         remote_workspace_id: &str,
     ) -> Result<PairedDagStream> {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         // Capability + identity gate. `execute_with_capability` verifies
         // caps.machine_id == host.machine_id and machine/control scope.
         self.execute_with_capability(
@@ -765,20 +673,83 @@ impl MachineClient {
         .await?;
 
         let (host, lease) = service.capture_operation(host_id, generation).await?;
-        let mut url =
-            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        let is_relay = is_relay_transport(&url);
+        let (socket, _) = self
+            .open_socket(
+                &host,
+                &lease,
+                &["api", "v1", "workspace", "dag"].map(str::to_owned),
+                &[("workspaceId".to_owned(), remote_workspace_id.to_owned())],
+                crate::remote::dag_api::DAG_SOCKET_TARGET,
+                crate::remote::dag_api::MAX_DAG_FRAME_BYTES,
+            )
+            .await?;
+        // Re-verify the generation: a forget or re-pair during the upgrade must not
+        // leave a live stream authorized by a retired credential.
+        service
+            .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok(PairedDagStream { socket, lease })
+    }
+
+    /// Opens a ticketed WebSocket on the paired host. The ticket and the socket
+    /// share one base (direct adapter or relay); a transport failure over the direct
+    /// path reports the loss and retries once over the relay. Upgrades are
+    /// read-only attachments, so the retry cannot repeat a mutation. Returns the
+    /// direct epoch the socket actually rides (`None` after a relay fallback).
+    async fn open_socket(
+        &self,
+        host: &HostView,
+        lease: &CredentialLease,
+        segments: &[String],
+        query: &[(String, String)],
+        ticket_target: &str,
+        max_frame: usize,
+    ) -> Result<(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Option<u64>,
+    )> {
+        let base = super::direct_client::request_base(host)?;
+        let first = self
+            .open_socket_at(&base.url, lease, segments, query, ticket_target, max_frame)
+            .await;
+        match (first, base.direct_epoch) {
+            (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
+                super::direct_client::report_direct_loss(host, epoch);
+                let relay =
+                    Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+                self.open_socket_at(&relay, lease, segments, query, ticket_target, max_frame)
+                    .await
+                    .map(|socket| (socket, None))
+            }
+            (result, epoch) => result.map(|socket| (socket, epoch)),
+        }
+    }
+
+    async fn open_socket_at(
+        &self,
+        base: &Url,
+        lease: &CredentialLease,
+        segments: &[String],
+        query: &[(String, String)],
+        ticket_target: &str,
+        max_frame: usize,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut url = base.clone();
         url.path_segments_mut()
             .map_err(|_| ClientError::local("INVALID_REQUEST"))?
-            .extend(["api", "v1", "workspace", "dag"]);
+            .extend(segments.iter().map(String::as_str));
         url.query_pairs_mut()
-            .append_pair("workspaceId", remote_workspace_id);
-
-        let ticket = self
-            .socket_ticket(&host, &lease, crate::remote::dag_api::DAG_SOCKET_TARGET, is_relay)
-            .await?;
-        if let Some(ticket) = &ticket {
-            url.query_pairs_mut().append_pair("ticket", ticket);
+            .extend_pairs(query.iter().map(|(k, v)| (k, v)));
+        // Mint a single-use socket ticket if the endpoint supports it (relay requires one).
+        if let Some(ticket) = self.socket_ticket(base, lease, ticket_target).await? {
+            url.query_pairs_mut().append_pair("ticket", &ticket);
         }
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme)
@@ -795,19 +766,17 @@ impl MachineClient {
         );
         let mut cancelled = lease.cancellation();
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(crate::remote::dag_api::MAX_DAG_FRAME_BYTES))
-            .max_frame_size(Some(crate::remote::dag_api::MAX_DAG_FRAME_BYTES));
+            .max_message_size(Some(max_frame))
+            .max_frame_size(Some(max_frame));
         let (socket, _) = tokio::select! { biased;
             _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
-                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?,
+                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|e| {
+                    tracing::error!("Failed to connect to paired host websocket: {:?}", e);
+                    ClientError::local("HOST_UNAVAILABLE")
+                })?,
         };
-        // Re-verify the generation: a forget or re-pair during the upgrade must not
-        // leave a live stream authorized by a retired credential.
-        service
-            .current_generation(host.host_id.clone(), generation)
-            .await?;
-        Ok(PairedDagStream { socket, lease })
+        Ok(socket)
     }
 
     /// Mints a single-use socket ticket for `target`, mirroring terminal attachment.
@@ -815,13 +784,12 @@ impl MachineClient {
     /// fall back to the Authorization header; a relay never is.
     async fn socket_ticket(
         &self,
-        host: &HostView,
+        base: &Url,
         lease: &CredentialLease,
         target: &str,
-        is_relay: bool,
     ) -> Result<Option<String>> {
-        let mut url =
-            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let is_relay = is_relay_transport(base);
+        let mut url = base.clone();
         url.path_segments_mut()
             .map_err(|_| ClientError::local("INVALID_REQUEST"))?
             .extend(["api", "v1", "socket-ticket"]);
@@ -880,6 +848,9 @@ impl MachineClient {
         Err(map_ticket_error(status, &bytes))
     }
 
+    /// Sends one machine request over the direct adapter when one is published,
+    /// else the relay. A transport failure over direct reports the loss; only a GET
+    /// is retried over the relay, so a mutation is never sent twice.
     async fn http(
         &self,
         host: &HostView,
@@ -887,8 +858,30 @@ impl MachineClient {
         route: &Route,
         directory: bool,
     ) -> Result<Vec<u8>> {
-        let mut url =
-            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let base = super::direct_client::request_base(host)?;
+        let first = self.http_at(base.url, lease, route, directory).await;
+        match (first, base.direct_epoch) {
+            (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
+                super::direct_client::report_direct_loss(host, epoch);
+                if route.method != Method::GET {
+                    return Err(error);
+                }
+                let relay =
+                    Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+                self.http_at(relay, lease, route, directory).await
+            }
+            (result, _) => result,
+        }
+    }
+
+    async fn http_at(
+        &self,
+        base: Url,
+        lease: &CredentialLease,
+        route: &Route,
+        directory: bool,
+    ) -> Result<Vec<u8>> {
+        let mut url = base;
         {
             let mut segments = url
                 .path_segments_mut()
@@ -976,6 +969,8 @@ impl MachineClient {
         {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
         }
+        // Identity and scope are confirmed: negotiate the direct path in the background.
+        super::direct_client::kick(&self.http, &host, &lease);
         let satisfies_capability = |required: &str| -> bool {
             if caps.capabilities.iter().any(|v| v == required) {
                 return true;

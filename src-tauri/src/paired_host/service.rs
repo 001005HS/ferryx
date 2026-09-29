@@ -204,6 +204,8 @@ use super::inventory::{
     self, GrantScope, HostView, Inventory, InventoryError, LegacyCredential, MigrationReceipt,
     Pairing,
 };
+use super::direct_connect::stop_direct;
+use super::direct_route::GLOBAL_DIRECT_ROUTES;
 use crate::scoped_contracts::Epoch;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -311,6 +313,7 @@ struct Owner {
     #[cfg(test)]
     loopback_http: bool,
 }
+#[derive(Clone)]
 pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
     http: reqwest::Client,
@@ -440,6 +443,8 @@ impl PairedHostService {
         let host_id_clone = host_id.clone();
         self.run(move |store| store.forget(&host_id, expected))
             .await?;
+        // Synchronously drop the forgotten credential's direct worker and route.
+        stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id_clone, expected.0);
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "forget".into(),
@@ -465,6 +470,8 @@ impl PairedHostService {
             .await
         };
         if let Ok(view) = view {
+            // Only the revoked (captured) generation is stopped; a newer worker survives.
+            stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id, generation.0);
             let generation = view.generation.0.to_string();
             if let Some(sink) = &self.event_sink {
                 sink(InventoryChangeEvent {
@@ -591,6 +598,12 @@ impl PairedHostService {
                 details: None,
                 retryable: Some(true),
             })??;
+        // Re-pair supersedes every older credential generation; keep the fresh one.
+        stop_direct(
+            &GLOBAL_DIRECT_ROUTES,
+            &host.host_id,
+            host.generation.0.saturating_sub(1),
+        );
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "pair".into(),
@@ -661,6 +674,12 @@ impl PairedHostService {
                 .await
                 .map_err(|_| ServiceError::migration())?
                 .map_err(|_| ServiceError::migration())?;
+        // A same-generation receipt (already migrated) keeps its current route.
+        stop_direct(
+            &GLOBAL_DIRECT_ROUTES,
+            &receipt.host_id,
+            receipt.generation.0.saturating_sub(1),
+        );
         let generation = receipt.generation.0.to_string();
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
@@ -894,3 +913,7 @@ fn sanitize_error_text(text: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+#[path = "service_direct_lifecycle_tests.rs"]
+mod direct_lifecycle_tests;

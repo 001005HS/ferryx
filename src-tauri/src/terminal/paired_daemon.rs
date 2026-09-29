@@ -34,6 +34,8 @@ pub struct Descriptor {
 pub struct Transport {
     pub(crate) socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     pub(crate) lease: CredentialLease,
+    /// Direct-route epoch this socket actually rides; `None` on the relay.
+    pub(crate) direct_epoch: Option<u64>,
 }
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,6 +71,9 @@ pub struct Proxy {
     controller: Option<Epoch>,
     replay_pending: bool,
     exited: bool,
+    /// Credential authority captured by the last explicit reattach; used only to
+    /// recover from a lost direct route, never to create a session.
+    recovery: Option<PairedHostService>,
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
@@ -94,6 +99,7 @@ impl Proxy {
             controller: None,
             replay_pending: false,
             exited: false,
+            recovery: None,
         })
     }
     pub fn id(&self) -> &str {
@@ -113,6 +119,7 @@ impl Proxy {
         service: &PairedHostService,
     ) -> Result<()> {
         self.detach().await?;
+        self.recovery = Some(service.clone());
         let mut transport = client.attach_terminal(service, &self.descriptor).await?;
         let Message::Text(text) = transport.receive().await? else {
             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
@@ -150,11 +157,38 @@ impl Proxy {
             .ok_or_else(|| error("HOST_UNAVAILABLE"))?
             .send(message)
             .await;
-        if result.is_err() {
+        if let Err(failure) = &result {
+            let direct = self.transport.as_ref().and_then(|t| t.direct_epoch);
             self.transport = None;
             self.controller = None;
+            // The failed message is never resent; recovery only restores the
+            // stream so the owner loop keeps receiving under a new generation.
+            self.recover_direct_loss(direct, failure).await;
         }
         result
+    }
+    /// A direct route died under a live stream: retire that route epoch and
+    /// reattach from the retained cursor (the path manager now picks the relay or
+    /// a newer direct route). Never CreateSession, never replays input, never
+    /// resets the hub. Relay loss, remote exit and host answers keep old semantics.
+    async fn recover_direct_loss(&mut self, direct: Option<u64>, failure: &ClientError) -> bool {
+        let Some(epoch) = direct else {
+            return false;
+        };
+        if self.exited || !crate::paired_host::direct_client::is_transport_failure(failure) {
+            return false;
+        }
+        let Some(service) = self.recovery.clone() else {
+            return false;
+        };
+        crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.mark_disconnected(
+            &self.descriptor.host_id,
+            epoch,
+            std::time::Instant::now(),
+        );
+        self.transport = None;
+        self.controller = None;
+        self.reattach(&MachineClient::new(), &service).await.is_ok()
     }
     pub async fn write(&mut self, generation: Epoch, bytes: &[u8]) -> Result<()> {
         if bytes.len() > 64 * 1024 {
@@ -162,6 +196,13 @@ impl Proxy {
         }
         self.send(generation, Message::Binary(bytes.to_vec().into()))
             .await
+            .map_err(|mut failure| {
+                // Bytes may have reached the host before the socket failed.
+                if crate::paired_host::direct_client::is_transport_failure(&failure) {
+                    failure.ambiguous = true;
+                }
+                failure
+            })
     }
     pub async fn resize(&mut self, generation: Epoch, cols: u16, rows: u16) -> Result<()> {
         if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
@@ -182,17 +223,29 @@ impl Proxy {
         )
         .await
     }
+    /// A keepalive that tripped a recovered direct loss reports success: the
+    /// stream lives on under the new controller generation.
     pub async fn ping(&mut self, generation: Epoch) -> Result<()> {
-        self.send(generation, Message::Text("{\"type\":\"ping\"}".into()))
+        let before = self.controller;
+        match self
+            .send(generation, Message::Text("{\"type\":\"ping\"}".into()))
             .await
+        {
+            Err(_) if self.controller.is_some() && self.controller != before => Ok(()),
+            result => result,
+        }
     }
     /// One bounded message at a time; consumers subscribe to the native hub.
     /// Lifecycle JSON is returned to the owner and never rendered as PTY bytes.
     pub async fn receive(&mut self) -> Result<Option<serde_json::Value>> {
+        let direct = self.transport.as_ref().and_then(|t| t.direct_epoch);
         let result = self.receive_inner().await;
-        if result.is_err() {
+        if let Err(failure) = &result {
             self.transport = None;
             self.controller = None;
+            if self.recover_direct_loss(direct, failure).await {
+                return Ok(None);
+            }
         }
         result
     }

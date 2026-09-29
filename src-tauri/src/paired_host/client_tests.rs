@@ -1483,3 +1483,138 @@ async fn http_504_relay_stage_allowlist_and_forgery_rejection() {
         cleanup(root, task).await;
     }
 }
+
+use super::super::direct_route::{DirectGuard, GLOBAL_DIRECT_ROUTES};
+
+/// Publishes `origin` as the direct adapter for `host`, as a completed negotiation would.
+fn publish_direct(host: &HostView, origin: String) -> u64 {
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    let epoch = GLOBAL_DIRECT_ROUTES
+        .begin_attempt(&host.host_id, std::time::Instant::now())
+        .expect("fresh route admits an attempt");
+    assert!(GLOBAL_DIRECT_ROUTES.publish(&host.host_id, epoch, origin, DirectGuard::default()));
+    epoch
+}
+
+async fn dead_origin() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    origin
+}
+
+async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    (origin, tokio::spawn(async move { axum::serve(listener, router).await.unwrap() }))
+}
+
+#[tokio::test]
+async fn published_direct_route_carries_machine_requests() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    let (origin, direct) = serve(Router::new().route(
+        "/api/v1/capabilities",
+        get(move || {
+            let hits = counted.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(caps("a"))
+            }
+        }),
+    ))
+    .await;
+    let (root, service, host, task) = fixture(Router::new()).await;
+    let epoch = publish_direct(&host, origin.clone());
+    MachineClient::new()
+        .execute(&service, request(&host, Operation::Capabilities))
+        .await
+        .unwrap();
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    assert_eq!(
+        GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id),
+        Some((origin, epoch))
+    );
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    direct.abort();
+    cleanup(root, task).await;
+}
+
+#[tokio::test]
+async fn direct_transport_loss_falls_back_to_relay_once() {
+    let (root, service, host, task) = fixture(Router::new()).await;
+    publish_direct(&host, dead_origin().await);
+    let response = MachineClient::new()
+        .execute(&service, request(&host, Operation::Capabilities))
+        .await
+        .unwrap();
+    assert!(matches!(response.result, OperationResult::Capabilities(_)));
+    assert_eq!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id), None);
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    cleanup(root, task).await;
+}
+
+#[tokio::test]
+async fn mutation_over_lost_direct_is_not_resent_over_relay() {
+    let id = "5b0f3a52-9d7e-4c1b-8f2a-6e4d3c2b1a09";
+    let not_found = move || async move {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({"error":{"code":"OPERATION_NOT_FOUND","message":"missing","retryable":false,"requestId":id,"details":{}}})),
+        )
+    };
+    // The direct adapter answers reads, then drops the connection mid-mutation
+    // (a panicking handler aborts its connection task).
+    let (origin, direct) = serve(
+        Router::new()
+            .route("/api/v1/capabilities", get(|| async { Json(caps("a")) }))
+            .route("/api/v1/workspace/operations/{id}", get(not_found))
+            .route(
+                "/api/v1/workspace/projects",
+                post(|| async {
+                    panic!("direct adapter drops the mutation connection");
+                    #[allow(unreachable_code)]
+                    ""
+                }),
+            ),
+    )
+    .await;
+    let relay_posts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = relay_posts.clone();
+    let relay = Router::new()
+        .route("/host/a/api/v1/workspace/operations/{id}", get(not_found))
+        .route(
+            "/host/a/api/v1/workspace/projects",
+            post(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "unexpected relay mutation"
+                }
+            }),
+        );
+    let (root, service, host, task) = fixture(relay).await;
+    publish_direct(&host, origin);
+    let error = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::RegisterProject {
+                    request: m::RegisterRequest {
+                        request_id: id.into(),
+                        repo_path: "/same".into(),
+                    },
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "HOST_UNAVAILABLE");
+    assert!(error.ambiguous);
+    assert_eq!(relay_posts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id), None);
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    direct.abort();
+    cleanup(root, task).await;
+}
