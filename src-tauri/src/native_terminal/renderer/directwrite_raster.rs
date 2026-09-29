@@ -21,6 +21,8 @@ const FIXED_PITCH: u32 = 1;
 const FF_MODERN: u32 = 48;
 const GGI_MARK_NONEXISTING_GLYPHS: u32 = 0x0001;
 const GDI_ERROR: u32 = 0xFFFF_FFFF;
+/// OpenType table tag `cmap` as the little-endian DWORD `GetFontData` expects.
+const CMAP_TAG: u32 = u32::from_le_bytes(*b"cmap");
 
 #[repr(C)]
 struct BitmapInfoHeader {
@@ -97,6 +99,7 @@ unsafe extern "system" {
     fn TextOutW(hdc: Hdc, x: i32, y: i32, text: *const u16, len: i32) -> i32;
     fn GdiFlush() -> i32;
     fn GetGlyphIndicesW(hdc: Hdc, lpstr: *const u16, c: i32, pgi: *mut u16, fl: u32) -> u32;
+    fn GetFontData(hdc: Hdc, table: u32, offset: u32, buffer: *mut c_void, size: u32) -> u32;
     fn EnumFontFamiliesExW(
         hdc: Hdc,
         lpLogfont: *const LOGFONTW,
@@ -164,6 +167,108 @@ unsafe extern "system" fn enum_font_fam_ex_proc(
     0
 }
 
+/// Returns true when a font family named `face` (NUL-terminated UTF-16, at most 32 units)
+/// is installed. `EnumFontFamiliesExW` matches both English and localized family names.
+///
+/// SAFETY: `dc` must be a valid device context handle.
+unsafe fn family_exists(dc: Hdc, face: &[u16]) -> bool {
+    if face.len() > 32 {
+        return false;
+    }
+    let mut logfont = LOGFONTW {
+        lfHeight: 0,
+        lfWidth: 0,
+        lfEscapement: 0,
+        lfOrientation: 0,
+        lfWeight: 0,
+        lfItalic: 0,
+        lfUnderline: 0,
+        lfStrikeOut: 0,
+        lfCharSet: DEFAULT_CHARSET as u8,
+        lfOutPrecision: 0,
+        lfClipPrecision: 0,
+        lfQuality: 0,
+        lfPitchAndFamily: 0,
+        lfFaceName: [0u16; 32],
+    };
+    logfont.lfFaceName[..face.len()].copy_from_slice(face);
+
+    let mut found = false;
+    EnumFontFamiliesExW(
+        dc,
+        &logfont,
+        enum_font_fam_ex_proc,
+        (&mut found as *mut bool) as isize,
+        0,
+    );
+    found
+}
+
+fn be_u16(data: &[u8], offset: usize) -> Option<u16> {
+    data.get(offset..offset + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+fn be_u32(data: &[u8], offset: usize) -> Option<u32> {
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Returns true when a full-Unicode (format 12) subtable of the `cmap` table maps
+/// `codepoint` to a real glyph. `GetGlyphIndicesW` works on UTF-16 code units and reports
+/// every surrogate half as missing, so supplementary-plane coverage must read the cmap.
+fn cmap_format12_covers(cmap: &[u8], codepoint: u32) -> bool {
+    let Some(num_tables) = be_u16(cmap, 2) else {
+        return false;
+    };
+    for index in 0..num_tables as usize {
+        let record = 4 + index * 8;
+        let (Some(platform), Some(encoding), Some(offset)) = (
+            be_u16(cmap, record),
+            be_u16(cmap, record + 2),
+            be_u32(cmap, record + 4),
+        ) else {
+            return false;
+        };
+        let full_unicode =
+            (platform == 3 && encoding == 10) || (platform == 0 && (encoding == 4 || encoding == 6));
+        let subtable = offset as usize;
+        if !full_unicode || be_u16(cmap, subtable) != Some(12) {
+            continue;
+        }
+        let Some(num_groups) = be_u32(cmap, subtable + 12) else {
+            continue;
+        };
+        for group in 0..num_groups as usize {
+            let base = subtable + 16 + group * 12;
+            let (Some(start), Some(end), Some(start_glyph)) =
+                (be_u32(cmap, base), be_u32(cmap, base + 4), be_u32(cmap, base + 8))
+            else {
+                break;
+            };
+            if (start..=end).contains(&codepoint) {
+                return start_glyph.wrapping_add(codepoint - start) != 0;
+            }
+        }
+    }
+    false
+}
+
+/// Codepoint-aware coverage check for the font currently selected into `dc`.
+///
+/// SAFETY: `dc` must be a valid device context with a font selected.
+unsafe fn selected_font_covers_codepoints(dc: Hdc, text: &[u16]) -> bool {
+    let size = GetFontData(dc, CMAP_TAG, 0, std::ptr::null_mut(), 0);
+    if size == GDI_ERROR || size == 0 {
+        return false;
+    }
+    let mut cmap = vec![0u8; size as usize];
+    if GetFontData(dc, CMAP_TAG, 0, cmap.as_mut_ptr().cast(), size) != size {
+        return false;
+    }
+    char::decode_utf16(text.iter().copied())
+        .all(|decoded| matches!(decoded, Ok(ch) if cmap_format12_covers(&cmap, ch as u32)))
+}
+
 /// Finds the first family in `family_stack` (or Windows system fallbacks) that actually exists
 /// and has glyphs for every character of text in `glyphs`, leaving it selected into `dc`
 /// and returning `(font, old_font)`.
@@ -188,40 +293,7 @@ unsafe fn select_covering_font(
 
     for resolved_family in candidate_families(family_stack) {
         let face = wide(resolved_family);
-        // Truncate names longer than 31 UTF-16 units (skip them).
-        // `face` includes the null terminator, so a name with <= 31 units has face.len() <= 32.
-        if face.len() > 32 {
-            continue;
-        }
-
-        let mut logfont = LOGFONTW {
-            lfHeight: 0,
-            lfWidth: 0,
-            lfEscapement: 0,
-            lfOrientation: 0,
-            lfWeight: 0,
-            lfItalic: 0,
-            lfUnderline: 0,
-            lfStrikeOut: 0,
-            lfCharSet: DEFAULT_CHARSET as u8,
-            lfOutPrecision: 0,
-            lfClipPrecision: 0,
-            lfQuality: 0,
-            lfPitchAndFamily: 0,
-            lfFaceName: [0u16; 32],
-        };
-        logfont.lfFaceName[..face.len()].copy_from_slice(&face);
-
-        let mut font_exists = false;
-        EnumFontFamiliesExW(
-            dc,
-            &logfont,
-            enum_font_fam_ex_proc,
-            (&mut font_exists as *mut bool) as isize,
-            0,
-        );
-
-        if !font_exists {
+        if !family_exists(dc, &face) {
             continue;
         }
 
@@ -247,17 +319,23 @@ unsafe fn select_covering_font(
 
         let old_font = SelectObject(dc, font);
 
-        // Test coverage: GetGlyphIndicesW with GGI_MARK_NONEXISTING_GLYPHS returns 0xFFFF
-        // for any unsupported glyph in the string.
-        let mut glyph_indices = vec![0u16; glyph_len as usize];
-        let ret = GetGlyphIndicesW(
-            dc,
-            glyphs.as_ptr(),
-            glyph_len,
-            glyph_indices.as_mut_ptr(),
-            GGI_MARK_NONEXISTING_GLYPHS,
-        );
-        let all_covered = ret != GDI_ERROR && !glyph_indices.iter().any(|&gi| gi == 0xFFFF);
+        let text_units = &glyphs[..glyph_len as usize];
+        let all_covered = if text_units.iter().any(|unit| (0xD800..=0xDFFF).contains(unit)) {
+            // Supplementary-plane text: GetGlyphIndicesW cannot see surrogate pairs.
+            selected_font_covers_codepoints(dc, text_units)
+        } else {
+            // GetGlyphIndicesW with GGI_MARK_NONEXISTING_GLYPHS returns 0xFFFF for any
+            // unsupported glyph in the string.
+            let mut glyph_indices = vec![0u16; glyph_len as usize];
+            let ret = GetGlyphIndicesW(
+                dc,
+                glyphs.as_ptr(),
+                glyph_len,
+                glyph_indices.as_mut_ptr(),
+                GGI_MARK_NONEXISTING_GLYPHS,
+            );
+            ret != GDI_ERROR && !glyph_indices.iter().any(|&gi| gi == 0xFFFF)
+        };
 
         if !all_covered {
             SelectObject(dc, old_font);
@@ -295,6 +373,22 @@ pub(crate) fn any_family_covers(stack: &str, text: &str) -> bool {
             DeleteDC(dc);
             false
         }
+    }
+}
+
+/// Test-only probe: is `family` installed? Independent of the coverage decision made by
+/// `select_covering_font`, so tests can gate on the environment without mirroring the code.
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) fn family_installed(family: &str) -> bool {
+    // SAFETY: the DC is created and deleted here; no GDI objects are selected into it.
+    unsafe {
+        let dc = CreateCompatibleDC(std::ptr::null_mut());
+        if dc.is_null() {
+            return false;
+        }
+        let exists = family_exists(dc, &wide(family));
+        DeleteDC(dc);
+        exists
     }
 }
 
@@ -409,63 +503,66 @@ mod tests {
 
     #[test]
     fn test_candidate_families_fallback_order_and_deduplication() {
-        let candidates: Vec<&str> = candidate_families("monospace").collect();
-        assert_eq!(
-            candidates,
-            vec![
-                "Consolas",
-                "Malgun Gothic",
-                "Microsoft YaHei",
-                "Yu Gothic",
-                "MS Gothic",
-                "Segoe UI Symbol",
-                "Segoe UI Emoji",
-                "Cascadia Mono",
-            ]
-        );
-
-        let candidates_with_user: Vec<&str> =
+        let candidates: Vec<&str> =
             candidate_families("MesloLGS NF, 'Noto Sans KR', monospace").collect();
-        assert_eq!(
-            candidates_with_user,
-            vec![
-                "MesloLGS NF",
-                "Noto Sans KR",
-                "Consolas",
-                "Malgun Gothic",
-                "Microsoft YaHei",
-                "Yu Gothic",
-                "MS Gothic",
-                "Segoe UI Symbol",
-                "Segoe UI Emoji",
-                "Cascadia Mono",
-            ]
-        );
+        assert_eq!(&candidates[..3], ["MesloLGS NF", "Noto Sans KR", "Consolas"]);
+        let fallback_tail: Vec<&str> = SYSTEM_FALLBACK_FAMILIES
+            .iter()
+            .copied()
+            .filter(|family| *family != "Consolas")
+            .collect();
+        assert_eq!(&candidates[3..], fallback_tail.as_slice());
 
-        let dedupe_case: Vec<&str> =
+        let deduped: Vec<&str> =
             candidate_families("malgun gothic, CONSOLAS, Malgun Gothic").collect();
-        assert_eq!(
-            dedupe_case,
-            vec![
-                "malgun gothic",
-                "CONSOLAS",
-                "Microsoft YaHei",
-                "Yu Gothic",
-                "MS Gothic",
-                "Segoe UI Symbol",
-                "Segoe UI Emoji",
-                "Cascadia Mono",
-            ]
-        );
-
-        let empty: Vec<&str> = candidate_families("").collect();
-        assert_eq!(empty, SYSTEM_FALLBACK_FAMILIES);
+        assert_eq!(&deduped[..2], ["malgun gothic", "CONSOLAS"]);
+        assert!(!deduped[2..].iter().any(|family| {
+            family.eq_ignore_ascii_case("malgun gothic") || family.eq_ignore_ascii_case("consolas")
+        }));
+        assert_eq!(deduped.len(), SYSTEM_FALLBACK_FAMILIES.len());
     }
 
     #[test]
     fn test_system_fallback_covers_korean_on_windows() {
+        assert!(
+            family_installed("Malgun Gothic"),
+            "the Windows test baseline requires the Malgun Gothic font"
+        );
         assert!(any_family_covers("monospace", "가"));
         assert!(!any_family_covers("monospace", "\u{10fffd}"));
+    }
+
+    #[test]
+    fn test_supplementary_plane_glyph_is_covered_and_inked() {
+        assert!(
+            family_installed("Segoe UI Emoji"),
+            "the Windows test baseline requires the Segoe UI Emoji font"
+        );
+        assert!(any_family_covers("monospace", "\u{1F600}"));
+
+        let mut buf = vec![0u8; 32 * 32];
+        let inked =
+            rasterize_to_alpha_buffer("monospace", "\u{1F600}", &mut buf, 32, 32, 20.0, false, false);
+        assert!(inked, "U+1F600 must rasterize ink through the GDI path");
+        assert!(buf.iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn test_cmap_format12_lookup() {
+        // cmap header (version 0, 1 table) + record (3, 10, offset 12) + format 12 subtable
+        // with one group mapping U+1F600..=U+1F601 to glyphs 0 and 1.
+        let mut cmap = vec![0, 0, 0, 1, 0, 3, 0, 10, 0, 0, 0, 12];
+        cmap.extend_from_slice(&[0, 12, 0, 0]);
+        cmap.extend_from_slice(&28u32.to_be_bytes());
+        cmap.extend_from_slice(&0u32.to_be_bytes());
+        cmap.extend_from_slice(&1u32.to_be_bytes());
+        cmap.extend_from_slice(&0x1F600u32.to_be_bytes());
+        cmap.extend_from_slice(&0x1F601u32.to_be_bytes());
+        cmap.extend_from_slice(&0u32.to_be_bytes());
+        assert!(!cmap_format12_covers(&cmap, 0x1F600), "glyph 0 is .notdef, not coverage");
+        assert!(cmap_format12_covers(&cmap, 0x1F601));
+        assert!(!cmap_format12_covers(&cmap, 0x1F602));
+        assert!(!cmap_format12_covers(&cmap[..10], 0x1F601), "truncated tables must not panic");
     }
 
     #[test]

@@ -706,10 +706,8 @@ mod tests {
         assert_eq!(pua_mask.len(), (8 * 16 * pua_bpp as u32) as usize);
 
         #[cfg(target_os = "windows")]
-        let has_pua = crate::native_terminal::renderer::directwrite_raster::any_family_covers(
-            "MesloLGS NF",
-            "\u{e0b0}",
-        );
+        let has_pua =
+            crate::native_terminal::renderer::directwrite_raster::family_installed("MesloLGS NF");
         #[cfg(not(target_os = "windows"))]
         let has_pua = true;
 
@@ -719,7 +717,7 @@ mod tests {
                 "U+E0B0 must produce non-empty mask with MesloLGS NF"
             );
         } else {
-            eprintln!("skip U+E0B0: no installed font covers it");
+            eprintln!("skip U+E0B0: MesloLGS NF is not installed");
         }
 
         // U+10FFFD (unassigned PUA codepoint) must produce an all-zero buffer, never arbitrary Han pixels
@@ -798,12 +796,16 @@ mod resolution_tests {
             FontManager::new_with_family_and_size(family_stack, 14.0);
 
         for ch in ["\u{2500}", "\u{28fe}", "\u{e0b0}", "\u{f418}", "\u{ac19}"] {
+            // Nerd Font private-use glyphs exist only in MesloLGS NF. Gate on that font being
+            // installed (independent of the rasterizer's own coverage decision); every other
+            // glyph must render from the Windows system fallback stack.
             #[cfg(target_os = "windows")]
-            if !crate::native_terminal::renderer::directwrite_raster::any_family_covers(
-                family_stack,
-                ch,
-            ) {
-                eprintln!("skip {ch:?}: no installed font covers it");
+            if matches!(ch, "\u{e0b0}" | "\u{f418}")
+                && !crate::native_terminal::renderer::directwrite_raster::family_installed(
+                    "MesloLGS NF",
+                )
+            {
+                eprintln!("skip {ch:?}: MesloLGS NF is not installed");
                 continue;
             }
 
