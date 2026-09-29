@@ -1,5 +1,6 @@
 pub mod config;
 pub mod helper;
+pub mod hygiene;
 pub mod process;
 
 pub fn private_file(path: &std::path::Path) -> Result<(), String> {

@@ -2,6 +2,7 @@
 use super::helper::{read_frame, write_frame, Request, Runtime};
 use serde_json::{json, Value};
 use std::{
+    ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -339,6 +340,7 @@ pub fn daemon(root: PathBuf, host: String) -> Result<(), String> {
     let bound = bind_runtime(&root, host)?;
     println!("{}", json!({"event":"ready","protocol":1}));
     std::io::stdout().flush().map_err(|e| e.to_string())?;
+    super::hygiene::start();
     for incoming in bound.listener.incoming() {
         let stream = incoming.map_err(|e| e.to_string())?;
         let runtime = bound.runtime.clone();
@@ -383,7 +385,21 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
     {
         let current_exe =
             std::env::current_exe().map_err(|e| format!("REMOTE_RUNTIME_INVALID: {e}"))?;
-        let mut command = std::process::Command::new(current_exe);
+        #[cfg(target_os = "linux")]
+        {
+            match try_systemd_unit(&current_exe, &root, &host) {
+                Ok(()) => {
+                    println!("{}", json!({"event":"ready","protocol":1}));
+                    std::io::stdout().flush().map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+                Err(UnitLaunchError::Unavailable(reason)) => {
+                    eprintln!("SSH_HELPER_UNIT_FALLBACK: {reason}");
+                }
+                Err(UnitLaunchError::Failed(message)) => return Err(message),
+            }
+        }
+        let mut command = std::process::Command::new(&current_exe);
         let root_str = root
             .to_str()
             .ok_or("REMOTE_RUNTIME_INVALID: root is not valid UTF-8")?;
@@ -453,6 +469,155 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
         let _ = std::fs::remove_file(&log_path);
         Err("REMOTE_RUNTIME_TIMEOUT: helper daemon failed to become ready within deadline".into())
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn helper_unit_name(host: &str) -> String {
+    let mut sanitized: String = host
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        sanitized.push_str("default");
+    }
+    sanitized.truncate(64);
+    format!("ferryx-helper-{sanitized}")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn forwarded_env(env: &[(OsString, OsString)]) -> Vec<(String, String)> {
+    const DENY: [&str; 5] = [
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+        "SSH_SESSION_ID",
+        "SSH_ASKPASS",
+    ];
+    env.iter()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            if DENY.contains(&key) || !valid_env_name(key) {
+                return None;
+            }
+            let value = value.to_str()?;
+            if value.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn unit_launch_args(
+    exe: &Path,
+    root: &Path,
+    host: &str,
+    env: &[(OsString, OsString)],
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "--user".into(),
+        format!("--unit={}", helper_unit_name(host)).into(),
+        "--collect".into(),
+        "--quiet".into(),
+    ];
+    for (key, value) in forwarded_env(env) {
+        args.push(format!("--setenv={key}={value}").into());
+    }
+    args.push("--".into());
+    args.push(exe.as_os_str().to_os_string());
+    args.push("daemon".into());
+    args.push("--root".into());
+    args.push(root.as_os_str().to_os_string());
+    args.push("--host-id".into());
+    args.push(host.into());
+    args
+}
+
+#[cfg(target_os = "linux")]
+enum UnitLaunchError {
+    Unavailable(String),
+    Failed(String),
+}
+
+#[cfg(target_os = "linux")]
+fn unit_active_state(unit: &str) -> Result<String, UnitLaunchError> {
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "show", unit, "-p", "ActiveState", "--value"])
+        .output()
+        .map_err(|e| UnitLaunchError::Unavailable(format!("SYSTEMD_UNAVAILABLE: {e}")))?;
+    if !output.status.success() {
+        return Err(UnitLaunchError::Unavailable(format!(
+            "SYSTEMD_UNAVAILABLE: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn try_systemd_unit(exe: &Path, root: &Path, host: &str) -> Result<(), UnitLaunchError> {
+    let unit = helper_unit_name(host);
+    let active = matches!(
+        unit_active_state(&unit)?.as_str(),
+        "active" | "activating" | "reloading"
+    );
+    if !active {
+        let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        let args = unit_launch_args(exe, root, host, &env);
+        let output = std::process::Command::new("systemd-run")
+            .args(&args)
+            .output()
+            .map_err(|e| {
+                UnitLaunchError::Unavailable(format!("REMOTE_RUNTIME_SPAWN_FAILED: systemd-run: {e}"))
+            })?;
+        if !output.status.success() {
+            let recheck = matches!(
+                unit_active_state(&unit).unwrap_or_default().as_str(),
+                "active" | "activating" | "reloading"
+            );
+            if !recheck {
+                return Err(UnitLaunchError::Unavailable(format!(
+                    "REMOTE_RUNTIME_SPAWN_FAILED: systemd-run: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if is_live(root, host) {
+            return Ok(());
+        }
+        match unit_active_state(&unit)?.as_str() {
+            "failed" | "inactive" => {
+                return Err(UnitLaunchError::Failed(format!(
+                    "REMOTE_RUNTIME_EXITED: systemd unit {unit} is not running"
+                )))
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    Err(UnitLaunchError::Failed(format!(
+        "REMOTE_RUNTIME_TIMEOUT: helper daemon did not become ready via systemd unit {unit}"
+    )))
 }
 
 pub fn bridge(root: &Path, mut input: impl Read, mut output: impl Write) -> Result<(), String> {

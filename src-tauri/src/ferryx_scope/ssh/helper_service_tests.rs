@@ -144,3 +144,70 @@ fn ssh_process_survival_agent_state_survives_bridge_eof() {
         "Agent state server must remain alive after bridge EOF"
     );
 }
+
+#[test]
+fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
+    use std::ffi::OsString;
+
+    let env = vec![
+        (
+            OsString::from("FERRYX_HELPER_HYGIENE_SECS"),
+            OsString::from("7"),
+        ),
+        (OsString::from("PATH"), OsString::from("/usr/bin")),
+        (
+            OsString::from("SSH_CONNECTION"),
+            OsString::from("100.78.73.127 5 100.91.254.71 22"),
+        ),
+        (OsString::from("XDG_RUNTIME_DIR"), OsString::from("")),
+        (
+            OsString::from("BASH_FUNC_probe%%"),
+            OsString::from("() { :; }"),
+        ),
+    ];
+    let args = unit_launch_args(
+        std::path::Path::new("/home/u/.ferryx/bin/ferryx-remote-helper"),
+        std::path::Path::new("/home/u/.ferryx/helper/ssh-omarchy"),
+        "ssh-omarchy",
+        &env,
+    );
+    let text: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(text.contains(&"--setenv=FERRYX_HELPER_HYGIENE_SECS=7".to_string()));
+    assert!(text.contains(&"--setenv=PATH=/usr/bin".to_string()));
+    assert!(text.contains(&"--user".to_string()));
+    assert!(text.contains(&"--collect".to_string()));
+    assert!(!text
+        .iter()
+        .any(|arg| arg.starts_with("--setenv=SSH_CONNECTION=")));
+    assert!(!text
+        .iter()
+        .any(|arg| arg.starts_with("--setenv=XDG_RUNTIME_DIR=")));
+    assert!(!text.iter().any(|arg| arg.contains("BASH_FUNC_probe")));
+    assert_eq!(
+        &text[text.len() - 7..],
+        &[
+            "--",
+            "/home/u/.ferryx/bin/ferryx-remote-helper",
+            "daemon",
+            "--root",
+            "/home/u/.ferryx/helper/ssh-omarchy",
+            "--host-id",
+            "ssh-omarchy",
+        ]
+    );
+}
+
+#[test]
+fn ssh_helper_unit_name_is_deterministic_and_sanitized() {
+    assert_eq!(helper_unit_name("ssh-omarchy"), "ferryx-helper-ssh-omarchy");
+    assert_eq!(helper_unit_name("a/b:c d"), "ferryx-helper-a-b-c-d");
+    assert_eq!(helper_unit_name(""), "ferryx-helper-default");
+    assert_eq!(
+        helper_unit_name(&"x".repeat(200)),
+        format!("ferryx-helper-{}", "x".repeat(64))
+    );
+}
