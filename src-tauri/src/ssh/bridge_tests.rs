@@ -435,19 +435,30 @@ async fn ssh_bridge_independent_read_does_not_block_control() {
     // In a background task, issue a long-poll pty_read with 4000ms wait
     let client_for_read = client.clone();
     let target_for_read = target.clone();
+    let (reader_locked_tx, reader_locked_rx) = tokio::sync::oneshot::channel();
+    let (release_reader_tx, release_reader_rx) = tokio::sync::oneshot::channel();
     let read_handle = tokio::spawn(async move {
-        client_for_read
+        let mut reader = client_for_read.reader.lock().await;
+        reader_locked_tx.send(()).expect("notify reader ownership");
+        let result = reader
             .pty_read(&target_for_read, RemoteCursor(0), 4000)
-            .await
+            .await;
+        release_reader_rx.await.expect("release reader ownership");
+        result
     });
 
-    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(5), reader_locked_rx)
+        .await.expect("reader must acquire its connection")
+        .expect("reader ownership notification");
 
     let start = std::time::Instant::now();
-    let write_res = client
-        .pty_write(&target, b"hello-independent-channel\n")
-        .await;
+    let write_res = tokio::time::timeout(
+        Duration::from_millis(500),
+        client.pty_write(&target, b"hello-independent-channel\n"),
+    ).await;
     let elapsed = start.elapsed();
+    release_reader_tx.send(()).expect("release reader after write");
+    let write_res = write_res.expect("write must not wait for the reader connection");
 
     assert!(write_res.is_ok(), "write must succeed: {write_res:?}");
     assert!(
@@ -455,16 +466,29 @@ async fn ssh_bridge_independent_read_does_not_block_control() {
         "write took {elapsed:?}, should have completed without waiting for read"
     );
 
-    let read_res = read_handle
+    let mut read_res = read_handle
         .await
         .expect("join read task")
         .expect("pty_read");
-    let decoded = read_res.decoded_bytes();
-    let text = String::from_utf8_lossy(&decoded);
-    assert!(
-        text.contains("hello-independent-channel"),
-        "expected echo in read chunks, got: {text}"
-    );
+    // ConPTY can first request the terminal's cursor position instead of
+    // returning the input echo. Act as the terminal and consume the stream
+    // until the marker arrives, rather than assuming one read is one line.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut decoded = Vec::new();
+        loop {
+            let chunk = read_res.decoded_bytes();
+            decoded.extend_from_slice(&chunk);
+            if String::from_utf8_lossy(&decoded).contains("hello-independent-channel") {
+                break;
+            }
+            assert!(!read_res.exited, "PTY exited before echo: {read_res:?}");
+            if decoded.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                client.pty_write(&target, b"\x1b[1;1R").await.expect("cursor report");
+                decoded.clear();
+            }
+            read_res = client.pty_read(&target, read_res.cursor, 4000).await.expect("read echo");
+        }
+    }).await.expect("input echo must arrive within five seconds");
 
     // Cursor must be canonical u64
     assert!(read_res.cursor.as_u64() > 0);
