@@ -248,6 +248,30 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("bounds repeated stream recovery and permits an explicit retry", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+    const view = render(<NativeTerminalPane session={session("bounded-stream")} />);
+    await act(async () => {});
+    for (let index = 0; index < 7; index += 1) {
+      await act(async () => { ended!({ payload: { sessionId: "bounded-stream" } }); });
+    }
+    const attaches = () => lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach");
+    expect(attaches()).toHaveLength(6);
+    expect(view.getByRole("alert")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(view.getByRole("alert")); });
+    expect(attaches()).toHaveLength(7);
+    expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "bounded-stream"]);
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
   it("waits for the output recovery listener before starting the stream", async () => {
     const registration = deferred<() => void>();
     tauriListen.mockImplementation(async (event) =>
