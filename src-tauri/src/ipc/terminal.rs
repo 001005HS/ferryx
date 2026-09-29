@@ -2490,6 +2490,26 @@ pub async fn cmd_terminal_attach<R: Runtime>(
     session_id: String,
     after_sequence: Option<String>,
 ) -> Result<AttachTerminalResponse, IpcError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        terminal_attach(app, daemon_client, session_id.clone(), after_sequence),
+    )
+    .await
+    .map_err(|_| {
+        IpcError::new(
+            IpcErrorCode::Timeout,
+            "Terminal attachment timed out. Retry reconnecting.",
+        )
+        .with_details(serde_json::json!({ "sessionId": session_id, "phase": "attach" }))
+    })?
+}
+
+async fn terminal_attach<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+    after_sequence: Option<String>,
+) -> Result<AttachTerminalResponse, IpcError> {
     let after_seq = after_sequence
         .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
@@ -2969,6 +2989,58 @@ pub(crate) fn map_client_error(
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_attach_settles_when_daemon_never_answers_handshake() {
+        use tauri::Manager;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        // Given an isolated daemon endpoint which accepts but never responds.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("silent-attach");
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(not(unix))]
+        let listener = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            listener
+        };
+        let client = Arc::new(DaemonClient::new_with_socket(path));
+        let app = tauri::test::mock_builder()
+            .manage(client)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (observed, handshake) = tokio::sync::oneshot::channel();
+        let peer = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            observed.send(()).unwrap();
+            line.clear();
+            // Cancellation must release this connection, not send PTY Close.
+            assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+        };
+        let action = async {
+            // When the real IPC entry point attempts the reconnect attachment.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                cmd_terminal_attach(app.handle().clone(), app.state::<Arc<DaemonClient>>(),
+                    "qa-existing-session".into(), None),
+            ).await;
+            // Then the command itself must settle, not this test's safety bound.
+            assert!(result.is_ok(), "reconnect attach exceeded its bounded-error contract");
+            let error = result.unwrap().err().expect("attachment must fail");
+            assert_eq!(error.code, IpcErrorCode::Timeout);
+            assert_eq!(error.details.unwrap()["phase"], "attach");
+        };
+        let clock = async {
+            handshake.await.unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        };
+        tokio::join!(peer, action, clock);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
