@@ -3427,8 +3427,8 @@ function WorkspaceApp({
             onFocusPane={focusPane}
             searchLeafId={searchLeafId}
             onCloseSearch={handleCloseSearch}
-            onReconnectAgentSession={(sessionId) => {
-              void handleReconnectAgentSession(sessionId);
+            onReconnectAgentSession={async (sessionId) => {
+              await handleReconnectAgentSession(sessionId);
             }}
             onReconnectSshSession={handleReconnectSshSession}
             onOpenNewShell={(sessionId) => {

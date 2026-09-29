@@ -189,7 +189,9 @@ vi.mock("./lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  listenDagWatchStatus: vi.fn(() => Promise.resolve(() => undefined)),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
+  unwatchDagProject: vi.fn(async () => undefined),
   discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
   createWorktree: native.createWorktree,
@@ -377,6 +379,9 @@ vi.mock("./components/SettingsDialog", () => ({
       </div>
     ) : null,
 }));
+const reconnectWiring = vi.hoisted(() => ({
+  callback: null as ((sessionId: string) => Promise<void>) | null,
+}));
 vi.mock("./components/TerminalSplitView", () => {
   return {
     TerminalSplitView: ({
@@ -387,6 +392,7 @@ vi.mock("./components/TerminalSplitView", () => {
       onClosePane,
       onCloseTab,
       defaultAgentId,
+      onReconnectAgentSession,
     }: {
       searchLeafId?: string | null;
       agents?: Array<{ name: string; command: string; args: string }>;
@@ -395,7 +401,9 @@ vi.mock("./components/TerminalSplitView", () => {
       onClosePane?: (tabId: string, leafId: string) => void;
       onCloseTab?: (tabId: string) => void;
       defaultAgentId?: string | null;
+      onReconnectAgentSession: (sessionId: string) => Promise<void>;
     }) => {
+      reconnectWiring.callback = onReconnectAgentSession;
       return (
         <div
           data-testid="terminal-split-view"
@@ -929,6 +937,17 @@ describe("App project workspace flow", () => {
     };
     fireEvent.keyDown(window, { key: "2", metaKey: true });
     await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[1]));
+  });
+
+  it("returns reconnect failure to the pane instead of discarding its promise", async () => {
+    reconnectWiring.callback = null;
+    await act(async () => { render(<App />); });
+    expect(reconnectWiring.callback).toBeTypeOf("function");
+    await act(async () => {
+      await expect(reconnectWiring.callback!("missing-reconnect-session")).rejects.toMatchObject({
+        code: "AGENT_RESUME_INVALID",
+      });
+    });
   });
 
   it("routes the native Cmd+T menu accelerator through the normal new-terminal callback", async () => {
