@@ -1,7 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { AccountLoginPage } from "./AccountLoginPage";
 import * as accountSessionModule from "./accountSession";
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (err: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe("AccountLoginPage", () => {
   const relayUrl = "https://relay.example.com";
@@ -153,6 +170,74 @@ describe("AccountLoginPage", () => {
       expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyToken);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-000", "dave@example.com");
+    });
+  });
+
+  it("consumes magic link code exactly once under StrictMode and invokes latest onLoginSuccess across rerenders while consume promise is pending", async () => {
+    const hexCode = "7c8d9e0f1a2b3c4d5e6f708192a3b4c5";
+    delete (window as any).location;
+    window.location = {
+      ...originalLocation,
+      search: `?code=${hexCode}`,
+      hash: "",
+      pathname: "/login",
+    } as any;
+
+    let resolveConsume!: (value: { token: string; accountId: string; email: string }) => void;
+    const consumePromise = new Promise<{ token: string; accountId: string; email: string }>((res) => {
+      resolveConsume = res;
+    });
+
+    const resolveDeferred = deferred<string>();
+    vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockImplementation(() => resolveDeferred.promise);
+    const consumeSpy = vi.spyOn(accountSessionModule, "consumeLogin").mockImplementation(async () => consumePromise);
+
+    const onLoginSuccessInitial = vi.fn();
+    const onLoginSuccessUpdated = vi.fn();
+
+    const { rerender } = render(
+      <StrictMode>
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccessInitial}
+        />
+      </StrictMode>
+    );
+
+    // StrictMode runs effect twice synchronously or within microtask.
+    // Resolve origin so consumeLogin can be called.
+    await act(async () => {
+      resolveDeferred.resolve(relayUrl);
+    });
+
+    // Consume should only be initiated once despite StrictMode effect replay
+    expect(consumeSpy).toHaveBeenCalledTimes(1);
+    expect(consumeSpy).toHaveBeenCalledWith(relayUrl, hexCode);
+
+    // Rerender with new callback while consumeLogin promise is still pending
+    rerender(
+      <StrictMode>
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccessUpdated}
+        />
+      </StrictMode>
+    );
+
+    // Now resolve the pending consume promise
+    await act(async () => {
+      resolveConsume({
+        token: "jwt-session-token-strict",
+        accountId: "acc-strict",
+        email: "strict@example.com",
+      });
+    });
+
+    await waitFor(() => {
+      expect(consumeSpy).toHaveBeenCalledTimes(1);
+      expect(onLoginSuccessInitial).not.toHaveBeenCalled();
+      expect(onLoginSuccessUpdated).toHaveBeenCalledTimes(1);
+      expect(onLoginSuccessUpdated).toHaveBeenCalledWith("jwt-session-token-strict", "strict@example.com");
     });
   });
 
@@ -315,6 +400,55 @@ describe("AccountLoginPage", () => {
         await vi.advanceTimersByTimeAsync(10000);
       });
       expect(pollSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps account-code-input absent by default after requestLogin resolves pending and polling still logs in", async () => {
+      const loginHandle = "a".repeat(64);
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle });
+      const pollSpy = vi
+        .spyOn(accountSessionModule, "pollLogin")
+        .mockResolvedValueOnce({ status: "pending" })
+        .mockResolvedValueOnce({
+          status: "approved",
+          token: "tok-magic-auto",
+          email: "magic-user@example.com",
+        });
+      const storeSpy = vi
+        .spyOn(accountSessionModule, "storeAccountSessionToken")
+        .mockImplementation(() => {});
+      const onLoginSuccess = vi.fn();
+
+      render(
+        <AccountLoginPage
+          relayUrl={relayUrl}
+          onLoginSuccess={onLoginSuccess}
+        />
+      );
+
+      fireEvent.change(screen.getByTestId("account-email-input"), {
+        target: { value: "magic-user@example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+
+      // Default state: account-code-input must be absent (not misleadingly required by default)
+      expect(screen.queryByTestId("account-code-input")).toBeNull();
+
+      // Polling continues in background and automatically signs in
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(1);
+      expect(onLoginSuccess).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollSpy).toHaveBeenCalledTimes(2);
+      expect(storeSpy).toHaveBeenCalledWith("tok-magic-auto", relayUrl);
+      expect(onLoginSuccess).toHaveBeenCalledWith("tok-magic-auto", "magic-user@example.com");
     });
   });
 });

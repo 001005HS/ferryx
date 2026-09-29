@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import React from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { storeAccountSessionToken, clearStoredAccountSessionToken } from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
@@ -57,6 +56,22 @@ function rect(width: number, height: number): DOMRect {
   } as DOMRect;
 }
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (err: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("RemoteApp - Account Session Phone Flow", () => {
   beforeEach(() => {
     MockTestWebSocket.instances = [];
@@ -69,7 +84,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     clearStoredAccountSessionToken();
     localStorage.clear();
-    remoteHostStore.setActiveHost(null);
+    remoteHostStore.reset();
   });
 
   afterEach(() => {
@@ -79,10 +94,11 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     vi.unstubAllGlobals();
     clearStoredAccountSessionToken();
     localStorage.clear();
+    remoteHostStore.reset();
   });
 
-  it("renders account machine list when signed in, then opens terminal pane on connect without Add Project or directory picker", async () => {
-    storeAccountSessionToken("test-account-session-token-xyz");
+  it("renders top context selector with empty initial body after login, then opens terminal pane on selecting worktree", async () => {
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
 
     const sampleMachines = [
       {
@@ -99,7 +115,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       },
     ];
 
-    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
 
       if (url.endsWith("/api/account/v1/machines")) {
@@ -115,7 +131,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
               relayOrigin: window.location.origin,
               pairingToken: "pair-tok-secret",
               machineAttachPublicKey: "machine-noise-pub-key",
-              grantScope: "mirror",
+              grantScope: "machine",
               expiresAt: Date.now() + 600000,
             }),
             { status: 200 },
@@ -157,8 +173,12 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       onerror: null as any,
     };
 
+    let currentHostWorkspace = "ws-ferryx";
+    let currentHostSlug = "main";
+    let currentHostSessionId = "term-sess-77";
+
     const mockTunnelTransport = {
-      fetchLike: vi.fn().mockImplementation((path: string) => {
+      fetchLike: vi.fn().mockImplementation((path: string, init?: RequestInit) => {
         if (path.startsWith("/api/v1/pair/exchange")) {
           const body = {
             token: "tunnel-redeemed-device-bearer",
@@ -173,19 +193,49 @@ describe("RemoteApp - Account Session Phone Flow", () => {
           });
         }
 
+        if (path.startsWith("/api/v1/workspace/select")) {
+          if (init?.body && typeof init.body === "string") {
+            try {
+              const parsed = JSON.parse(init.body);
+              if (parsed.workspaceId) currentHostWorkspace = parsed.workspaceId;
+              if (parsed.worktreeSlug) currentHostSlug = parsed.worktreeSlug;
+            } catch {}
+          }
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify({ ok: true })),
+          });
+        }
+
         if (path.startsWith("/api/v1/workspace/state")) {
           const state = {
-            projects: [],
+            projects: [
+              {
+                workspaceId: "ws-ferryx",
+                repoRoot: "/Users/dev/ferryx",
+                worktrees: [
+                  { slug: "main", label: "main" },
+                ],
+              },
+            ],
             activeContext: {
-              workspaceId: "ws-ferryx",
-              sessionId: "term-sess-77",
+              workspaceId: currentHostWorkspace,
+              worktreeSlug: currentHostSlug,
+              worktreeLabel: currentHostSlug,
+              sessionId: currentHostSessionId,
+              activeTerminal: {
+                sessionId: currentHostSessionId,
+                title: "zsh",
+                running: true,
+              },
             },
             sessions: [
               {
-                sessionId: "term-sess-77",
+                sessionId: currentHostSessionId,
                 running: true,
                 title: "zsh",
-                workspaceId: "ws-ferryx",
+                workspaceId: currentHostWorkspace,
               },
             ],
           };
@@ -218,28 +268,772 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    await vi.waitFor(() => {
-      expect(screen.getByText("Account Machines")).toBeDefined();
-      expect(screen.getByText("Work MacBook Pro")).toBeDefined();
-    });
+    const topContextTrigger = await waitFor(() =>
+      screen.getByRole("button", { name: /Change workspace context/i })
+    );
+    expect(topContextTrigger).toBeDefined();
+    expect(topContextTrigger.getAttribute("aria-expanded")).toBe("false");
 
-    expect(screen.queryByText(/Add Project/i)).toBeNull();
-    expect(screen.queryByLabelText(/Add Project/i)).toBeNull();
-    expect(screen.queryByTestId("directory-picker")).toBeNull();
-    expect(screen.queryByText(/select directory|choose directory|browse directory/i)).toBeNull();
+    expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
+    expect(screen.queryByTestId("remote-terminal")).toBeNull();
+    expect(screen.queryByTestId("account-worktrees-container")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Worktrees" })).toBeNull();
 
-    const connectBtn = screen.getByTestId("connect-machine-mach-phone-1");
+    expect(
+      mockTunnelTransport.fetchLike.mock.calls.some(([path]) =>
+        path.includes("/api/v1/workspace/select"),
+      ),
+    ).toBe(false);
+
     act(() => {
-      fireEvent.click(connectBtn);
+      fireEvent.click(topContextTrigger);
+    });
+    expect(topContextTrigger.getAttribute("aria-expanded")).toBe("true");
+
+    const optionBtn = await waitFor(() =>
+      screen.getByRole("button", { name: /main/i })
+    );
+
+    act(() => {
+      fireEvent.click(optionBtn);
     });
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
+      expect(mockTunnelTransport.fetchLike).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"worktreeSlug":"main"'),
+        }),
+      );
+    });
+
+    await waitFor(() => {
       expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
     });
+  });
 
-    expect(screen.queryByText(/Add Project/i)).toBeNull();
-    expect(screen.queryByLabelText(/Add Project/i)).toBeNull();
-    expect(screen.queryByTestId("directory-picker")).toBeNull();
-    expect(screen.queryByText(/select directory|choose directory|browse directory/i)).toBeNull();
+  it("does not prematurely mount old terminal when chosen target is wsB while host state remains wsA", async () => {
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+
+    const sampleMachines = [
+      {
+        machineRecordId: "rec-mbp-1",
+        machineId: "mach-phone-1",
+        displayName: "Work MacBook Pro",
+        publicKey: "pub-key-1",
+        attachPublicKey: "attach-pub-1",
+        relayOrigin: window.location.origin,
+        platform: "macos",
+        online: true,
+        enrollmentEpoch: "1",
+        lastSeenAt: Date.now(),
+      },
+    ];
+
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
+      }
+      if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              grantId: "grant-test-1",
+              machineId: "mach-phone-1",
+              relayOrigin: window.location.origin,
+              pairingToken: "pair-tok-secret",
+              machineAttachPublicKey: "machine-noise-pub-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600000,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessionId: "sess-alloc-test-42" }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    const mockTerminalWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+    const mockEventWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+
+    let currentHostWorkspace = "wsA";
+    let currentHostSlug = "main";
+    let currentHostSessionId = "sess-old-wsA";
+
+    const selectPostDeferred = deferred<Response>();
+
+    const mockTunnelTransport = {
+      fetchLike: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/pair/exchange")) {
+          const body = {
+            token: "tunnel-redeemed-device-bearer",
+            device: { id: "dev-phone-1", name: "Phone" },
+            machineId: "mach-phone-1",
+            displayName: "Work MacBook Pro",
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(body)),
+          });
+        }
+
+        if (path.startsWith("/api/v1/workspace/select")) {
+          return selectPostDeferred.promise.then(async (res) => ({
+            status: res.status,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(await res.text()),
+          }));
+        }
+
+        if (path.startsWith("/api/v1/workspace/state")) {
+          const state = {
+            projects: [
+              {
+                workspaceId: "wsA",
+                repoRoot: "/srv/repoA",
+                worktrees: [{ slug: "main", label: "main" }],
+              },
+              {
+                workspaceId: "wsB",
+                repoRoot: "/srv/repoB",
+                worktrees: [{ slug: "feature-b", label: "feature-b" }],
+              },
+            ],
+            activeContext: {
+              workspaceId: currentHostWorkspace,
+              worktreeSlug: currentHostSlug,
+              worktreeLabel: currentHostSlug,
+              sessionId: currentHostSessionId,
+              activeTerminal: {
+                sessionId: currentHostSessionId,
+                title: "terminal",
+                running: true,
+              },
+            },
+            sessions: [
+              {
+                sessionId: currentHostSessionId,
+                running: true,
+                title: "terminal",
+                workspaceId: currentHostWorkspace,
+              },
+            ],
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(state)),
+          });
+        }
+
+        return Promise.resolve({ status: 404, headers: {}, body: new Uint8Array(0) });
+      }),
+      openWebSocket: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/terminal/")) return Promise.resolve(mockTerminalWs);
+        return Promise.resolve(mockEventWs);
+      }),
+      close: vi.fn(),
+    };
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: mockTunnelTransport as any,
+      close: vi.fn(),
+    });
+
+    render(<RemoteApp />);
+
+    const topContextTrigger = await waitFor(() =>
+      screen.getByRole("button", { name: /Change workspace context/i })
+    );
+
+    act(() => {
+      fireEvent.click(topContextTrigger);
+    });
+
+    const selectWsBBtn = await waitFor(() =>
+      screen.getByRole("button", { name: /feature-b/i })
+    );
+    fireEvent.click(selectWsBBtn);
+
+    await waitFor(() => {
+      expect(mockTunnelTransport.fetchLike).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.anything(),
+      );
+    });
+
+    expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
+
+    currentHostWorkspace = "wsB";
+    currentHostSlug = "feature-b";
+    currentHostSessionId = "sess-new-wsB";
+
+    await act(async () => {
+      selectPostDeferred.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+
+    act(() => {
+      mockEventWs.onmessage?.({
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: {
+            workspaceId: "wsB",
+            worktreeSlug: "feature-b",
+          },
+        }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
+    });
+  });
+
+  it("confirms the selection when the desktop event lands while the post-select state read is in flight", async () => {
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+
+    const sampleMachines = [
+      {
+        machineRecordId: "rec-mbp-1",
+        machineId: "mach-phone-1",
+        displayName: "Work MacBook Pro",
+        publicKey: "pub-key-1",
+        attachPublicKey: "attach-pub-1",
+        relayOrigin: window.location.origin,
+        platform: "macos",
+        online: true,
+        enrollmentEpoch: "1",
+        lastSeenAt: Date.now(),
+      },
+    ];
+
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
+      }
+      if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              grantId: "grant-test-1",
+              machineId: "mach-phone-1",
+              relayOrigin: window.location.origin,
+              pairingToken: "pair-tok-secret",
+              machineAttachPublicKey: "machine-noise-pub-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600000,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-alloc-test-42" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    const socket = () => ({
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    });
+    const mockTerminalWs = socket();
+    const mockEventWs = socket();
+
+    let hostWorkspace = "wsA";
+    let hostSlug = "main";
+    let hostSessionId = "sess-old-wsA";
+    let selectAccepted = false;
+    // The first state read issued after the select POST is held open so the selection
+    // event can arrive while it is in flight.
+    const heldStateRead = deferred<void>();
+    let heldStateReadStarted: (() => void) | null = null;
+    const heldStateReadIssued = new Promise<void>((resolve) => { heldStateReadStarted = resolve; });
+    let stateReadsAfterSelect = 0;
+    // The select response is held until the event socket is live, matching the desktop order.
+    const selectRelease = deferred<void>();
+
+    const stateBody = () => ({
+      projects: [
+        { workspaceId: "wsA", repoRoot: "/srv/repoA", worktrees: [{ slug: "main", label: "main" }] },
+        { workspaceId: "wsB", repoRoot: "/srv/repoB", worktrees: [{ slug: "feature-b", label: "feature-b" }] },
+      ],
+      activeContext: {
+        workspaceId: hostWorkspace,
+        worktreeSlug: hostSlug,
+        worktreeLabel: hostSlug,
+        sessionId: hostSessionId,
+        activeTerminal: { sessionId: hostSessionId, title: "terminal", running: true },
+      },
+      sessions: [{ sessionId: hostSessionId, running: true, title: "terminal", workspaceId: hostWorkspace }],
+    });
+    const ok = (body: unknown) => ({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: new TextEncoder().encode(JSON.stringify(body)),
+    });
+
+    const mockTunnelTransport = {
+      fetchLike: vi.fn().mockImplementation(async (path: string) => {
+        if (path.startsWith("/api/v1/pair/exchange")) {
+          return ok({
+            token: "tunnel-redeemed-device-bearer",
+            device: { id: "dev-phone-1", name: "Phone" },
+            machineId: "mach-phone-1",
+            displayName: "Work MacBook Pro",
+          });
+        }
+        if (path.startsWith("/api/v1/workspace/select")) {
+          await selectRelease.promise;
+          hostWorkspace = "wsB";
+          hostSlug = "feature-b";
+          hostSessionId = "sess-new-wsB";
+          selectAccepted = true;
+          return ok({ ok: true });
+        }
+        if (path.startsWith("/api/v1/workspace/state")) {
+          const body = stateBody();
+          if (selectAccepted && ++stateReadsAfterSelect === 1) {
+            heldStateReadStarted?.();
+            await heldStateRead.promise;
+          }
+          return ok(body);
+        }
+        return { status: 404, headers: {}, body: new Uint8Array(0) };
+      }),
+      openWebSocket: vi.fn().mockImplementation((path: string) =>
+        Promise.resolve(path.startsWith("/api/v1/terminal/") ? mockTerminalWs : mockEventWs)),
+      close: vi.fn(),
+    };
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: mockTunnelTransport as any,
+      close: vi.fn(),
+    });
+
+    render(<RemoteApp />);
+
+    const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
+    act(() => {
+      fireEvent.click(trigger);
+    });
+    fireEvent.click(await waitFor(() => screen.getByRole("button", { name: /feature-b/i })));
+
+    await waitFor(() => {
+      expect(mockEventWs.onmessage).toBeTypeOf("function");
+      expect(mockTunnelTransport.fetchLike.mock.calls.some(([path]) => path.startsWith("/api/v1/workspace/select"))).toBe(true);
+    });
+    await act(async () => {
+      selectRelease.resolve();
+    });
+    await heldStateReadIssued;
+    act(() => {
+      mockEventWs.onmessage?.({
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: { workspaceId: "wsB", worktreeSlug: "feature-b" },
+        }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      heldStateRead.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
+    });
+    expect(screen.getByLabelText("Current desktop context").textContent).toBe("wsB / feature-b");
+  });
+
+  it("displays error and allows retry without mounting old terminal if context selection POST fails", async () => {
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+
+    const sampleMachines = [
+      {
+        machineRecordId: "rec-mbp-1",
+        machineId: "mach-phone-1",
+        displayName: "Work MacBook Pro",
+        publicKey: "pub-key-1",
+        attachPublicKey: "attach-pub-1",
+        relayOrigin: window.location.origin,
+        platform: "macos",
+        online: true,
+        enrollmentEpoch: "1",
+        lastSeenAt: Date.now(),
+      },
+    ];
+
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
+      }
+      if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              grantId: "grant-test-1",
+              machineId: "mach-phone-1",
+              relayOrigin: window.location.origin,
+              pairingToken: "pair-tok-secret",
+              machineAttachPublicKey: "machine-noise-pub-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600000,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessionId: "sess-alloc-test-42" }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    const mockTerminalWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+    const mockEventWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+
+    const mockTunnelTransport = {
+      fetchLike: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/pair/exchange")) {
+          const body = {
+            token: "tunnel-redeemed-device-bearer",
+            device: { id: "dev-phone-1", name: "Phone" },
+            machineId: "mach-phone-1",
+            displayName: "Work MacBook Pro",
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(body)),
+          });
+        }
+
+        if (path.startsWith("/api/v1/workspace/select")) {
+          return Promise.resolve({
+            status: 500,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify({ error: "Context switch rejected" })),
+          });
+        }
+
+        if (path.startsWith("/api/v1/workspace/state")) {
+          const state = {
+            projects: [
+              {
+                workspaceId: "wsA",
+                repoRoot: "/srv/repoA",
+                worktrees: [{ slug: "main", label: "main" }],
+              },
+              {
+                workspaceId: "wsB",
+                repoRoot: "/srv/repoB",
+                worktrees: [{ slug: "feature-b", label: "feature-b" }],
+              },
+            ],
+            activeContext: {
+              workspaceId: "wsA",
+              worktreeSlug: "main",
+              worktreeLabel: "main",
+              sessionId: "sess-old-wsA",
+            },
+            sessions: [
+              {
+                sessionId: "sess-old-wsA",
+                running: true,
+                title: "terminal",
+                workspaceId: "wsA",
+              },
+            ],
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(state)),
+          });
+        }
+
+        return Promise.resolve({ status: 404, headers: {}, body: new Uint8Array(0) });
+      }),
+      openWebSocket: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/terminal/")) return Promise.resolve(mockTerminalWs);
+        return Promise.resolve(mockEventWs);
+      }),
+      close: vi.fn(),
+    };
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: mockTunnelTransport as any,
+      close: vi.fn(),
+    });
+
+    render(<RemoteApp />);
+
+    const topContextTrigger = await waitFor(() =>
+      screen.getByRole("button", { name: /Change workspace context/i })
+    );
+
+    act(() => {
+      fireEvent.click(topContextTrigger);
+    });
+
+    const selectWsBBtn = await waitFor(() =>
+      screen.getByRole("button", { name: /feature-b/i })
+    );
+    fireEvent.click(selectWsBBtn);
+
+    await waitFor(() => {
+      const alert = screen.getByRole("alert");
+      expect(alert).toBeDefined();
+      expect(alert.textContent).toMatch(/Selection failed \(500\)|Selection request failed/i);
+    });
+
+    expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
+  });
+
+  it("releases pending selection and shows retry/back error when desktop confirmation times out", async () => {
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+
+    const sampleMachines = [
+      {
+        machineRecordId: "rec-mbp-1",
+        machineId: "mach-phone-1",
+        displayName: "Work MacBook Pro",
+        publicKey: "pub-key-1",
+        attachPublicKey: "attach-pub-1",
+        relayOrigin: window.location.origin,
+        platform: "macos",
+        online: true,
+        enrollmentEpoch: "1",
+        lastSeenAt: Date.now(),
+      },
+    ];
+
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
+      }
+      if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              grantId: "grant-test-1",
+              machineId: "mach-phone-1",
+              relayOrigin: window.location.origin,
+              pairingToken: "pair-tok-secret",
+              machineAttachPublicKey: "machine-noise-pub-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600000,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessionId: "sess-alloc-test-42" }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    const mockTerminalWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+    const mockEventWs = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null as any,
+      onclose: null as any,
+      onmessage: null as any,
+      onerror: null as any,
+    };
+
+    const postSelectReceived = deferred<void>();
+
+    const mockTunnelTransport = {
+      fetchLike: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/pair/exchange")) {
+          const body = {
+            token: "tunnel-redeemed-device-bearer",
+            device: { id: "dev-phone-1", name: "Phone" },
+            machineId: "mach-phone-1",
+            displayName: "Work MacBook Pro",
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(body)),
+          });
+        }
+
+        if (path.startsWith("/api/v1/workspace/select")) {
+          postSelectReceived.resolve();
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify({ ok: true })),
+          });
+        }
+
+        if (path.startsWith("/api/v1/workspace/state")) {
+          const state = {
+            projects: [
+              {
+                workspaceId: "wsA",
+                repoRoot: "/srv/repoA",
+                worktrees: [{ slug: "main", label: "main" }],
+              },
+              {
+                workspaceId: "wsB",
+                repoRoot: "/srv/repoB",
+                worktrees: [{ slug: "feature-b", label: "feature-b" }],
+              },
+            ],
+            activeContext: {
+              workspaceId: "wsA",
+              worktreeSlug: "main",
+              worktreeLabel: "main",
+              sessionId: "sess-old-wsA",
+            },
+            sessions: [
+              {
+                sessionId: "sess-old-wsA",
+                running: true,
+                title: "terminal",
+                workspaceId: "wsA",
+              },
+            ],
+          };
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify(state)),
+          });
+        }
+
+        return Promise.resolve({ status: 404, headers: {}, body: new Uint8Array(0) });
+      }),
+      openWebSocket: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/terminal/")) return Promise.resolve(mockTerminalWs);
+        return Promise.resolve(mockEventWs);
+      }),
+      close: vi.fn(),
+    };
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: mockTunnelTransport as any,
+      close: vi.fn(),
+    });
+
+    render(<RemoteApp />);
+
+    const topContextTrigger = await waitFor(() =>
+      screen.getByRole("button", { name: /Change workspace context/i })
+    );
+
+    act(() => {
+      fireEvent.click(topContextTrigger);
+    });
+
+    const selectWsBBtn = await waitFor(() =>
+      screen.getByRole("button", { name: /feature-b/i })
+    );
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(selectWsBBtn);
+      });
+
+      await postSelectReceived.promise;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+
+      const alert = screen.getByRole("alert");
+      expect(alert).toBeDefined();
+      expect(alert.textContent).toMatch(/did not confirm|retry/i);
+      expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

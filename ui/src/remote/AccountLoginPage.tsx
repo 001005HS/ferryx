@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { MailCheck } from "lucide-react";
 import {
   AccountSessionError,
   consumeLogin,
@@ -22,7 +23,6 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   onLoginSuccess,
 }) => {
   const [email, setEmail] = useState("");
-  const [tokenInput, setTokenInput] = useState("");
   const [codeRequested, setCodeRequested] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +30,11 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isMountedRef = useRef(true);
   const onLoginSuccessRef = useRef(onLoginSuccess);
-  onLoginSuccessRef.current = onLoginSuccess;
+  const consumedCodesRef = useRef<Set<string>>(new Set());
+
+  useLayoutEffect(() => {
+    onLoginSuccessRef.current = onLoginSuccess;
+  }, [onLoginSuccess]);
 
   const stopPolling = () => {
     if (pollTimerRef.current !== null) {
@@ -124,8 +128,11 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     }
 
     if (code && code.trim()) {
-      stopPolling();
       const trimmedCode = code.trim();
+      if (consumedCodesRef.current.has(trimmedCode)) return;
+      consumedCodesRef.current.add(trimmedCode);
+
+      stopPolling();
       setLoading(true);
       setError(null);
       // The account API is not necessarily on the page origin (the desktop app
@@ -138,7 +145,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
             window.history.replaceState(null, "", window.location.pathname);
           }
           window.location.hash = "";
-          onLoginSuccess(res.token, res.email);
+          onLoginSuccessRef.current(res.token, res.email);
         })
         .catch((err) => {
           setError(err instanceof Error ? err.message : "Failed to consume login token");
@@ -151,7 +158,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
           setLoading(false);
         });
     }
-  }, [onLoginSuccess, relayUrl]);
+  }, [relayUrl]);
 
   const handleRequestLink = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,127 +185,107 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     }
   };
 
-  const handleConsumeCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!tokenInput.trim() || loading) return;
-
-    setLoading(true);
-    setError(null);
-    try {
-      const origin = await resolveAccountOrigin(relayUrl);
-      const res = await consumeLogin(origin, tokenInput.trim());
-      stopPolling();
-      storeAccountSessionToken(res.token, origin);
-      onLoginSuccess(res.token, res.email);
-    } catch (err: unknown) {
-      if (err instanceof AccountSessionError) {
-        setError(err.message);
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Invalid or expired login code");
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
-    <div className="flex flex-col items-center justify-center min-h-[80vh] p-4 text-foreground">
-      <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl space-y-5">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight text-foreground">
-            Sign In to Ferryx
-          </h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Access and control your remote machines securely over the encrypted tunnel.
-          </p>
-        </div>
+    <div className="grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground">
+      {/* Central balanced region: brand lockup and login card */}
+      <main className="flex items-center justify-center py-6 sm:py-8">
+        <div className="w-full max-w-sm space-y-6">
+          <div className="bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6">
+            {/* Composed brand lockup: 64px actual app icon above heading */}
+            <div className="flex flex-col items-center text-center space-y-3">
+              <img
+                src="/icon-192.png"
+                alt="Ferryx"
+                width={64}
+                height={64}
+                className="size-16 rounded-2xl object-contain shadow-md"
+              />
+              <div>
+                <h1 className="text-[28px] font-semibold tracking-tight text-foreground leading-tight">
+                  Sign In to Ferryx
+                </h1>
+                <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
+                  Access and control your remote machines securely over the encrypted tunnel.
+                </p>
+              </div>
+            </div>
 
-        {error && (
-          <div
-            role="alert"
-            data-testid="account-login-error"
-            className="p-3 text-xs bg-destructive/10 border border-destructive/20 text-destructive rounded-md"
-          >
-            {error}
+            {error && (
+              <div
+                role="alert"
+                data-testid="account-login-error"
+                className="p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"
+              >
+                {error}
+              </div>
+            )}
+
+            {!codeRequested ? (
+              <form onSubmit={handleRequestLink} className="space-y-5">
+                <div className="space-y-2">
+                  <label
+                    htmlFor="account-email-input"
+                    className="block text-xs font-medium text-foreground tracking-wide"
+                  >
+                    Email Address
+                  </label>
+                  <input
+                    id="account-email-input"
+                    data-testid="account-email-input"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="name@example.com"
+                    disabled={loading}
+                    className="w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  data-testid="request-magic-link-btn"
+                  disabled={loading || !email.trim()}
+                  className="w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"
+                >
+                  {loading ? "Sending link..." : "Send Magic Link"}
+                </button>
+              </form>
+            ) : (
+              <div data-testid="magic-link-waiting" role="status" className="space-y-5 pt-1">
+                <div className="flex items-start gap-3 text-left">
+                  <MailCheck className="size-5 text-muted-foreground shrink-0 mt-0.5" aria-hidden="true" />
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    A login link was sent to <strong className="text-foreground font-medium break-all">{email}</strong>. This page will sign in automatically once the link is opened.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopPolling();
+                    setCodeRequested(false);
+                    setError(null);
+                  }}
+                  className="w-full h-10 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors rounded-lg flex items-center justify-center focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Use a different email
+                </button>
+              </div>
+            )}
           </div>
-        )}
+        </div>
+      </main>
 
-        {!codeRequested ? (
-          <form onSubmit={handleRequestLink} className="space-y-4">
-            <div className="space-y-1.5">
-              <label htmlFor="account-email-input" className="text-xs font-medium text-foreground">
-                Email Address
-              </label>
-              <input
-                id="account-email-input"
-                data-testid="account-email-input"
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
-                disabled={loading}
-                className="w-full px-3 py-2 text-sm bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-            </div>
-
-            <button
-              type="submit"
-              data-testid="request-magic-link-btn"
-              disabled={loading || !email.trim()}
-              className="w-full py-2 px-4 bg-primary text-primary-foreground text-sm font-medium rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
-            >
-              {loading ? "Sending link..." : "Send Magic Link"}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleConsumeCode} className="space-y-4">
-            <p className="text-xs text-muted-foreground">
-              A login link was sent to <strong className="text-foreground">{email}</strong>. This page will sign in automatically once the link is opened, or you can enter the code from your email below:
-            </p>
-            <div className="space-y-1.5">
-              <label htmlFor="account-code-input" className="text-xs font-medium text-foreground">
-                Login Code
-              </label>
-              <input
-                id="account-code-input"
-                data-testid="account-code-input"
-                type="text"
-                required
-                value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value)}
-                placeholder="Paste the code from your email"
-                disabled={loading}
-                className="w-full px-3 py-2 text-sm bg-background border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-              />
-            </div>
-
-            <button
-              type="submit"
-              data-testid="consume-login-code-btn"
-              disabled={loading || !tokenInput.trim()}
-              className="w-full py-2 px-4 bg-primary text-primary-foreground text-sm font-medium rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
-            >
-              {loading ? "Verifying..." : "Sign In"}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                stopPolling();
-                setCodeRequested(false);
-                setTokenInput("");
-                setError(null);
-              }}
-              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Use a different email
-            </button>
-          </form>
-        )}
-      </div>
+      {/* Quiet footer anchor completing the cover pattern balance */}
+      <footer className="flex items-center justify-center pb-2 sm:pb-4">
+        <p className="text-xs text-muted-foreground tracking-wide">
+          Ferryx Remote Access
+        </p>
+      </footer>
     </div>
   );
 };

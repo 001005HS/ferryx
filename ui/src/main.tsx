@@ -16,6 +16,11 @@ document.documentElement.classList.toggle("platform-macos", isMacShortcutPlatfor
 installSettingsRuntimeBridge();
 applyCachedTerminalBackground();
 
+if (import.meta.env.DEV && import.meta.env.VITE_DISABLE_REACT_DEVTOOLS !== "1") {
+  void import("react-grab");
+  void import("react-scan");
+}
+
 const isTauriApp = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
 // Build identity is exposed for support: a stale phone bundle is then visible on the device itself.
 document.documentElement.dataset.ferryxBuild = BUILD_STAMP;

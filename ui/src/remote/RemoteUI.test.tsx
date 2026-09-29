@@ -6,6 +6,9 @@ import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp, RemoteHostConnection } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
+import { remoteHostStore } from "../state/remoteHostStore";
+import { clearRemoteAuthToken, setRemoteAuthToken } from "../lib/remoteClient";
+import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -2353,5 +2356,135 @@ describe("Remote UI Components", () => {
         "session-tests",
       );
     });
+  });
+
+  it("prioritizes account magic-link consumption at /login?code=... over saved active host, device token, and stored account token", async () => {
+    const pageOrigin = window.location.origin;
+    const savedHostOrigin = "https://saved-machine.example.com";
+    const savedHostId = "https://saved-machine.example.com/host/m-123";
+
+    // Seed saved remote host store with an active host and device token on a distinct origin
+    remoteHostStore.reset();
+    remoteHostStore.upsertHost({
+      hostId: savedHostId,
+      name: "Saved Remote Machine",
+      address: savedHostOrigin,
+      relayOrigin: savedHostOrigin,
+      machineId: "m-123",
+      transport: "relay",
+      authStatus: "paired",
+      online: true,
+      deviceToken: "saved-device-token-abc",
+    });
+    remoteHostStore.setActiveHost(savedHostId);
+
+    // Seed device token and account token via storage helpers
+    setRemoteAuthToken("saved-device-token-abc", savedHostId);
+    storeAccountSessionToken("existing-account-token", pageOrigin);
+
+    // Setup URL navigation to /login?code=<hex>
+    const magicCode = "e1f2a3b4c5d6e7f8091a2b3c4d5e6f70";
+    const originalLocation = window.location;
+    delete (window as any).location;
+    window.location = {
+      ...originalLocation,
+      pathname: "/login",
+      search: `?code=${magicCode}`,
+      hash: "",
+    } as any;
+
+    const consumeDeferred = deferred<Response>();
+    const interceptedRequests: Array<{ url: string; method?: string; body?: any }> = [];
+
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      let body: any = null;
+      if (init?.body && typeof init.body === "string") {
+        try {
+          body = JSON.parse(init.body);
+        } catch {
+          body = init.body;
+        }
+      }
+      interceptedRequests.push({ url, method: init?.method, body });
+
+      if (url.includes("/api/account/v1/login/consume")) {
+        return consumeDeferred.promise;
+      }
+      if (url.includes("/api/account/v1/machines")) {
+        return jsonResponse([]);
+      }
+      if (url.includes("/api/v1/workspace/state")) {
+        return jsonResponse(focusedState);
+      }
+      return jsonResponse({});
+    });
+
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    try {
+      render(<RemoteApp />);
+
+      // RemoteApp must prioritize /login?code=... at page origin and mount AccountLoginPage
+      // while consume promise is pending:
+      // 1. AccountLoginPage sign-in surface is rendered, NOT terminal or device session
+      expect(screen.queryByTestId("remote-terminal")).toBeNull();
+      expect(screen.getByRole("heading", { name: /sign in to ferryx/i })).not.toBeNull();
+
+      // 2. Consume request is sent to page origin with intercepted code
+      await waitFor(() => {
+        const consumeReq = interceptedRequests.find((r) =>
+          r.url.includes("/api/account/v1/login/consume")
+        );
+        expect(consumeReq).toBeDefined();
+        expect(consumeReq?.url).toContain(pageOrigin);
+        expect(consumeReq?.body).toMatchObject({ code: magicCode });
+      });
+
+      // 3. No old-host workspace state request was issued while prioritizing magic-link consume
+      const stateReq = interceptedRequests.find((r) => r.url.includes("/api/v1/workspace/state"));
+      expect(stateReq).toBeUndefined();
+
+      // 4. Deferred consume avoids premature terminal transition while still pending
+      expect(screen.queryByTestId("remote-terminal")).toBeNull();
+
+      // 5. Complete consumption: resolves token and transitions to AccountMachinesPage
+      // without jumping back to saved host or permanently overriding host switching
+      await act(async () => {
+        consumeDeferred.resolve(
+          jsonResponse({
+            token: "jwt-session-token-new",
+            accountId: "acc-new",
+            email: "new-user@example.com",
+          })
+        );
+      });
+
+      // Verify top workspace context trigger is present and magic link override is released
+      expect(
+        await screen.findByRole("button", { name: /change workspace context/i })
+      ).not.toBeNull();
+
+      // 6. User switches to saved host: must now issue workspace state request to saved origin
+      act(() => {
+        remoteHostStore.setActiveHost(savedHostId);
+      });
+
+      await waitFor(() => {
+        const savedStateReq = interceptedRequests.find(
+          (r) => r.url.includes("/api/v1/workspace/state") && r.url.startsWith(savedHostOrigin)
+        );
+        expect(savedStateReq).toBeDefined();
+      });
+    } finally {
+      remoteHostStore.reset();
+      clearStoredAccountSessionToken();
+      clearRemoteAuthToken(savedHostId);
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
   });
 });

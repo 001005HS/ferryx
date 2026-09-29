@@ -283,3 +283,68 @@ Added for the first-run Welcome onboarding modal (`ui/src/components/onboarding/
 
 - **Settings (`PermissionsSection`)**: the onboarding shortcut is a `SettingRow` (label + description + `h-7 text-[11px]` secondary control), not a floating ghost button.
 
+## 10. Remote Account Login Surface
+
+Added for web/mobile remote authentication (`ui/src/remote/AccountLoginPage.tsx`).
+
+### Design Contract & Pattern Lineage
+- **Layout Pattern**: Adopts the StyleGallery `cover` viewport-shell pattern (`https://raw.githubusercontent.com/changeroa/StyleGallery/main/patterns/viewport-shell/cover.md` via `every-layout.dev`).
+- **Spatial Structure**: The root viewport shell uses `grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground`.
+  - Main: Centered `w-full max-w-sm` container hosting the unified brand lockup and authentication card without artificial scroll traps.
+  - Footer: Quiet bottom metadata anchor (`text-xs text-muted-foreground`) providing authentic application identification without monospace costume or arbitrary opacity filters.
+- **Scroll Ownership**: Strict zero internal scroll container (`overflow-visible` on card; document root owns all natural viewport overflow). No nested scrolling or height-capped containers (`min-h-dvh` instead of fixed viewport clamps).
+
+### Brand Lockup & Visual Anatomy
+- **Unified Lockup Placement**: The 64px app icon sits directly inside the central main column above the heading, forming an integrated brand unit with the card rather than floating disconnected at the top of the viewport.
+- **App Logo**: Actual Ferryx app icon asset `/icon-192.png` rendered with explicit `width={64} height={64}` (`size-16 rounded-2xl shadow-lg`) for crisp multi-DPI display.
+- **Brand Typography**:
+  - Heading: Strong `text-[28px] font-semibold tracking-tight text-foreground leading-tight` using standard copy `Sign In to Ferryx` (preserving contract and avoiding prose-pinned test breakages).
+  - Subheading/Description: Calm `text-sm text-muted-foreground leading-relaxed mt-2`.
+- **Card Container**: `rounded-2xl border border-border bg-card p-6 sm:p-8 shadow-xl space-y-6`.
+  - Restrained tonal depth: charcoal dark palette with clean solid card background (`bg-card`), strictly avoiding unnecessary `backdrop-blur` on solid backgrounds, glowing halos, or decorative clutter.
+
+### Controls & Input Ergonomics
+- **Touch Target & Font Sizing**: Spacious `h-11` (44px) inputs and primary actions. Inputs explicitly use `text-base` (16px) to eliminate iOS Safari viewport auto-zoom on focus while remaining visually compact via controlled vertical padding.
+- **Input Attributes & Ergonomics**: Form field carries `autoComplete="email"`, `autoCapitalize="none"`, and `spellCheck={false}` for mobile and desktop browser ergonomics.
+- **Placeholder Contrast**: `placeholder:text-muted-foreground` without opacity division (`/60`), maintaining clean readability and WCAG AA contrast.
+- **Focus Rings**: Standard visible focus rings on all interactive elements: `focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none` on inputs and buttons.
+- **Interactive Feedback**:
+  - Primary button: `bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:pointer-events-none`.
+  - Input field: `bg-background border border-input text-foreground transition-colors focus:border-border`.
+
+### State Handling Discipline
+- **Error State**:
+  - Per frontend design discipline and skill directives, errors must NEVER use colored borders (`border-destructive` is forbidden).
+  - Clean calm callout: `p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg space-y-1` without tinted borders, referencing `role="alert"` and preserving `data-testid="account-login-error"`.
+- **Magic Link Waiting State**:
+  - Clean, unnested status presentation without decorative nested bordered boxes or pulsating animations.
+  - Features the static Lucide `MailCheck` icon (`size-5 text-muted-foreground shrink-0`) paired with clear informational copy.
+  - Email highlight: `<strong className="font-medium text-foreground break-all">{email}</strong>`.
+  - Secondary reset action: `h-10 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors rounded-lg flex items-center justify-center focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none` to change target email.
+
+## 11. Remote Account Direct Worktree Selection Architecture
+
+Updated for post-magic-link unified top picker selection (`ui/src/remote/useAccountWorktrees.ts`, `ui/src/remote/RemoteApp.tsx`).
+
+### Design Contract & Architecture
+- **Elimination of Intermediate Machine and Selection Screens**: After magic-link authentication, users are not forced into any separate intermediate page (no machine connect screen and no standalone centered worktrees card list).
+- **Direct Fallthrough to Main Remote Shell**:
+  - Authenticated account sessions fall directly through to the common `RemoteApp` shell.
+  - The content area is initially empty (no premature terminal, chat messages, or browser view mounted).
+  - The existing top header trigger (`aria-label="Change workspace context"`) is present in its collapsed state, displaying the default context text.
+- **Top Picker Inventory Integration (`RemoteWorkspaceMirror`)**:
+  - Enrolled online machines are discovered in the background via `useAccountWorktrees`.
+  - Machine inventories are loaded over read-only tunnels (`GET /api/v1/workspace/state` on declared `projects[].worktrees`), strictly excluding synthetic fallback context options to prevent phantom "default worktree" entries.
+  - Cross-machine worktrees populate the existing dropdown options grouped by `<MachineName> / <WorkspaceId>` to retain distinct machine identity even when workspaces share identical names. The option keeps the raw desktop `workspaceId`; machine identity travels in a separate `machineId` used for grouping, row keys, active-row matching, and selection.
+  - Inventory loading, offline, and per-machine error/retry rows render only inside the opened picker; before a choice the body is blank and the header shows only the collapsed trigger.
+- **Explicit User Selection & Context Gate**:
+  - The client NEVER issues `POST /api/v1/workspace/select` or manipulates desktop focus during discovery.
+  - When the user opens the top picker and explicitly clicks an option:
+    1. The target machine's connection and token are committed to `RemoteApp`.
+    2. All unselected exploratory tunnels are cleanly closed.
+    3. The selection request is sent to the daemon over the target tunnel.
+    4. Upon confirmation matching the target workspace and worktree slug, the gate opens and the active surface mounts.
+  - Subsequent cross-machine switches from the top picker reuse this same connection acquisition and tunnel lifecycle discipline.
+- **Failure Isolation & Non-blocking Degraded States**:
+  - Offline machines and partial host discovery failures are scoped to the picker options, without failing online machines or blocking the UI shell.
+  - Inflight selection failures provide explicit "Retry Selection" and "Back to Worktrees" recovery actions without leaving the interface stalled.

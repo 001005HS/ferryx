@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
@@ -24,16 +24,28 @@ import {
   type RemoteContextOption,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
-import { RemoteTerminal } from "./RemoteTerminal";
 import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration, capRetainedMessages } from "./agentConversation";
-import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
-import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
 import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
 import type { WebSocketLike } from "./RemoteTerminal";
 import { AccountLoginPage } from "./AccountLoginPage";
-import { AccountMachinesPage } from "./AccountMachinesPage";
+import {
+  useAccountWorktrees,
+  type AccountWorktreeOption,
+} from "./useAccountWorktrees";
+
+const RemoteTerminal = lazy(() =>
+  import("./RemoteTerminal").then((m) => ({ default: m.RemoteTerminal }))
+);
+
+const RemoteBrowserWorkspace = lazy(() =>
+  import("./RemoteBrowserWorkspace").then((m) => ({ default: m.RemoteBrowserWorkspace }))
+);
+
+const MobileChatWorkspace = lazy(() =>
+  import("./chat/MobileChatWorkspace").then((m) => ({ default: m.MobileChatWorkspace }))
+);
 import {
   getStoredAccountSessionToken,
   clearStoredAccountSessionToken,
@@ -290,24 +302,59 @@ function relayEndpoint(url: string): CandidateEndpoint {
   return { type: "relay", url, priority: CANDIDATE_PRIORITY.relay };
 }
 
+function hasMagicLinkCode(): boolean {
+  if (typeof window === "undefined") return false;
+  const parseCode = (searchOrHash: string): string | null => {
+    if (!searchOrHash) return null;
+    const str = searchOrHash.startsWith("#") || searchOrHash.startsWith("?") ? searchOrHash.slice(1) : searchOrHash;
+    const params = new URLSearchParams(str);
+    const code = params.get("code") ?? params.get("login") ?? params.get("account_token");
+    return code && code.trim().length > 0 ? code.trim() : null;
+  };
+
+  return Boolean(parseCode(window.location.hash) || parseCode(window.location.search));
+}
+
 export const RemoteApp: React.FC = () => {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const [pairingHash, setPairingHash] = useState(window.location.hash);
+  const [magicLinkOverridden, setMagicLinkOverridden] = useState(() => hasMagicLinkCode());
   useEffect(() => {
     const onHashChange = () => setPairingHash(window.location.hash);
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
   const pairingRequested = /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(pairingHash);
-  const host = pairingRequested ? null : selectActiveHost(state);
-  const hostId = (pairingRequested ? null : state.activeHostId) ?? `local:${window.location.origin}`;
+  const bypassSavedHost = pairingRequested || magicLinkOverridden;
+  const host = bypassSavedHost ? null : selectActiveHost(state);
+  const hostId = (bypassSavedHost ? null : state.activeHostId) ?? `local:${window.location.origin}`;
   const address = host?.address ?? window.location.origin;
   const relayUrl = new URL(address.includes("://") ? address : `http://${address}`).origin;
-  return <RemoteHostConnection key={`${hostId}:${relayUrl}:${pairingRequested ? pairingHash : ""}`} hostId={hostId} relayUrl={relayUrl} readUrlHints={pairingRequested || state.activeHostId === null} />;
+  return (
+    <RemoteHostConnection
+      key={`${hostId}:${relayUrl}:${pairingRequested ? pairingHash : ""}`}
+      hostId={hostId}
+      relayUrl={relayUrl}
+      readUrlHints={pairingRequested || state.activeHostId === null || magicLinkOverridden}
+      initialMagicLinkRequested={magicLinkOverridden}
+      onMagicLinkConsumed={() => {
+        remoteHostStore.setActiveHost(null);
+        setMagicLinkOverridden(false);
+      }}
+    />
+  );
 };
 
-export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
+export const RemoteHostConnection: React.FC<{
+  hostId: string;
+  relayUrl: string;
+  readUrlHints: boolean;
+  initialMagicLinkRequested?: boolean;
+  onMagicLinkConsumed?: () => void;
+}> = ({ hostId, relayUrl, readUrlHints, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
+  const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
+    if (initialMagicLinkRequested) return null;
     if (readUrlHints && /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(window.location.hash)) return null;
     const storedHost = remoteHostStore.getState().hosts[hostId];
     const scoped = storedHost?.deviceToken ?? getRemoteAuthToken(hostId);
@@ -375,15 +422,68 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const selectionRequestAcceptedRef = useRef(false);
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
+  const confirmationRequeuedRef = useRef(false);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const assistantTurnStartedAtRef = useRef<number | null>(null);
   const lastAgentActivityRef = useRef<string | null>(null);
 
+  const [initialAccountTarget, setInitialAccountTarget] = useState<{
+    machineId: string;
+    workspaceId: string;
+    worktreeSlug: string | null;
+    worktreeLabel: string | null;
+  } | null>(null);
+  // Read by selection callbacks so their identities (and the event socket that depends
+  // on them) do not churn every time the account target changes.
+  const initialAccountTargetRef = useRef(initialAccountTarget);
+  initialAccountTargetRef.current = initialAccountTarget;
+
   const [accountSessionToken, setAccountSessionToken] = useState<string | null>(
-    () => getStoredAccountSessionToken(relayUrl),
+    () => (initialMagicLinkRequested ? null : getStoredAccountSessionToken(relayUrl)),
   );
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
+  // The transferred tunnel is owned here: close it when it is replaced or on unmount.
+  // AccountConnection.close is idempotent, so explicit closes elsewhere are safe.
+  useEffect(() => {
+    if (!activeTunnelConnection) return;
+    return () => activeTunnelConnection.close();
+  }, [activeTunnelConnection]);
+
+  const disconnect = useCallback(() => {
+    if (activeTunnelConnection) {
+      activeTunnelConnection.close();
+      setActiveTunnelConnection(null);
+    }
+    setInitialAccountTarget(null);
+    clearRemoteAuthToken(hostId);
+    const host = remoteHostStore.getState().hosts[hostId];
+    if (host) remoteHostStore.upsertHost({ ...host, deviceToken: null, authStatus: "unpaired" });
+    setToken(null);
+    setModel(EMPTY_MODEL);
+    setPending(null);
+    setOptimisticSessionId(null);
+    optimisticSocketSessionIdRef.current = null;
+    optimisticSocketClosedRef.current = false;
+    pendingSelectionRef.current = null;
+    selectionRequestAcceptedRef.current = false;
+    selectionEventReceivedRef.current = false;
+    confirmationInFlightRef.current = false;
+    workspaceRefreshVersionRef.current += 1;
+  }, [activeTunnelConnection, hostId]);
+
+  const handleLogout = useCallback(() => {
+    clearStoredAccountSessionToken();
+    setAccountSessionToken(null);
+    disconnect();
+  }, [disconnect]);
+
+  const accountDiscovery = useAccountWorktrees(
+    relayUrl,
+    accountSessionToken,
+    Boolean(accountSessionToken),
+    handleLogout,
+  );
 
   const sessionEpochsRef = useRef<Map<string, string>>(new Map());
   const [sessionEpochs, setSessionEpochs] = useState<Record<string, string>>({});
@@ -438,33 +538,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
   const terminalSocketRef = useRef<WebSocketLike | WebSocket | null>(null);
   const terminalSocketSessionIdRef = useRef<string | null>(null);
-
-  const disconnect = useCallback(() => {
-    if (activeTunnelConnection) {
-      activeTunnelConnection.close();
-      setActiveTunnelConnection(null);
-    }
-    clearRemoteAuthToken(hostId);
-    const host = remoteHostStore.getState().hosts[hostId];
-    if (host) remoteHostStore.upsertHost({ ...host, deviceToken: null, authStatus: "unpaired" });
-    setToken(null);
-    setModel(EMPTY_MODEL);
-    setPending(null);
-    setOptimisticSessionId(null);
-    optimisticSocketSessionIdRef.current = null;
-    optimisticSocketClosedRef.current = false;
-    pendingSelectionRef.current = null;
-    selectionRequestAcceptedRef.current = false;
-    selectionEventReceivedRef.current = false;
-    confirmationInFlightRef.current = false;
-    workspaceRefreshVersionRef.current += 1;
-  }, [activeTunnelConnection, hostId]);
-
-  const handleLogout = useCallback(() => {
-    clearStoredAccountSessionToken();
-    setAccountSessionToken(null);
-    disconnect();
-  }, [disconnect]);
 
   const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown }) => {
     const machineId = optionalString(metadata?.machineId);
@@ -719,15 +792,35 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, []);
 
   const confirmSelection = useCallback(async (option: RemoteContextOption) => {
-    if (confirmationInFlightRef.current) return;
+    // A selection event can land while a confirmation read is in flight; it invalidates that
+    // read (refresh version bump), so it must re-run the read instead of being dropped.
+    if (confirmationInFlightRef.current) {
+      confirmationRequeuedRef.current = true;
+      return;
+    }
     confirmationInFlightRef.current = true;
-    const confirmed = await refreshWorkspace();
+    let confirmed: RemoteWorkspaceModel | null;
+    do {
+      confirmationRequeuedRef.current = false;
+      confirmed = await refreshWorkspace();
+    } while (confirmationRequeuedRef.current && pendingSelectionRef.current === option);
     confirmationInFlightRef.current = false;
     if (pendingSelectionRef.current !== option) return;
     const creating = creationSessionsRef.current;
     const newSession = confirmed?.context.activeTerminal?.sessionId;
     if (confirmed && modelConfirmsSelection(option, confirmed)
       && (!creating || (newSession && !creating.has(newSession)))) {
+      const tgt = initialAccountTargetRef.current;
+      if (tgt) {
+        const confirmedSlug = confirmed.context.worktreeSlug ?? null;
+        const requestedSlug = tgt.worktreeSlug ?? null;
+        if (
+          confirmed.context.workspaceId === tgt.workspaceId &&
+          confirmedSlug === requestedSlug
+        ) {
+          setInitialAccountTarget(null);
+        }
+      }
       clearPendingSelection(true);
     }
   }, [clearPendingSelection, refreshWorkspace]);
@@ -856,13 +949,17 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     confirmationTimeoutRef.current = setTimeout(() => {
       confirmationTimeoutRef.current = null;
       if (pendingSelectionRef.current !== option) return;
-      if (creationSessionsRef.current) setCreationError("Desktop did not confirm a new terminal. Check the desktop before retrying.");
+      if (creationSessionsRef.current) {
+        setCreationError("Desktop did not confirm a new terminal. Check the desktop before retrying.");
+      } else if (initialAccountTargetRef.current) {
+        setCreationError("Desktop did not confirm the selected worktree. Please retry or go back.");
+      }
       clearPendingSelection();
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
-  const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false) => {
-    if (!token || pendingSelectionRef.current) return;
+  const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false): Promise<boolean> => {
+    if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
     setCreationError(null);
@@ -916,17 +1013,39 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         ok = response.ok;
         status = response.status;
       }
-      if (pendingSelectionRef.current !== option) return;
+      if (pendingSelectionRef.current !== option) return false;
       if (!ok) throw new Error(`Selection failed (${status})`);
 
       selectionRequestAcceptedRef.current = true;
-      if (selectionEventReceivedRef.current) void confirmSelection(option);
+      if (initialAccountTargetRef.current || selectionEventReceivedRef.current) void confirmSelection(option);
+      return true;
     } catch (error) {
-      if (pendingSelectionRef.current !== option) return;
-      if (createTerminal) setCreationError(error instanceof Error ? error.message : "Terminal creation request failed");
+      if (pendingSelectionRef.current !== option) return false;
+      const message = error instanceof Error ? error.message : "Selection request failed";
+      setCreationError(message);
       clearPendingSelection();
+      return false;
     }
   }, [activeHost?.machineId, activeTunnelConnection, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl]);
+
+  // Account picker choices only record the target; the selection is issued here once the
+  // committed token/connection for the chosen machine are visible to selectContext.
+  const initialAccountSelectionAttemptedRef = useRef(false);
+  const accountAcquireInFlightRef = useRef(false);
+  useEffect(() => {
+    if (!token || !activeTunnelConnection || !initialAccountTarget) return;
+    if (activeTunnelConnection.machine.machineId !== initialAccountTarget.machineId) return;
+    if (initialAccountSelectionAttemptedRef.current) return;
+    initialAccountSelectionAttemptedRef.current = true;
+
+    const target = initialAccountTarget;
+    void selectContext({
+      machineId: target.machineId,
+      workspaceId: target.workspaceId,
+      worktreeSlug: target.worktreeSlug,
+      worktreeLabel: target.worktreeLabel,
+    });
+  }, [token, activeTunnelConnection, initialAccountTarget, selectContext]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -963,7 +1082,9 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
 
   const activeTerminal = model.context.activeTerminal;
-  const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
+  const effectiveSessionId = initialAccountTarget
+    ? null
+    : (optimisticSessionId ?? activeTerminal?.sessionId ?? null);
 
   const turnDurationsRef = useRef<Map<string, string>>(new Map());
 
@@ -1226,6 +1347,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
   /* Declared above the auth early return so the hook count is identical on the
      login screen and after pairing; a hook below the guard changes the order. */
+  const isAccountMode = Boolean(accountSessionToken);
+  const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
+    ? {
+        ...model,
+        options: accountDiscovery.accountOptions,
+      }
+    : model;
+
   const createWorktree = useCallback(async () => {
     const workspaceId = model.context.workspaceId;
     if (!workspaceId || !token) return;
@@ -1258,34 +1387,15 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     }
   }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
 
-  if (!token) {
-    if (!accountSessionToken) {
-      return (
-        <AccountLoginPage
-          relayUrl={relayUrl}
-          onLoginSuccess={(tok) => {
-            setAccountSessionToken(tok);
-          }}
-        />
-      );
-    }
+  if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
-      <AccountMachinesPage
+      <AccountLoginPage
         relayUrl={relayUrl}
-        accountSessionToken={accountSessionToken}
-        onConnect={(conn) => {
-          const accountConn = createAccountConnection({
-            relayUrl,
-            accountSessionToken: accountSessionToken!,
-            machine: conn.machine,
-            deviceToken: conn.deviceToken,
-            httpTransport: conn.transport,
-            httpClose: conn.close,
-          });
-          setActiveTunnelConnection(accountConn);
-          setToken(conn.deviceToken);
+        onLoginSuccess={(tok) => {
+          setAccountSessionToken(tok);
+          setMagicLinkActive(false);
+          onMagicLinkConsumed?.();
         }}
-        onLogout={handleLogout}
       />
     );
   }
@@ -1296,6 +1406,126 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const attentionAriaLabel = firstWaiting
     ? formatAttentionAriaLabel(firstWaiting, model.context, waitingCount)
     : "";
+  // Signed in to the account but no worktree chosen yet: only the collapsed top picker
+  // is shown and the body stays blank until an explicit choice.
+  const accountPreselection = isAccountMode && !token;
+  const activeMachineId = activeTunnelConnection?.machine.machineId ?? null;
+
+  const accountPickerStatus = isAccountMode ? (
+    <div data-testid="remote-account-inventory-status" className="space-y-0.5 pb-1">
+      {accountDiscovery.loading ? (
+        <p className="px-2 py-1 text-[11px] text-muted-foreground">Loading machines...</p>
+      ) : null}
+      {accountDiscovery.error ? (
+        <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{accountDiscovery.error}</p>
+      ) : null}
+      {accountDiscovery.machines.map((machine) => {
+        const status = accountDiscovery.machineStatuses[machine.machineId];
+        if (!status || status.status === "ready" || status.status === "idle") return null;
+        const name = machine.displayName || machine.machineId;
+        return (
+          <div
+            key={machine.machineId}
+            data-testid={`remote-account-machine-status-${machine.machineId}`}
+            data-status={status.status}
+            className="flex min-h-[24px] items-center gap-1.5 px-2 text-[11px] text-muted-foreground"
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {name}
+              {status.status === "tunneling"
+                ? " - connecting..."
+                : status.status === "offline"
+                ? " - offline"
+                : ` - ${status.error ?? "unavailable"}`}
+            </span>
+            {status.status === "error" ? (
+              <button
+                type="button"
+                aria-label={`Retry ${name}`}
+                onClick={() => void accountDiscovery.retryMachine(machine.machineId)}
+                className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-worktree-sidebar-foreground hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                Retry
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  ) : null;
+
+  const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
+    if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return true;
+    const target = {
+      machineId: accountOpt.machineId,
+      workspaceId: accountOpt.workspaceId,
+      worktreeSlug: accountOpt.worktreeSlug,
+      worktreeLabel: accountOpt.worktreeLabel,
+    };
+    setCreationError(null);
+
+    if (activeTunnelConnection && token && activeMachineId === accountOpt.machineId) {
+      // Same machine: keep the connection, gate the body until the exact target confirms.
+      initialAccountSelectionAttemptedRef.current = false;
+      setInitialAccountTarget(target);
+      return true;
+    }
+
+    accountAcquireInFlightRef.current = true;
+    let conn;
+    try {
+      conn = await accountDiscovery.acquireConnection(accountOpt.machineId);
+    } finally {
+      accountAcquireInFlightRef.current = false;
+    }
+    if (!conn) {
+      setCreationError(`Failed to establish secure tunnel to ${accountOpt.machineDisplayName || accountOpt.machineId}`);
+      return false;
+    }
+
+    // acquireConnection transferred ownership, so this only closes exploratory tunnels.
+    accountDiscovery.closeAllExcept(null);
+    // Everything below belonged to the previous machine; the replaced connection is
+    // closed by the activeTunnelConnection effect cleanup.
+    clearPendingSelection();
+    workspaceRefreshVersionRef.current += 1;
+    setModel(EMPTY_MODEL);
+    sessionEpochsRef.current.clear();
+    sessionEpochMissesRef.current.clear();
+    setSessionEpochs({});
+    setActiveTunnelConnection(createAccountConnection({
+      relayUrl,
+      accountSessionToken: accountSessionToken!,
+      machine: conn.machine,
+      deviceToken: conn.deviceToken,
+      httpTransport: conn.transport,
+      httpClose: conn.close,
+    }));
+    setToken(conn.deviceToken);
+    initialAccountSelectionAttemptedRef.current = false;
+    setInitialAccountTarget(target);
+    return true;
+  };
+
+  const renderLazy = (node: React.ReactNode) => (
+    <Suspense
+      fallback={
+        <div
+          data-testid="remote-workspace-loading"
+          aria-live="polite"
+          className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2 bg-background text-foreground"
+        >
+          <div className="flex items-center space-x-2">
+            <span className="px-2 py-0.5 text-[11px] font-medium bg-muted text-muted-foreground rounded animate-pulse">
+              Loading workspace...
+            </span>
+          </div>
+        </div>
+      }
+    >
+      {node}
+    </Suspense>
+  );
 
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
@@ -1308,13 +1538,14 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           onClick={() => setSelectorOpen((open) => !open)}
           className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-chat-primary text-[10px] font-bold text-chat-primary-foreground" aria-hidden="true">F</span>
+          <img src="/icon-192.png" alt="Ferryx" width={16} height={16} className="size-4 shrink-0 rounded object-contain" />
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
           <span className="min-w-0 truncate font-mono text-[11px] leading-none text-chat-foreground-secondary" aria-label="Current desktop context">{contextName(model.context)}</span>
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-chat-foreground-secondary transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
+        {accountPreselection ? null : (
         <div className="flex shrink-0 items-center gap-1.5">
           <span
             data-testid="remote-connection-badge"
@@ -1393,76 +1624,158 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             </button>
           </div>
         </div>
+        )}
       </header>
 
       <RemoteWorkspaceMirror
-        model={model}
+        model={effectiveModel}
         pending={pending}
         selectorOpen={selectorOpen}
         onSelectorOpenChange={setSelectorOpen}
         onOpenHosts={() => setHostDrawerOpen(true)}
-        onSelect={(option) => void selectContext(option)}
+        activeMachineId={activeMachineId}
+        pickerStatus={
+          accountPreselection && creationError ? (
+            <>
+              {accountPickerStatus}
+              <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{creationError}</p>
+            </>
+          ) : accountPickerStatus
+        }
+        onSelect={(option) => {
+          const accountOpt = (option as Partial<AccountWorktreeOption>).machineId
+            ? (option as AccountWorktreeOption)
+            : null;
+          if (accountOpt) {
+            void selectAccountOption(accountOpt).then((ok) => {
+              // Pre-selection failures are reported inside the reopened picker, not the body.
+              if (!ok) setSelectorOpen(true);
+            });
+            return;
+          }
+          void selectContext(option);
+        }}
         onCreateTerminal={() => {
           if (!model.context.workspaceId) return;
           void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
         }}
         onCreateWorktree={createWorktree}
-        creationError={creationError}
+        creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
-        {viewMode === "chat" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
-            <MobileChatWorkspace
-              headerTitle={
-                model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
-                model.context.activeTerminal?.title ??
-                model.context.workspaceId ??
-                undefined
-              }
-              headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
-              onBack={() => setSelectorOpen(true)}
-              messages={chatMessages}
-              warnings={chatWarnings}
-              isRunning={chatIsRunning}
-              onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
-                // Attachments are blocked by the mobile composer until remote upload is supported.
-                if (attachments.length > 0) return;
-                const ws = terminalSocketRef.current;
-                const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
-
-                if (!isSocketOpen) {
-                  const socketClosedWarning =
-                    "Message not sent: the terminal connection is closed. Reopen the terminal and try again.";
-                  setChatWarnings((prev) =>
-                    prev.includes(socketClosedWarning) ? prev : [...prev, socketClosedWarning],
-                  );
-                  console.warn("Terminal WebSocket is not open for input");
-                  return;
+        {accountPreselection ? (
+          <div data-testid="remote-account-empty-body" className="flex-1" />
+        ) : initialAccountTarget ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-4 bg-background text-foreground">
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold tracking-tight">Activating Selected Worktree</h3>
+                <p className="text-xs text-muted-foreground">
+                  Connecting to {initialAccountTarget.worktreeLabel ?? initialAccountTarget.worktreeSlug ?? initialAccountTarget.workspaceId}...
+                </p>
+              </div>
+              {creationError && (
+                <div role="alert" className="p-3 text-xs bg-destructive/10 text-destructive rounded-lg max-w-sm text-left space-y-2">
+                  <p>{creationError}</p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreationError(null);
+                        initialAccountSelectionAttemptedRef.current = false;
+                        void selectContext({
+                          workspaceId: initialAccountTarget.workspaceId,
+                          worktreeSlug: initialAccountTarget.worktreeSlug,
+                          worktreeLabel: initialAccountTarget.worktreeLabel,
+                        });
+                      }}
+                      className="px-2.5 py-1 text-[11px] font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+                    >
+                      Retry Selection
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreationError(null);
+                        setInitialAccountTarget(null);
+                        clearPendingSelection();
+                        workspaceRefreshVersionRef.current += 1;
+                        setModel(EMPTY_MODEL);
+                        if (activeTunnelConnection) {
+                          activeTunnelConnection.close();
+                          setActiveTunnelConnection(null);
+                        }
+                        setToken(null);
+                        setSelectorOpen(true);
+                      }}
+                      className="px-2.5 py-1 text-[11px] font-medium border border-border text-muted-foreground hover:text-foreground rounded transition-colors"
+                    >
+                      Back to Worktrees
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : viewMode === "chat" ? renderLazy(
+            <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
+              <MobileChatWorkspace
+                headerTitle={
+                  model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
+                  model.context.activeTerminal?.title ??
+                  model.context.workspaceId ??
+                  undefined
                 }
+                headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
+                onBack={() => setSelectorOpen(true)}
+                messages={chatMessages}
+                warnings={chatWarnings}
+                isRunning={chatIsRunning}
+                onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
+                  // Attachments are blocked by the mobile composer until remote upload is supported.
+                  if (attachments.length > 0) return;
+                  const ws = terminalSocketRef.current;
+                  const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
 
-                const userMsg: MobileChatMessageProps = {
-                  id: `user-${Date.now()}`,
-                  role: "user",
-                  content: text,
-                  timestamp: Date.now(),
-                  attachments: [],
-                };
-                setChatMessages((prev) => [...prev, userMsg]);
-                assistantTurnStartedAtRef.current = Date.now();
-                setChatIsRunning(true);
+                  if (!isSocketOpen) {
+                    const socketClosedWarning =
+                      "Message not sent: the terminal connection is closed. Reopen the terminal and try again.";
+                    setChatWarnings((prev) =>
+                      prev.includes(socketClosedWarning) ? prev : [...prev, socketClosedWarning],
+                    );
+                    console.warn("Terminal WebSocket is not open for input");
+                    return;
+                  }
 
-                if (effectiveSessionId && token) {
-                  const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
-                  ws!.send(commandPayload);
-                }
-              }}
-              onStopExecution={() => {
-                const ws = terminalSocketRef.current;
-                const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
-                if (effectiveSessionId && token) {
-                  if (isSocketOpen) {
-                    const interruptPayload = "\x03";
-                    ws!.send(interruptPayload);
-                  } else {
+                  const userMsg: MobileChatMessageProps = {
+                    id: `user-${Date.now()}`,
+                    role: "user",
+                    content: text,
+                    timestamp: Date.now(),
+                    attachments: [],
+                  };
+                  setChatMessages((prev) => [...prev, userMsg]);
+                  assistantTurnStartedAtRef.current = Date.now();
+                  setChatIsRunning(true);
+
+                  if (effectiveSessionId && token) {
+                    const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
+                    ws!.send(commandPayload);
+                  }
+                }}
+                onStopExecution={() => {
+                  const ws = terminalSocketRef.current;
+                  const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
+                  if (effectiveSessionId && token) {
+                    if (isSocketOpen) {
+                      const interruptPayload = "\x03";
+                      ws!.send(interruptPayload);
+                    } else {
+                      const interruptFailedWarning =
+                        "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
+                      setChatWarnings((prev) =>
+                        prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
+                      );
+                      console.warn("Terminal WebSocket is not open for interrupt");
+                    }
+                  } else if (!isSocketOpen) {
                     const interruptFailedWarning =
                       "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
                     setChatWarnings((prev) =>
@@ -1470,21 +1783,113 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                     );
                     console.warn("Terminal WebSocket is not open for interrupt");
                   }
-                } else if (!isSocketOpen) {
-                  const interruptFailedWarning =
-                    "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
-                  setChatWarnings((prev) =>
-                    prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
-                  );
-                  console.warn("Terminal WebSocket is not open for interrupt");
+                  finalizeAssistantTurnDuration();
+                  setChatIsRunning(false);
+                }}
+                sessionId={effectiveSessionId ?? undefined}
+                token={token ?? undefined}
+                transportUrl={transportBaseUrl}
+                isAccountSession={Boolean(activeTunnelConnection)}
+                createWebSocket={
+                  activeTunnelConnection
+                    ? async (path) => {
+                        let targetPath = path;
+                        if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
+                          const epoch = await getSessionDaemonEpoch(effectiveSessionId);
+                          if (!epoch) {
+                            throw new Error(
+                              `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
+                            );
+                          }
+                          const sep = targetPath.includes("?") ? "&" : "?";
+                          targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
+                        }
+                        return activeTunnelConnection.openWebSocket(targetPath);
+                      }
+                    : undefined
                 }
-                finalizeAssistantTurnDuration();
-                setChatIsRunning(false);
-              }}
-              sessionId={effectiveSessionId ?? undefined}
-              token={token ?? undefined}
+              />
+            </div>
+          ) : viewMode === "browser" ? renderLazy(
+            <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
+              {browserSessions.length > 0 && (
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-chat-surface border-b border-chat-border text-xs overflow-x-auto shrink-0">
+                  <span className="text-chat-foreground-secondary text-[11px] shrink-0">Browsers:</span>
+                  {browserSessions.map((s) => (
+                    <button
+                      key={s.browserId}
+                      type="button"
+                      data-testid={`select-browser-${s.browserId}`}
+                      onClick={() => setSelectedBrowserId(s.browserId)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
+                        selectedBrowserId === s.browserId
+                          ? "bg-chat-primary text-white"
+                          : "bg-chat-surface-raised text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
+                      }`}
+                    >
+                      {s.title || s.browserId}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => void fetchBrowserSessions()}
+                    className="ml-auto text-[11px] text-chat-foreground-secondary hover:text-chat-foreground"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              )}
+
+              {selectedBrowserId && token ? (
+                <RemoteBrowserWorkspace
+                  baseUrl={transportBaseUrl}
+                  browserId={selectedBrowserId}
+                  deviceToken={token}
+                  onBack={() => setViewMode("terminal")}
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-chat-foreground-secondary gap-3">
+                  <p className="text-sm font-medium">No active browser session selected</p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Enter browser ID..."
+                      data-testid="remote-manual-browser-id-input"
+                      className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
+                          setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      data-testid="remote-fetch-browsers-btn"
+                      onClick={() => void fetchBrowserSessions()}
+                      className="px-2.5 py-1 text-xs rounded bg-chat-surface-raised text-chat-foreground font-medium hover:bg-chat-surface-hover transition"
+                    >
+                      Refresh Sessions
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : effectiveSessionId && token ? renderLazy(
+            <RemoteTerminal
+              key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+              sessionId={effectiveSessionId}
+              token={token}
+              title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
               transportUrl={transportBaseUrl}
+              onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
+              activeTabId={model.context.activeTabId}
+              onBack={() => setViewMode("chat")}
+              embedded
+              onSwipePreviousTab={handleSwipePreviousTab}
+              onSwipeNextTab={handleSwipeNextTab}
+              onSocketLifecycle={handleTerminalSocketLifecycle}
               isAccountSession={Boolean(activeTunnelConnection)}
+              daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
               createWebSocket={
                 activeTunnelConnection
                   ? async (path) => {
@@ -1504,107 +1909,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                   : undefined
               }
             />
-          </div>
-        ) : viewMode === "browser" ? (
-          <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
-            {browserSessions.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-1 bg-chat-surface border-b border-chat-border text-xs overflow-x-auto shrink-0">
-                <span className="text-chat-foreground-secondary text-[11px] shrink-0">Browsers:</span>
-                {browserSessions.map((s) => (
-                  <button
-                    key={s.browserId}
-                    type="button"
-                    data-testid={`select-browser-${s.browserId}`}
-                    onClick={() => setSelectedBrowserId(s.browserId)}
-                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
-                      selectedBrowserId === s.browserId
-                        ? "bg-chat-primary text-white"
-                        : "bg-chat-surface-raised text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
-                    }`}
-                  >
-                    {s.title || s.browserId}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => void fetchBrowserSessions()}
-                  className="ml-auto text-[11px] text-chat-foreground-secondary hover:text-chat-foreground"
-                >
-                  Refresh
-                </button>
-              </div>
-            )}
-
-            {selectedBrowserId ? (
-              <RemoteBrowserWorkspace
-                baseUrl={transportBaseUrl}
-                browserId={selectedBrowserId}
-                deviceToken={token}
-                onBack={() => setViewMode("terminal")}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-chat-foreground-secondary gap-3">
-                <p className="text-sm font-medium">No active browser session selected</p>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    placeholder="Enter browser ID..."
-                    data-testid="remote-manual-browser-id-input"
-                    className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
-                        setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    data-testid="remote-fetch-browsers-btn"
-                    onClick={() => void fetchBrowserSessions()}
-                    className="px-2.5 py-1 text-xs rounded bg-chat-surface-raised text-chat-foreground font-medium hover:bg-chat-surface-hover transition"
-                  >
-                    Refresh Sessions
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : effectiveSessionId ? (
-          <RemoteTerminal
-            key={`${effectiveSessionId}:${terminalRetryGeneration}`}
-            sessionId={effectiveSessionId}
-            token={token}
-            title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
-            transportUrl={transportBaseUrl}
-            onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
-            activeTabId={model.context.activeTabId}
-            onBack={() => setViewMode("chat")}
-            embedded
-            onSwipePreviousTab={handleSwipePreviousTab}
-            onSwipeNextTab={handleSwipeNextTab}
-            onSocketLifecycle={handleTerminalSocketLifecycle}
-            isAccountSession={Boolean(activeTunnelConnection)}
-            daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
-            createWebSocket={
-              activeTunnelConnection
-                ? async (path) => {
-                    let targetPath = path;
-                    if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
-                      const epoch = await getSessionDaemonEpoch(effectiveSessionId);
-                      if (!epoch) {
-                        throw new Error(
-                          `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
-                        );
-                      }
-                      const sep = targetPath.includes("?") ? "&" : "?";
-                      targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
-                    }
-                    return activeTunnelConnection.openWebSocket(targetPath);
-                  }
-                : undefined
-            }
-          />
-        ) : null}
+          ) : null}
       </RemoteWorkspaceMirror>
 
       <MobileHostDrawer

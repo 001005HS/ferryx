@@ -51,6 +51,9 @@ export type RemoteContextOption = {
   sessionId?: string | null;
   sessionLabel?: string;
   attention?: "working" | "waiting" | "done";
+  /** Account inventory only: the machine that owns this option. workspaceId stays raw. */
+  machineId?: string;
+  machineDisplayName?: string;
 };
 
 export type RemoteWorkspaceModel = {
@@ -327,15 +330,30 @@ export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktr
 }
 
 function optionRowKey(option: RemoteContextOption) {
-  return `${option.workspaceId}:${option.sessionId ?? option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`;
+  return `${option.machineId ?? ""}\u0000${option.workspaceId}:${option.sessionId ?? option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`;
+}
+
+function optionGroupKey(option: RemoteContextOption) {
+  return `${option.machineId ?? ""}\u0000${option.workspaceId}`;
+}
+
+function optionGroupLabel(option: RemoteContextOption) {
+  const machine = option.machineId ? option.machineDisplayName || option.machineId : null;
+  return machine ? `${machine} / ${option.workspaceId}` : option.workspaceId;
 }
 
 function optionName(option: RemoteContextOption) {
-  const name = `${contextName(option)}${option.sessionLabel ? ` / ${option.sessionLabel}` : ""}`;
+  const machine = option.machineId ? option.machineDisplayName || option.machineId : null;
+  const name = `${machine ? `${machine} / ` : ""}${contextName(option)}${option.sessionLabel ? ` / ${option.sessionLabel}` : ""}`;
   return option.attention ? `${name} (${option.attention})` : name;
 }
 
-function isCurrentOption(option: RemoteContextOption, context: RemoteContext) {
+function isOtherMachine(option: RemoteContextOption, activeMachineId: string | null) {
+  return Boolean(option.machineId) && option.machineId !== activeMachineId;
+}
+
+function isCurrentOption(option: RemoteContextOption, context: RemoteContext, activeMachineId: string | null) {
+  if (isOtherMachine(option, activeMachineId)) return false;
   if (option.workspaceId !== context.workspaceId) return false;
   if (option.sessionId) return option.sessionId === context.activeTerminal?.sessionId;
   const optionWorktree = option.worktreeSlug ?? option.worktreeLabel;
@@ -369,6 +387,10 @@ type RemoteWorkspaceMirrorProps = {
   onCreateTerminal?: () => void;
   onCreateWorktree?: () => void;
   creationError?: string | null;
+  /** Machine that owns model.context; account options from other machines are never current. */
+  activeMachineId?: string | null;
+  /** Inventory loading/offline/error rows, rendered only inside the opened picker. */
+  pickerStatus?: ReactNode;
   children?: ReactNode;
 };
 
@@ -382,14 +404,17 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   onCreateTerminal,
   onCreateWorktree,
   creationError,
+  activeMachineId = null,
+  pickerStatus,
   children,
 }) => {
   const groupedOptions = useMemo(() => {
-    const groups = new Map<string, RemoteContextOption[]>();
+    const groups = new Map<string, { label: string; options: RemoteContextOption[] }>();
     for (const option of model.options) {
-      const group = groups.get(option.workspaceId) ?? [];
-      group.push(option);
-      groups.set(option.workspaceId, group);
+      const key = optionGroupKey(option);
+      const group = groups.get(key) ?? { label: optionGroupLabel(option), options: [] };
+      group.options.push(option);
+      groups.set(key, group);
     }
     return [...groups.entries()];
   }, [model.options]);
@@ -415,7 +440,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   const claimedPaneIds = new Set<string>();
   const panesByOption = new Map<string, typeof paneTabs>();
   for (const option of model.options) {
-    if (option.sessionId) continue;
+    if (option.sessionId || isOtherMachine(option, activeMachineId)) continue;
     const matches = paneTabs.filter((tab) => {
       if (claimedPaneIds.has(tab.id)) return false;
       const tabSlug = tab.worktreeSlug ?? model.context.worktreeSlug;
@@ -576,12 +601,15 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             aria-label="Terminal tabs"
             className="min-h-0 max-h-96 overflow-y-auto overflow-x-hidden p-1.5 scrollbar-sleek"
           >
+            {pickerStatus}
             {groupedOptions.length === 0 ? (
-              <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">
-                No selectable desktop worktrees are available.
-              </p>
+              pickerStatus ? null : (
+                <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">
+                  No selectable desktop worktrees are available.
+                </p>
+              )
             ) : (
-              groupedOptions.map(([workspaceId, options]) => {
+              groupedOptions.map(([groupKey, { label: groupLabel, options }]) => {
                 const projectAttention = options.reduce<"working" | "waiting" | "done" | undefined>((acc, opt) => {
                   if (!opt.attention) return acc;
                   if (!acc || attentionRank(opt.attention) > attentionRank(acc)) return opt.attention;
@@ -589,9 +617,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 }, undefined);
 
                 return (
-                  <section key={workspaceId} className="mb-0.5 last:mb-0" aria-label={workspaceId}>
+                  <section key={groupKey} className="mb-0.5 last:mb-0" aria-label={groupLabel}>
                     <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65">
-                      <h3 className="min-w-0 flex-1 truncate" title={workspaceId}>{workspaceId}</h3>
+                      <h3 className="min-w-0 flex-1 truncate" title={groupLabel}>{groupLabel}</h3>
                       {projectAttention === "working" ? (
                         <LoaderCircle
                           aria-hidden="true"
@@ -611,9 +639,10 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                     </div>
                     <div>
                       {options.map((option) => {
-                        const active = isCurrentOption(option, model.context);
+                        const active = isCurrentOption(option, model.context, activeMachineId);
                         const loading = pending
-                          ? pending.workspaceId === option.workspaceId &&
+                          ? (pending.machineId ?? null) === (option.machineId ?? null) &&
+                            pending.workspaceId === option.workspaceId &&
                             pending.worktreeSlug === option.worktreeSlug &&
                             pending.worktreeLabel === option.worktreeLabel &&
                             pending.sessionId === option.sessionId
