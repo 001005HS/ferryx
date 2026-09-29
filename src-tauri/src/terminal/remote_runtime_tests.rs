@@ -1494,3 +1494,61 @@ async fn ssh_agent_state_invalid_state_and_zero_revision_rejected() {
     state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(2)).await;
     assert!(sink.published.lock().is_empty());
 }
+
+#[tokio::test]
+async fn ssh_imported_transport_recovers_after_read_disconnect() {
+    // Given: a live handover owns an existing remote PTY without a new dial.
+    let (runtime, hub, dialer, tx) = fixture();
+    runtime.live_import(RemoteExportState {
+        descriptor: descriptor(),
+        generation: 7,
+        pending_size: None,
+        pid: Some(RemotePid(8888)),
+        bridge_transfer: None,
+    }, Some(dialer.fake.clone())).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    reads_started(&dialer.fake, 1).await;
+
+    // When: the transferred transport disconnects and the retry delay is released.
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut updates, |d| d.attempts == 1 && d.generation > 7).await;
+    dialer.clock.add_permits(1);
+    let recovered = state(&mut updates, |d| d.state == RemoteConnectionState::Connected && d.generation > 7).await;
+    tx.send(Ok(output(1, false))).unwrap();
+    state(&mut updates, |d| d.descriptor.remote_cursor == RemoteCursor(1)).await;
+
+    // Then: the same remote target produces output without a stop or replacement.
+    assert_eq!(recovered.descriptor.target, descriptor().target);
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-1;");
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ssh_imported_transport_recovers_after_control_disconnect() {
+    let (runtime, hub, dialer, tx) = fixture();
+    runtime.live_import(RemoteExportState {
+        descriptor: descriptor(),
+        generation: 7,
+        pending_size: None,
+        pid: Some(RemotePid(8888)),
+        bridge_transfer: None,
+    }, Some(dialer.fake.clone())).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    reads_started(&dialer.fake, 1).await;
+
+    *dialer.fake.write_failure.lock() = Some(BridgeError::ConnectionClosed);
+    let result = runtime.write("local-stable", 7, b"once".to_vec()).unwrap().await;
+    assert!(result.is_err());
+    state(&mut updates, |d| d.attempts == 1 && d.generation > 7).await;
+    dialer.clock.add_permits(1);
+    let recovered = state(&mut updates, |d| d.state == RemoteConnectionState::Connected && d.generation > 7).await;
+    tx.send(Ok(output(1, false))).unwrap();
+    state(&mut updates, |d| d.descriptor.remote_cursor == RemoteCursor(1)).await;
+
+    assert_eq!(recovered.descriptor.target, descriptor().target);
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-1;");
+    assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), 1);
+}

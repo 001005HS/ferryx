@@ -1035,7 +1035,7 @@ async fn run(
     mut initial: Option<Arc<dyn Transport>>,
     sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
 ) {
-    let mut attempts = 0;
+    let mut attempts = e.state.lock().details.attempts;
     loop {
         let d = {
             let mut s = e.state.lock();
@@ -1235,7 +1235,7 @@ async fn run(
 async fn run_live(
     e: Arc<Entry>,
     hub: Arc<TerminalOutputHub>,
-    _connector: Arc<dyn Connector>,
+    connector: Arc<dyn Connector>,
     generation: u64,
     client: Arc<dyn Transport>,
     sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
@@ -1282,7 +1282,7 @@ async fn run_live(
                 return;
             }
             if s.details.state != RemoteConnectionState::Connected {
-                return;
+                break;
             }
             (s.details.descriptor.remote_cursor, s.agent_ack)
         };
@@ -1293,17 +1293,16 @@ async fn run_live(
                     details.generation != generation
                         || details.state != RemoteConnectionState::Connected
                 }).await;
-            } => return,
+            } => break,
             result = client.read(&d.target, cursor, agent_ack) => match result {
                 Ok(r) => r,
                 Err(error) => {
-                    let _gate = e.control.lock().await;
                     let mut s = e.state.lock();
                     if s.details.generation == generation {
                         let failure = RemoteFailure::from_bridge(&error);
                         fail(&mut s, failure);
                     }
-                    return;
+                    break;
                 }
             },
         };
@@ -1360,6 +1359,24 @@ async fn run_live(
             return;
         }
     }
+    // Imported transports need the same recovery owner as newly dialed ones.
+    // Do not wait for the control gate: a failed write may still hold it.
+    let next_generation = {
+        let mut s = e.state.lock();
+        if s.details.generation != generation
+            || !s.details.failure.as_ref().is_some_and(|failure| {
+                failure.kind == RemoteFailureKind::Transport
+            })
+        {
+            return;
+        }
+        s.details.generation += 1;
+        s.details.attempts = 1;
+        Entry::notify(&s);
+        s.details.generation
+    };
+    connector.delay(0).await;
+    run(e, hub, connector, next_generation, None, sink).await;
 }
 
 #[cfg(test)]
