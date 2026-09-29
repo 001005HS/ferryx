@@ -88,6 +88,7 @@ import {
   closeTerminal,
   detectAgents,
   getCliLauncherStatus,
+  getAccountEnrollmentStatus,
   getInitialProject,
   getSystemPermissionsStatus,
   isTauriRuntime,
@@ -2474,9 +2475,10 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
-      const [permissions, cli] = await Promise.all([
+      const [permissions, cli, enrollment] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
+        getAccountEnrollmentStatus().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -2487,6 +2489,7 @@ function WorkspaceApp({
         agents: resolvedAgentsRef.current,
         cli,
         projectCount: projectsRef.current.length,
+        accountLinked: enrollment?.enrolled === true,
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
@@ -2505,9 +2508,10 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     const handleOpenOnboarding = async () => {
-      const [permissions, cli] = await Promise.all([
+      const [permissions, cli, enrollment] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
+        getAccountEnrollmentStatus().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -2518,6 +2522,7 @@ function WorkspaceApp({
         agents: resolvedAgentsRef.current,
         cli,
         projectCount: projectsRef.current.length,
+        accountLinked: enrollment?.enrolled === true,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
       setOnboardingInitialStepIndex(0);

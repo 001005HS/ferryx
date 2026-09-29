@@ -203,6 +203,7 @@ describe("onboarding exports and constants", () => {
   it("exports expected constants and step order", () => {
     expect(ONBOARDING_VERSION).toBe(1);
     expect(ONBOARDING_STEP_ORDER).toEqual([
+      "account",
       "intro",
       "features",
       "permissions",
@@ -447,6 +448,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("intro", baseCtx)).toBe(false);
     expect(
@@ -460,6 +462,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("project", baseCtx)).toBe(false);
     expect(
@@ -473,6 +476,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("permissions", linuxCtx)).toBe(true);
 
@@ -481,6 +485,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("permissions", webCtx)).toBe(true);
   });
@@ -491,6 +496,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("permissions", grantedCtx)).toBe(true);
   });
@@ -501,6 +507,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("permissions", missingCtx)).toBe(false);
   });
@@ -512,6 +519,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: null,
         cli: cliInstalled,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(false);
 
@@ -521,6 +529,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: [{ name: "claude", available: false }],
         cli: cliInstalled,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(false);
 
@@ -530,6 +539,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: [{ name: "claude", available: true }],
         cli: cliNotInstalled,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(true);
 
@@ -539,6 +549,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: [{ name: "claude", available: true }],
         cli: cliInstalled,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(true);
 
@@ -548,6 +559,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: [{ name: "claude", available: true }],
         cli: null,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(true);
 
@@ -557,6 +569,7 @@ describe("isOnboardingStepSatisfied", () => {
         agents: [{ name: "claude", available: true }],
         cli: cliUnsupported,
         projectCount: 0,
+        accountLinked: true,
       })
     ).toBe(true);
   });
@@ -567,6 +580,7 @@ describe("isOnboardingStepSatisfied", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(isOnboardingStepSatisfied("cli", baseCtx)).toBe(true);
     expect(isOnboardingStepSatisfied("cli", { ...baseCtx, cli: cliInstalled })).toBe(true);
@@ -587,6 +601,7 @@ describe("pendingOnboardingSteps", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual([
       "features",
@@ -606,6 +621,7 @@ describe("pendingOnboardingSteps", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliNotInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual(["cli"]);
   });
@@ -621,6 +637,7 @@ describe("pendingOnboardingSteps", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual([]);
   });
@@ -640,6 +657,7 @@ describe("initialWizardStepIndex", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("permissions"));
   });
@@ -655,6 +673,7 @@ describe("initialWizardStepIndex", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("features"));
   });
@@ -670,6 +689,7 @@ describe("initialWizardStepIndex", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(initialWizardStepIndex(steps, state, ctx)).toBe(0);
   });
@@ -682,8 +702,10 @@ describe("wizardSteps", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
+      "account",
       "intro",
       "features",
       "permissions",
@@ -699,6 +721,7 @@ describe("wizardSteps", () => {
       agents: null,
       cli: cliUnsupported,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(wizardSteps(ctx)).not.toContain("cli");
     expect(wizardSteps({ ...ctx, cli: null })).toContain("cli");
@@ -712,8 +735,10 @@ describe("wizardSteps", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
+      "account",
       "intro",
       "features",
       "agents",
@@ -740,8 +765,10 @@ describe("satisfiedOnboardingSteps", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
+      "account",
       "intro",
       "features",
       "agents",
@@ -766,8 +793,10 @@ describe("satisfiedOnboardingSteps", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
+      "account",
       "intro",
       "features",
       "permissions",
@@ -788,8 +817,9 @@ describe("satisfiedOnboardingSteps", () => {
       agents: null,
       cli: cliNotInstalled,
       projectCount: 0,
+      accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual([]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["account"]);
   });
 
   it("reports only cli when its status is unknown and nothing else is done", () => {
@@ -803,8 +833,9 @@ describe("satisfiedOnboardingSteps", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["account", "cli"]);
   });
 });
 
@@ -814,6 +845,7 @@ describe("shouldAutoOpenOnboarding", () => {
     agents: null,
     cli: null,
     projectCount: 0,
+    accountLinked: true,
   };
 
   it("returns true when not dismissed with valid permissions and pending steps", () => {
@@ -884,6 +916,7 @@ describe("shouldAutoOpenOnboarding", () => {
       agents: [{ name: "claude", available: true }],
       cli: cliInstalled,
       projectCount: 1,
+      accountLinked: true,
     };
     expect(pendingOnboardingSteps(state, satisfiedCtx)).toEqual([]);
     expect(shouldAutoOpenOnboarding(state, satisfiedCtx)).toBe(false);
@@ -911,6 +944,7 @@ describe("features step", () => {
     agents: [{ name: "claude", available: true }],
     cli: cliInstalled,
     projectCount: 5,
+    accountLinked: true,
   };
 
   it("is never auto-satisfied by context", () => {
@@ -928,6 +962,7 @@ describe("features step", () => {
     };
     expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
+      "account",
       "intro",
       "permissions",
       "agents",
@@ -964,7 +999,18 @@ describe("features step", () => {
       agents: null,
       cli: null,
       projectCount: 0,
+      accountLinked: true,
     };
     expect(shouldAutoOpenOnboarding(fresh, openCtx)).toBe(true);
+  });
+});
+
+describe("account step", () => {
+  it("is pending until this computer is linked, without forcing auto-open", () => {
+    const state = { version: 1 as const, completedSteps: [], dismissed: false };
+    const ctx = { permissions: null, agents: null, cli: null, projectCount: 1, accountLinked: false };
+    expect(isOnboardingStepSatisfied("account", ctx)).toBe(false);
+    expect(isOnboardingStepSatisfied("account", { ...ctx, accountLinked: true })).toBe(true);
+    expect(wizardSteps(ctx)[0]).toBe("account");
   });
 });

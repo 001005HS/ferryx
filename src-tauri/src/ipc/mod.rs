@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent_history;
 pub mod agents;
 pub mod browser;

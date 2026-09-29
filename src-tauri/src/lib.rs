@@ -1411,6 +1411,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_read,
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
+        crate::ipc::account::cmd_account_enrollment_status,
+        crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::file_preview::cmd_file_preview_open,

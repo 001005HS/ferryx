@@ -5,6 +5,7 @@ import {
 import type { CliLauncherStatus, SystemPermissionsStatus } from "./types";
 
 export type OnboardingStepId =
+  | "account"
   | "intro"
   | "features"
   | "permissions"
@@ -15,6 +16,7 @@ export type OnboardingStepId =
 export const ONBOARDING_VERSION = 1;
 
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
+  "account",
   "intro",
   "features",
   "permissions",
@@ -46,6 +48,8 @@ export type OnboardingContext = {
   agents: ReadonlyArray<{ name: string; available: boolean }> | null;
   cli: CliLauncherStatus | null;
   projectCount: number;
+  /** True once this computer is enrolled to the signed-in Ferryx account. */
+  accountLinked?: boolean;
 };
 
 function browserStorage(): Storage | null {
@@ -222,6 +226,8 @@ export function isOnboardingStepSatisfied(
   ctx: OnboardingContext
 ): boolean {
   switch (step) {
+    case "account":
+      return ctx.accountLinked === true;
     case "intro":
       return ctx.projectCount > 0;
     case "permissions": {
@@ -303,7 +309,8 @@ export function shouldAutoOpenOnboarding(
     // (users who finished the flow before it existed have no "cli" entry), so
     // neither may be the sole reason the wizard pops back open after an upgrade.
     pendingOnboardingSteps(state, ctx).some(
-      (step) => step !== "features" && step !== "cli"
+      // "account" is optional for existing users too: signing in must not force the wizard open.
+      (step) => step !== "features" && step !== "cli" && step !== "account"
     )
   );
 }

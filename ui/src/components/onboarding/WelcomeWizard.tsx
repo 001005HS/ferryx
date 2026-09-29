@@ -7,6 +7,7 @@ import type { OnboardingStepId } from "../../lib/onboarding";
 import type { CliLauncherStatus, SystemPermissionsStatus } from "../../lib/types";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
+import { AccountStep } from "./AccountStep";
 import { AgentsCliStep } from "./AgentsCliStep";
 import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
@@ -33,6 +34,7 @@ export type WelcomeWizardProps = {
 };
 
 const STEP_TITLES: Record<OnboardingStepId, string> = {
+  account: "Sign in",
   intro: "Welcome",
   features: "Features",
   permissions: "Permissions",
@@ -42,6 +44,7 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
 };
 
 const STEP_HEADINGS: Record<OnboardingStepId, string> = {
+  account: "Sign in to Ferryx",
   intro: "Set up Ferryx",
   features: "What Ferryx does",
   permissions: "Grant system access",
@@ -146,6 +149,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
   const getLedeText = (step: OnboardingStepId): string => {
     switch (step) {
+      case "account":
+        return "Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
       case "intro":
         return "A short setup, then we'll get your first project open.";
       case "features":
@@ -165,6 +170,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
   const renderStepContent = () => {
     switch (currentStep) {
+      case "account":
+        return <AccountStep onLinked={() => onStepCompleted("account")} />;
       case "intro":
         return <IntroStep steps={steps} />;
       case "features":

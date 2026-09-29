@@ -1,7 +1,7 @@
 import type { OnboardingStepId } from "../../lib/onboarding";
 import { WizardRow, WizardRowList } from "./WizardPrimitives";
 
-type OverviewStepId = Exclude<OnboardingStepId, "intro">;
+type OverviewStepId = Exclude<OnboardingStepId, "intro" | "account">;
 
 const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string }> = {
   features: {
@@ -32,7 +32,7 @@ export type IntroStepProps = {
 
 export function IntroStep({ steps }: IntroStepProps): JSX.Element {
   const covered = steps.filter(
-    (step): step is OverviewStepId => step !== "intro",
+    (step): step is OverviewStepId => step !== "intro" && step !== "account",
   );
   return (
     <div>
