@@ -3575,7 +3575,15 @@ mod tests {
         std::fs::write(&socket_path, b"").expect("write socket placeholder");
 
         let result = send_browser_cli_request_at_path(BrowserCliRequest::List, &socket_path).await;
-        assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
+        // The token read must fail first (ENOENT, os error 2). A connect failure against the
+        // placeholder file would instead report ECONNREFUSED, so this pins the token path.
+        match result {
+            Err(BrowserError::CliUnavailable(message)) => assert!(
+                message.contains("os error 2"),
+                "expected the missing-token read error, got: {message}"
+            ),
+            other => panic!("expected CliUnavailable from the token read, got {other:?}"),
+        }
     }
 
     async fn send_raw_line<R: tauri::Runtime>(
