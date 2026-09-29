@@ -179,5 +179,168 @@ describe("file preview tabs", () => {
       expect(reopenedTab.col).toBe(4);
     }
   });
+
+  it("keeps same-path previews separate by backend in the active layout", () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const request = { path: "README.md", backendSessionId: "back-1", line: 1, col: 1 };
+
+    let firstId = "";
+    act(() => {
+      firstId = result.current.openFilePreviewTab(source, request);
+    });
+
+    let secondId = "";
+    act(() => {
+      secondId = result.current.openFilePreviewTab(
+        { ...source, sessionId: "front-2", backendSessionId: "back-2" },
+        { ...request, backendSessionId: "back-2" },
+      );
+    });
+
+    expect(secondId).not.toBe(firstId);
+    expect(result.current.state.layout.tabs.filter((tab) => tab.kind === "file")).toHaveLength(2);
+    const firstTab = result.current.state.layout.tabs.find((tab) => tab.id === firstId);
+    const secondTab = result.current.state.layout.tabs.find((tab) => tab.id === secondId);
+    expect(firstTab?.kind).toBe("file");
+    expect(secondTab?.kind).toBe("file");
+    if (firstTab?.kind === "file" && secondTab?.kind === "file") {
+      expect(firstTab.backendSessionId).toBe("back-1");
+      expect(secondTab.backendSessionId).toBe("back-2");
+    }
+
+    let reopenedId = "";
+    act(() => {
+      reopenedId = result.current.openFilePreviewTab(source, { ...request, line: 9 });
+    });
+    expect(reopenedId).toBe(firstId);
+    expect(result.current.state.layout.tabs.filter((tab) => tab.kind === "file")).toHaveLength(2);
+  });
+
+  it("isolates relative file preview tabs when switching between worktrees", () => {
+    const mainWorktree: Worktree = {
+      path: "/repo/main",
+      head: "abc",
+      branch: "refs/heads/main",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const featureWorktree: Worktree = {
+      path: "/repo/feature",
+      head: "def",
+      branch: "refs/heads/feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    const sourceMain = {
+      leafId: "leaf-1",
+      sessionId: "front-1",
+      backendSessionId: "back-1",
+      workspaceId: "ws-1",
+    };
+    const sourceFeature = {
+      leafId: "leaf-2",
+      sessionId: "front-2",
+      backendSessionId: "back-2",
+      workspaceId: "ws-1",
+    };
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [mainWorktree, featureWorktree], services }),
+    );
+
+    let mainTabId = "";
+    act(() => {
+      mainTabId = result.current.openFilePreviewTab(sourceMain, {
+        path: "README.md",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    act(() => {
+      result.current.dispatchWorkspaceAction({ type: "SELECT_WORKTREE", path: featureWorktree.path });
+    });
+
+    let featureTabId = "";
+    act(() => {
+      featureTabId = result.current.openFilePreviewTab(sourceFeature, {
+        path: "README.md",
+        backendSessionId: "back-2",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    expect(featureTabId).not.toBe(mainTabId);
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+
+    const parkedMainLayout = result.current.state.worktreeLayouts?.[mainWorktree.path];
+    expect(parkedMainLayout?.tabs.some((t) => t.id === mainTabId)).toBe(true);
+    const parkedMainTab = parkedMainLayout?.tabs.find((t) => t.id === mainTabId);
+    expect(parkedMainTab?.kind).toBe("file");
+    if (parkedMainTab?.kind === "file") {
+      expect(parkedMainTab.backendSessionId).toBe("back-1");
+    }
+
+    expect(result.current.state.layout.tabs.some((t) => t.id === featureTabId)).toBe(true);
+    const activeFeatureTab = result.current.state.layout.tabs.find((t) => t.id === featureTabId);
+    expect(activeFeatureTab?.kind).toBe("file");
+    if (activeFeatureTab?.kind === "file") {
+      expect(activeFeatureTab.backendSessionId).toBe("back-2");
+    }
+  });
+
+  it("parks a delayed file preview under its source session worktree", () => {
+    const featureWorktree: Worktree = {
+      path: "/repo/feature",
+      head: "def",
+      branch: "refs/heads/feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    act(() => {
+      result.current.dispatchWorkspaceAction({
+        type: "ADD_TAB_WITH_SESSION",
+        tab: { id: "terminal-main", label: "main", sessionId: "front-1" },
+        session: {
+          id: "front-1",
+          cwd: worktree.path,
+          worktreePath: worktree.path,
+          workspaceId: "ws-1",
+          worktree: null,
+          backendSessionId: "back-1",
+          lifecycle: "working",
+        },
+      });
+      result.current.dispatchWorkspaceAction({ type: "SELECT_WORKTREE", path: featureWorktree.path });
+    });
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+
+    let delayedTabId = "";
+    act(() => {
+      delayedTabId = result.current.openFilePreviewTab(source, {
+        path: "delayed-only.ts",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+
+    expect(result.current.state.worktreeLayouts?.[worktree.path]?.tabs.some((tab) => tab.id === delayedTabId)).toBe(true);
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    expect(result.current.state.layout.tabs.some((tab) => tab.id === delayedTabId)).toBe(false);
+  });
 });
 

@@ -1408,8 +1408,10 @@ export function useWorkspaceStore({
   const openFilePreviewTab = useCallback(
     (source: FilePreviewSource, request: FilePreviewOpenRequest): string => {
       const snapshot = stateRef.current;
-      const existing = snapshot.layout.tabs.find(
-        (tab) => tab.kind === "file" && tab.path === request.path,
+      const sourceWorktreePath = sessionWorktreePath(snapshot.sessions[source.sessionId]);
+      const targetWorktreePath = sourceWorktreePath || snapshot.activeWorktreePath;
+      const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(
+        (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
       );
       if (existing && existing.kind === "file") {
         retainFilePreview(existing.previewId, source, request);
@@ -1423,8 +1425,9 @@ export function useWorkspaceStore({
       }
 
       for (const [wtPath, parkedLayout] of Object.entries(snapshot.worktreeLayouts ?? {})) {
+        if (sourceWorktreePath && wtPath !== sourceWorktreePath) continue;
         const parkedTab = parkedLayout.tabs.find(
-          (tab) => tab.kind === "file" && tab.path === request.path,
+          (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
         );
         if (parkedTab && parkedTab.kind === "file") {
           dispatch({ type: "SELECT_WORKTREE", path: wtPath });
@@ -1453,10 +1456,10 @@ export function useWorkspaceStore({
         previewId: tabId,
       };
       retainFilePreview(tabId, source, request);
-      dispatch({ type: "ADD_TAB_WITH_SESSION", tab });
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab, targetWorktreePath: targetWorktreePath ?? undefined });
 
       const updatedSnapshot = stateRef.current;
-      const allFileTabs = updatedSnapshot.layout.tabs.filter(
+      const allFileTabs = (targetWorktreePath === updatedSnapshot.activeWorktreePath ? updatedSnapshot.layout.tabs : []).filter(
         (t): t is FileTab => t.kind === "file",
       );
       const hasDuplicateBasename = allFileTabs.some(
