@@ -272,6 +272,34 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("does not attach without an output recovery listener when registration fails", async () => {
+    // Given: the event transport rejects recovery listener registration.
+    tauriListen.mockImplementation(async (event) => {
+      if (event === "native_terminal_stream_ended") throw new Error("listener unavailable");
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+    // When: the pane attempts its initial attachment.
+    const view = render(<NativeTerminalPane session={session("listener-failure")} />);
+    try {
+      await act(async () => {});
+      // Then: it remains actionable rather than starting an unmonitored stream.
+      expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(0);
+      expect(view.getByRole("alert")).toBeInTheDocument();
+      tauriListen.mockImplementation(async () => () => undefined);
+      await act(async () => { fireEvent.click(view.getByRole("alert")); });
+      expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toEqual([
+        ["cmd_native_terminal_attach", "listener-failure"],
+      ]);
+      expect(view.queryByRole("alert")).toBeNull();
+    } finally {
+      await act(async () => { view.unmount(); });
+      tauriListen.mockImplementation(async () => () => undefined);
+    }
+  });
+
   it("waits for the output recovery listener before starting the stream", async () => {
     const registration = deferred<() => void>();
     tauriListen.mockImplementation(async (event) =>

@@ -560,7 +560,7 @@ export function NativeTerminalPane({
   const [error, setError] = useState<string | null>(null);
   const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
-  const streamListenerReadyRef = useRef<Promise<unknown>>(Promise.resolve());
+  const ensureStreamListenerRef = useRef<() => Promise<unknown>>(async () => undefined);
 
   const retryAttach = useCallback(() => {
     (retryBoundsRef.current ?? retryAttachRef.current)?.();
@@ -1085,7 +1085,7 @@ export function NativeTerminalPane({
     lastAttachBindingRef.current = { sessionId: targetId, bindingKey: owner.bindingKey };
     const attachOp = force || bindingChanged ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
-      await streamListenerReadyRef.current;
+      await ensureStreamListenerRef.current();
       if (attachmentOwnerRef.current?.sessionId !== owner.sessionId
         || attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return;
       if (quarantinedBindingRef.current?.sessionId === targetId) return;
@@ -2522,7 +2522,10 @@ export function NativeTerminalPane({
     let streamRecoveryPending = false;
     let streamRecoveryRequested = false;
     let streamRecoveries = 0;
-    streamListenerReadyRef.current = listen<{ sessionId: string }>("native_terminal_stream_ended", (event) => {
+    let streamRegistration: Promise<void> | null = null;
+    ensureStreamListenerRef.current = () => {
+      if (streamRegistration) return streamRegistration;
+      streamRegistration = listen<{ sessionId: string }>("native_terminal_stream_ended", (event) => {
       if (!isSubscribed || event.payload.sessionId !== targetSessionId) return;
       streamRecoveryRequested = true;
       if (streamRecoveryPending) return;
@@ -2550,10 +2553,12 @@ export function NativeTerminalPane({
       if (!isSubscribed) { unlisten(); return; }
       unlistenStreamEnded = unlisten;
     }).catch((error: unknown) => {
-      if (!isSubscribed) return;
-      console.error("Failed to subscribe to terminal stream recovery", error);
-      setError("Terminal output recovery unavailable");
+      streamRegistration = null;
+      if (isSubscribed) setError("Terminal output recovery unavailable. Click to reconnect.");
+      throw error;
     });
+      return streamRegistration;
+    };
     void attemptAttach(0);
 
     return () => {
