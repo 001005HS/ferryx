@@ -543,6 +543,7 @@ pub struct NativeTerminalSession {
     /// is no longer on screen, so they are rejected with
     /// [`NativeTerminalError::SessionDetached`] instead.
     pub surface_attached: bool,
+    pub output_stream_ended: bool,
     pub snapshot_slot: Arc<SnapshotSlot>,
 }
 
@@ -1737,6 +1738,7 @@ impl NativeTerminalSurfaceHostState {
                         attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
+                        output_stream_ended: false,
                         bracketed_paste_seen: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
@@ -1920,7 +1922,7 @@ impl NativeTerminalSurfaceHostState {
             .pump_task
             .as_ref()
             .is_some_and(|task| !task.is_finished());
-        if !stream_is_live || !pump_is_live {
+        if !stream_is_live || !pump_is_live || session.output_stream_ended {
             return Ok(false);
         }
 
@@ -2081,6 +2083,7 @@ impl NativeTerminalSurfaceHostState {
                 // A backgrounded session kept streaming without a surface; this attach gives it
                 // one again and re-enables geometry updates.
                 session.surface_attached = true;
+                session.output_stream_ended = false;
                 if let Some(task) = session.stream_task.take() {
                     task.abort();
                 }
@@ -2270,6 +2273,7 @@ impl NativeTerminalSurfaceHostState {
                         agent_reports_own_state: false,
                         surface_attached: true,
                         bracketed_paste_seen,
+                        output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
                 );
@@ -2367,6 +2371,7 @@ impl NativeTerminalSurfaceHostState {
                     Ok(Some(msg)) => msg,
                     Ok(None) => {
                         let mut sessions_guard = sessions.lock();
+                        let mut owned_stream_ended = false;
                         if let Some(session) = sessions_guard
                             .get_mut(&session_id_owned)
                             .filter(|session| session.pump_generation == pump_generation)
@@ -2374,9 +2379,20 @@ impl NativeTerminalSurfaceHostState {
                             if let Err(error) = session.terminal.finish_synchronized_output() {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
                             }
+                            session.output_stream_ended = true;
                             session.publish_frame();
+                            owned_stream_ended = true;
                         }
                         drop(sessions_guard);
+                        if owned_stream_ended {
+                            if let Some(app) = app_handle.as_ref() {
+                                if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
+                                    session_id: session_id_owned.clone(),
+                                }) {
+                                    tracing::warn!(session_id = %session_id_owned, %error, "Failed to notify terminal stream disconnect");
+                                }
+                            }
+                        }
                         update_sender.send_replace(());
                         schedule_render();
                         break;
@@ -3158,7 +3174,7 @@ impl NativeTerminalSurfaceHostState {
         validate_session_id(session_id)?;
         let mut sessions = self.sessions.lock();
         let session = match sessions.get_mut(session_id) {
-            Some(session) if session.surface_attached => session,
+            Some(session) if session.surface_attached && !session.output_stream_ended => session,
             Some(_) | None => {
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
@@ -3237,6 +3253,7 @@ impl NativeTerminalSurfaceHostState {
                         agent_reports_own_state: false,
                         surface_attached: true,
                         bracketed_paste_seen: false,
+                        output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
                 );
@@ -6227,6 +6244,38 @@ mod tests {
             state.ensure_surface_attached(session_id),
             Err(NativeTerminalError::SessionDetached(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn ended_output_pump_rejects_input_until_reattached() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "ended-output-pump";
+        let (output, messages) = tokio::sync::mpsc::channel(1);
+        state.attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.into(),
+                epoch: 1,
+                start_sequence: None,
+                end_sequence: None,
+                gap: None,
+                history: Vec::new().into(),
+                history_segments: Vec::new(),
+                pty_cols: Some(80),
+                pty_rows: Some(24),
+                remote_generation: None,
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+            None,
+        ).unwrap();
+        let pump = state.sessions.lock().get_mut(session_id).unwrap().pump_task.take().unwrap();
+        drop(output);
+        tokio::time::timeout(std::time::Duration::from_secs(3), pump).await.unwrap().unwrap();
+        let result = state.encode_attached_input(session_id, &NativeTerminalInput::Text { text: "x".into() });
+        assert!(matches!(result, Err(NativeTerminalError::SessionDetached(_))));
+        state.teardown();
     }
 
     #[test]

@@ -196,6 +196,49 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     vi.restoreAllMocks();
   });
 
+  it("reattaches the same backend when its output stream ends without user input", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+    const view = render(<NativeTerminalPane session={session("stream-ended")} />);
+    await act(async () => {});
+    expect(ended).toBeTypeOf("function");
+    await act(async () => { ended!({ payload: { sessionId: "other-backend" } }); });
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(1);
+    await act(async () => { ended!({ payload: { sessionId: "stream-ended" } }); });
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toEqual([
+      ["cmd_native_terminal_attach", "stream-ended"],
+      ["cmd_native_terminal_attach", "stream-ended"],
+    ]);
+    expect(tauriInvoke.mock.calls.some(([command]) => command === "cmd_native_terminal_send_input")).toBe(false);
+    await act(async () => { view.unmount(); });
+    const attachedBeforeStaleEvent = lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach").length;
+    await act(async () => { ended!({ payload: { sessionId: "stream-ended" } }); });
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(attachedBeforeStaleEvent);
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("waits for the output recovery listener before starting the stream", async () => {
+    const registration = deferred<() => void>();
+    tauriListen.mockImplementation(async (event) =>
+      event === "native_terminal_stream_ended" ? registration.promise : () => undefined,
+    );
+    const view = render(<NativeTerminalPane session={session("listener-barrier")} />);
+    await act(async () => {});
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(0);
+    await act(async () => { registration.resolve(() => undefined); });
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toEqual([
+      ["cmd_native_terminal_attach", "listener-barrier"],
+    ]);
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
   it("retries failed bounds with a fresh attachment and waits for presentation", async () => {
     // Given: attach succeeded, but the native surface cannot accept bounds until reattached.
     const failure = { code: "INTERNAL_ERROR", message: "native surface unavailable" };

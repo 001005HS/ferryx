@@ -560,6 +560,7 @@ export function NativeTerminalPane({
   const [error, setError] = useState<string | null>(null);
   const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
+  const streamListenerReadyRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const retryAttach = useCallback(() => {
     (retryBoundsRef.current ?? retryAttachRef.current)?.();
@@ -1084,7 +1085,9 @@ export function NativeTerminalPane({
     lastAttachBindingRef.current = { sessionId: targetId, bindingKey: owner.bindingKey };
     const attachOp = force || bindingChanged ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
-      if (attachmentOwnerRef.current !== owner) return;
+      await streamListenerReadyRef.current;
+      if (attachmentOwnerRef.current?.sessionId !== owner.sessionId
+        || attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return;
       if (quarantinedBindingRef.current?.sessionId === targetId) return;
       await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
@@ -2515,9 +2518,40 @@ export function NativeTerminalPane({
     };
     updateDeviceScale();
     window.addEventListener("resize", updateDeviceScale);
+    let unlistenStreamEnded: (() => void) | undefined;
+    let streamRecoveryPending = false;
+    let streamRecoveries = 0;
+    streamListenerReadyRef.current = listen<{ sessionId: string }>("native_terminal_stream_ended", (event) => {
+      if (!isSubscribed || event.payload.sessionId !== targetSessionId || streamRecoveryPending) return;
+      const streamOwner = attachmentOwnerRef.current;
+      streamRecoveryPending = true;
+      void (async () => {
+        try {
+          await inFlightAttempt;
+          if (!isSubscribed || attachmentOwnerRef.current !== streamOwner) return;
+          if (streamRecoveries >= maxRetries) {
+            setError("Terminal output disconnected. Click to reconnect.");
+            return;
+          }
+          streamRecoveries += 1;
+          isAttached = false;
+          await attemptAttach(streamRecoveries, true);
+        } finally {
+          streamRecoveryPending = false;
+        }
+      })();
+    }).then((unlisten) => {
+      if (!isSubscribed) { unlisten(); return; }
+      unlistenStreamEnded = unlisten;
+    }).catch((error: unknown) => {
+      if (!isSubscribed) return;
+      console.error("Failed to subscribe to terminal stream recovery", error);
+      setError("Terminal output recovery unavailable");
+    });
     void attemptAttach(0);
 
     return () => {
+      unlistenStreamEnded?.();
       retryAttachRef.current = null;
       retryBoundsRef.current = null;
       resolutionQuery?.removeEventListener("change", updateDeviceScale);

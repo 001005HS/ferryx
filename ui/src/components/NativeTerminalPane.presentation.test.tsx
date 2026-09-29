@@ -169,6 +169,7 @@ describe("native terminal presentation retention", () => {
     });
     const onUnavailable = vi.fn();
     const view = render(<NativeTerminalPane session={{ ...session(), daemonEpoch: "epoch-a", remoteGeneration: 1 }} onBackendSessionUnavailable={onUnavailable} />);
+    await act(async () => {});
     expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
     await act(async () => {
       view.rerender(<NativeTerminalPane session={{ ...session(), ...identity }} onBackendSessionUnavailable={onUnavailable} />);
