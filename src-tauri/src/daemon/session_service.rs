@@ -356,6 +356,12 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub fn ensure_agent_sink(&self) {
+        // Bind, then unsize: `Arc::clone` cannot coerce through `&Arc<_>` at the call site.
+        let sink: Arc<dyn crate::terminal::remote::AgentStateSink> = self.agent_states.clone();
+        self.terminal_service.remote().set_agent_sink(sink);
+    }
+
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
         self.desktop_geometries
             .lock()
@@ -1032,6 +1038,7 @@ impl DaemonSessionService {
     }
 
     pub(super) async fn restore_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
+        self.ensure_agent_sink();
         self.migrate_legacy_remote_persistence(&path).await?;
         let paired_path = path.with_file_name("paired_descriptors.json");
         self.terminal_service.paired().set_store_path(paired_path);
@@ -1246,7 +1253,6 @@ impl DaemonSessionService {
                     tracing::error!(%error, "Remote session record removal failed");
                 }
             }
-            crate::ssh::agent_forward::detach(&cleanup_session_id).await;
         });
         Ok(())
     }
@@ -1354,74 +1360,21 @@ impl DaemonSessionService {
             session.extra.insert("request".into(), request_value);
             save_session_to_path(&request_path, &session)
         }).await.map_err(|e| e.to_string())?;
-        let descriptor = {
-            let ingress = crate::ssh::agent_forward::AgentStateIngress::global();
-            let mut agent_channel = None;
-            let agent_env = match ingress {
-                Some(ingress) => {
-                    let (token, remote_session_id) =
-                        ingress.register(Arc::clone(&self.agent_states)).await;
-                    match crate::ssh::agent_forward::start_forward(&config.host, ingress.port())
-                        .await
-                    {
-                        Ok(forward) => {
-                            let env = std::collections::HashMap::from([
-                                ("FERRYX_SESSION_ID".to_string(), remote_session_id),
-                                (
-                                    "FERRYX_AGENT_STATE_PORT".to_string(),
-                                    forward.remote_port.to_string(),
-                                ),
-                                ("FERRYX_AGENT_STATE_TOKEN".to_string(), token.clone()),
-                            ]);
-                            agent_channel = Some((forward, token));
-                            Some(env)
-                        }
-                        Err(error) => {
-                            ingress.revoke(&token).await;
-                            tracing::warn!(
-                                stage = "agent_state_forward",
-                                %error,
-                                "Remote agent state unavailable for this session; terminal continues"
-                            );
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
-            let created = self
-                .terminal_service
-                .remote()
-                .create(
-                    config,
-                    crate::ssh::bridge::SpawnParams {
-                        cols: Some(cols),
-                        rows: Some(rows),
-                        env: agent_env,
-                        ..Default::default()
-                    },
-                    request.into(),
-                )
-                .await;
-            let descriptor = match created {
-                Ok(descriptor) => descriptor,
-                Err(error) => {
-                    if let (Some(ingress), Some((forward, token))) = (ingress, agent_channel) {
-                        ingress.revoke(&token).await;
-                        forward.close().await;
-                    }
-                    return Err(SpawnError::Other(error.to_string()));
-                }
-            };
-            if let (Some(ingress), Some((forward, token))) = (ingress, agent_channel) {
-                ingress
-                    .bind_local(&token, &descriptor.backend_session_id)
-                    .await;
-                crate::ssh::agent_forward::attach(&descriptor.backend_session_id, token, forward)
-                    .await;
-            }
-            descriptor
-        };
+        self.ensure_agent_sink();
+        let descriptor = self
+            .terminal_service
+            .remote()
+            .create(
+                config,
+                crate::ssh::bridge::SpawnParams {
+                    cols: Some(cols),
+                    rows: Some(rows),
+                    ..Default::default()
+                },
+                request.into(),
+            )
+            .await
+            .map_err(|error| SpawnError::Other(error.to_string()))?;
         let id = descriptor.backend_session_id.clone();
         self.session_metadata.write().insert(
             id.clone(),
@@ -2194,7 +2147,6 @@ impl DaemonSessionService {
         self.terminal_service.close_session(session_id).await?;
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
-        crate::ssh::agent_forward::detach(session_id).await;
         if remote {
             self.persist_remote_sessions_at(self.remote_sessions_path.clone())
                 .await
@@ -2210,7 +2162,6 @@ impl DaemonSessionService {
         self.terminal_service.hibernate_session(session_id).await?;
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
-        crate::ssh::agent_forward::detach(session_id).await;
         Ok(())
     }
 

@@ -4,6 +4,10 @@
 pub use ferryx_lib::cli::*;
 
 fn main() {
+    #[cfg(unix)]
+    if let Some(code) = ferryx_lib::ssh::transport_unix::run_supervisor_mode() {
+        std::process::exit(code);
+    }
     // Both launch modes need this before anything opens a file: launchd gives an app a soft
     // descriptor limit of 256, and a terminal daemon spends roughly three descriptors per live
     // session, so the inherited default is exhausted after a few dozen sessions and the next

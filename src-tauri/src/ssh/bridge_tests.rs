@@ -1285,3 +1285,743 @@ async fn ssh_bridge_real_pty_large_session_writes_do_not_block_other_session() {
 
     client.close().await.expect("close client");
 }
+
+/// Spawns a `cat` child with piped stdio.
+#[cfg(unix)]
+fn spawn_cat_child() -> tokio::process::Child {
+    tokio::process::Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cat child")
+}
+
+/// Spawns a `cat` child plus a duplicate of its stdout pipe handle.
+///
+/// The duplicate is the test's independent EOF barrier: it reaches end-of-file only when the
+/// child (the sole writer of that pipe) is gone.
+#[cfg(unix)]
+fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd) {
+    let mut child = spawn_cat_child();
+    use std::os::unix::io::AsRawFd;
+    let stdout = child.stdout.as_ref().expect("child stdout");
+    let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
+    (child, duped)
+}
+
+/// Spawns a child that does not exit when its stdin closes, plus a duplicate of its stdout
+/// pipe handle.
+///
+/// `cat` cannot be used where stdin EOF must be ruled out: it exits by itself once the
+/// transferred stdin pipe closes, which would make "still alive" assertions vacuous.
+#[cfg(unix)]
+fn spawn_pipe_guarded_sleeper(seconds: u32) -> (tokio::process::Child, std::os::unix::io::RawFd) {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("exec sleep {seconds}"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sleeper child");
+    use std::os::unix::io::AsRawFd;
+    let stdout = child.stdout.as_ref().expect("child stdout");
+    let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
+    (child, duped)
+}
+
+/// Spawns a `sleep` child with a non-piped stdin, i.e. one `from_child` must reject.
+#[cfg(unix)]
+fn spawn_stdinless_sleeper() -> (tokio::process::Child, std::os::unix::io::RawFd) {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exec sleep 300")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdin-less sleeper child");
+    use std::os::unix::io::AsRawFd;
+    let stdout = child.stdout.as_ref().expect("child stdout");
+    let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
+    (child, duped)
+}
+
+/// True while the test child is still running.
+///
+/// `waitpid(WNOHANG)` returns `0` only for a process that has not exited: an exited child is
+/// either reported (and reaped here) or already reaped, so this cannot be satisfied by a
+/// zombie that someone else should have been keeping alive.
+#[cfg(unix)]
+fn child_still_running(pid: u32) -> bool {
+    let mut status = 0;
+    unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) == 0 }
+}
+
+/// Event barrier: bounded wait for the duplicated child-stdout pipe to reach EOF.
+#[cfg(unix)]
+async fn wait_for_fd_eof(fd: std::os::unix::io::RawFd, timeout_dur: Duration) -> bool {
+    use std::os::unix::io::FromRawFd;
+    use tokio::io::AsyncReadExt;
+    let std_file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = tokio::fs::File::from_std(std_file);
+    let mut buf = [0u8; 1];
+    matches!(
+        tokio::time::timeout(timeout_dur, file.read(&mut buf)).await,
+        Ok(Ok(0))
+    )
+}
+
+/// Bounded observational wait for a test child's reaping.
+///
+/// Reaping is not observable through any event API, so this polls `waitpid(WNOHANG)` - which
+/// also reaps the process when the runtime's orphan reaper has not already done so - and gives
+/// up at the deadline. Callers always establish the pipe-EOF barrier first.
+#[cfg(unix)]
+async fn wait_for_child_reaped(pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let mut status = 0;
+        let res = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+        // Reaped now, or already reaped by the runtime's orphan reaper.
+        if res == pid as i32
+            || (res == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_child_exit_on_drop_with_event_barrier() {
+    let (child, stdout_fd) = spawn_pipe_guarded_cat();
+    let pid = child.id().expect("child id");
+    let conn = BridgeConnection::from_child(child).expect("from_child");
+    assert_eq!(conn.child_id(), Some(pid));
+
+    // Drop connection without calling close
+    drop(conn);
+
+    // Event barrier: stdout pipe must reach EOF as child is killed on drop
+    let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+    assert!(eof, "child process must terminate and close pipe on drop");
+    let reaped = wait_for_child_reaped(pid).await;
+    assert!(reaped, "child PID {pid} must be reaped after drop");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_child_exit_on_close_with_event_barrier() {
+    let (child, stdout_fd) = spawn_pipe_guarded_cat();
+    let pid = child.id().expect("child id");
+    let mut conn = BridgeConnection::from_child(child).expect("from_child");
+
+    conn.close().await.expect("close connection");
+
+    // Event barrier: stdout pipe must reach EOF
+    let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+    assert!(eof, "child process must terminate and close pipe on close");
+    let reaped = wait_for_child_reaped(pid).await;
+    assert!(reaped, "child PID {pid} must be reaped after close");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_child_exit_on_cancellation_with_event_barrier() {
+    let (child, stdout_fd) = spawn_pipe_guarded_cat();
+    let pid = child.id().expect("child id");
+    let mut conn = BridgeConnection::from_child(child).expect("from_child");
+
+    // Begin `close()` and cancel it by dropping the future after one poll. Whether that poll
+    // parks (the guard still owns the child) or completes, cancellation must never strand a
+    // live child: the guard kills it on drop either way.
+    {
+        let mut close_fut = Box::pin(conn.close());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = std::future::Future::poll(close_fut.as_mut(), &mut cx);
+    }
+    drop(conn);
+
+    // Event barrier: the child must terminate and close its stdout pipe
+    let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+    assert!(
+        eof,
+        "child process must terminate on cancelled close and drop"
+    );
+    let reaped = wait_for_child_reaped(pid).await;
+    assert!(
+        reaped,
+        "child PID {pid} must be reaped after cancelled close"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_imported_connection_has_no_kill_rights() {
+    let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+    let pid = child.id().expect("child id");
+    let mut conn = BridgeConnection::from_child(child).expect("from_child");
+
+    conn.pause_for_transfer().await.expect("pause_for_transfer");
+    let state = conn.export_transfer_state().expect("export_transfer_state");
+
+    // Detach predecessor
+    conn.detach_without_kill();
+    drop(conn);
+
+    // Detaching releases the handle without signalling the child.
+    assert!(
+        child_still_running(pid),
+        "child must survive predecessor detach"
+    );
+
+    // The successor keeps the recorded identity but gains no kill rights over a child it does
+    // not own: a transferred pid is never a signal target. The sleeper ignores stdin, so this
+    // isolates kill rights from a stdin-EOF exit.
+    let mut imported = BridgeConnection::from_transfer_state(state).expect("from_transfer_state");
+    assert_eq!(imported.child_id(), Some(pid));
+    imported.close().await.expect("close imported");
+    assert!(
+        child_still_running(pid),
+        "imported close must not kill a child owned by another process"
+    );
+
+    // Cleanup: this test spawned the child, so it ends and reaps it explicitly.
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+    assert!(
+        eof,
+        "spawner cleanup must end the child and close its stdout pipe"
+    );
+    let reaped = wait_for_child_reaped(pid).await;
+    assert!(reaped, "test must reap the child it killed");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
+    // Part 1: Rollback ordering - pause then rollback retains ownership in predecessor
+    {
+        let (child, stdout_fd) = spawn_pipe_guarded_cat();
+        let pid = child.id().expect("child id");
+        let mut conn = BridgeConnection::from_child(child).expect("from_child");
+
+        conn.pause_for_transfer().await.expect("pause");
+        conn.unpause_after_rollback();
+
+        // Predecessor dropped after rollback -> must kill child
+        drop(conn);
+        let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+        assert!(eof, "rollback must retain ownership so drop kills child");
+        let reaped = wait_for_child_reaped(pid).await;
+        assert!(reaped, "child PID {pid} reaped after rollback drop");
+    }
+
+    // Part 2: Commit ordering - detach releases the local handle without killing it, and the
+    // successor can never kill a child it does not own.
+    {
+        let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+        let pid = child.id().expect("child id");
+        let mut conn = BridgeConnection::from_child(child).expect("from_child");
+
+        conn.pause_for_transfer().await.expect("pause");
+        let state = conn.export_transfer_state().expect("export");
+        conn.detach_without_kill();
+
+        // Predecessor is dropped (simulating predecessor process/connection death)
+        drop(conn);
+
+        // Barrier check: child MUST NOT be killed by predecessor death!
+        assert!(
+            child_still_running(pid),
+            "predecessor death must not kill detached child"
+        );
+
+        // Successor imports the transferred pipes and drops: it holds no kill rights.
+        let successor = BridgeConnection::from_transfer_state(state).expect("import");
+        assert_eq!(successor.child_id(), Some(pid));
+        drop(successor);
+        assert!(
+            child_still_running(pid),
+            "successor drop must not kill a child it does not own"
+        );
+
+        // Cleanup: this test spawned the child, so it ends and reaps it explicitly.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+        assert!(
+            eof,
+            "spawner cleanup must end the child and close its stdout pipe"
+        );
+        let reaped = wait_for_child_reaped(pid).await;
+        assert!(reaped, "test must reap the child it killed");
+    }
+}
+
+#[test]
+fn ssh_bridge_agent_state_snapshot_dto_and_read_result_contract() {
+    let snapshot = AgentStateSnapshot {
+        revision: RemoteCursor(42),
+        state: "busy".to_string(),
+        agent: Some("agent-alpha".to_string()),
+        provider_session: Some(json!({ "providerId": "anthropic", "tokens": 120 })),
+        detail: Some("processing task".to_string()),
+    };
+
+    // Verify camelCase serialization
+    let json_val = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    assert_eq!(json_val["revision"], "42");
+    assert_eq!(json_val["state"], "busy");
+    assert_eq!(json_val["agent"], "agent-alpha");
+    assert_eq!(json_val["providerSession"]["providerId"], "anthropic");
+    assert_eq!(json_val["detail"], "processing task");
+
+    // Verify deserialization
+    let decoded: AgentStateSnapshot =
+        serde_json::from_value(json_val).expect("deserialize snapshot");
+    assert_eq!(decoded, snapshot);
+
+    // ReadResult constructor with agent_state = None (testing default)
+    let mut rr_default = ReadResult {
+        target: TargetRef {
+            host_id: "h1".into(),
+            owner_id: "o1".into(),
+            epoch: Epoch(1),
+            backend_session_id: "s1".into(),
+        },
+        pid: RemotePid(100),
+        cwd: PathBuf::from("/cwd"),
+        cursor: RemoteCursor(1),
+        after_sequence: 0,
+        gap: false,
+        exited: false,
+        chunks: vec![],
+        agent_state: None,
+    };
+    assert_eq!(rr_default.agent_state, None);
+
+    // ReadResult constructor with agent_state = Some(...)
+    rr_default.agent_state = Some(snapshot.clone());
+    assert_eq!(rr_default.agent_state, Some(snapshot));
+
+    // Deserializing ReadResult without agentState defaults to None
+    let raw_rr_json = json!({
+        "target": { "hostId": "h1", "ownerId": "o1", "epoch": "1", "backendSessionId": "s1" },
+        "pid": 100,
+        "cwd": "/cwd",
+        "cursor": "1",
+        "afterSequence": 0,
+        "gap": false,
+        "exited": false,
+        "chunks": []
+    });
+    let parsed_rr: ReadResult =
+        serde_json::from_value(raw_rr_json).expect("deserialize without agentState");
+    assert_eq!(parsed_rr.agent_state, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_pty_read_with_agent_state_capability_gating() {
+    // Connection without agentStateV1 capability
+    let ctrl1 = BridgeConnection::from_child(spawn_cat_child()).unwrap();
+    let rdr1 = BridgeConnection::from_child(spawn_cat_child()).unwrap();
+
+    let handshake_without_cap = HandshakeResult {
+        protocol: PROTOCOL_VERSION,
+        capabilities: vec!["sshHelperV1".into()],
+        host_id: "test-host".into(),
+        owner_id: "test-owner".into(),
+        epoch: Epoch(1),
+        os: "posix".into(),
+        arch: "arm64".into(),
+    };
+
+    let client_without = SshBridgeClient {
+        control: Arc::new(Mutex::new(ctrl1)),
+        reader: Arc::new(Mutex::new(rdr1)),
+        host_id: "test-host".into(),
+        owner_id: "test-owner".into(),
+        epoch: Epoch(1),
+        handshake: handshake_without_cap,
+    };
+
+    // Connection with agentStateV1 capability
+    let ctrl2 = BridgeConnection::from_child(spawn_cat_child()).unwrap();
+    let rdr2 = BridgeConnection::from_child(spawn_cat_child()).unwrap();
+
+    let handshake_with_cap = HandshakeResult {
+        protocol: PROTOCOL_VERSION,
+        capabilities: vec!["sshHelperV1".into(), "agentStateV1".into()],
+        host_id: "test-host".into(),
+        owner_id: "test-owner".into(),
+        epoch: Epoch(1),
+        os: "posix".into(),
+        arch: "arm64".into(),
+    };
+
+    let client_with = SshBridgeClient {
+        control: Arc::new(Mutex::new(ctrl2)),
+        reader: Arc::new(Mutex::new(rdr2)),
+        host_id: "test-host".into(),
+        owner_id: "test-owner".into(),
+        epoch: Epoch(1),
+        handshake: handshake_with_cap,
+    };
+
+    // The production seam that gates `agentAfterRevision` on `pty.read`.
+    assert!(!client_without.supports_agent_state());
+    assert!(client_with.supports_agent_state());
+
+    client_without.close().await.expect("close without");
+    client_with.close().await.expect("close with");
+}
+
+/// Reads a `KEY=<pid>` line printed by the exit-hook helper process.
+#[cfg(unix)]
+fn parse_reported_pid(stdout: &str, key: &str) -> Option<u32> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key)?.trim().parse().ok())
+}
+
+/// Existence probe only: signal 0 delivers nothing, the kernel just reports whether the pid
+/// exists. Used to observe processes that are not this process's children.
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Bounded wait for a non-child process to disappear (killed, then reaped by its reaper).
+#[cfg(unix)]
+async fn wait_for_process_gone(pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// `from_child` takes stdio before the ownership guard exists, so a setup failure must end the
+/// child itself: a sleeper stays alive unless something kills it.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_setup_failure_ends_the_child() {
+    let (child, stdout_fd) = spawn_stdinless_sleeper();
+    let pid = child.id().expect("child id");
+
+    let err = match BridgeConnection::from_child(child) {
+        Err(err) => err,
+        Ok(_) => panic!("from_child must reject a child without piped stdin"),
+    };
+    assert!(
+        matches!(err, BridgeError::ProcessSpawn(_)),
+        "expected ProcessSpawn, got {err:?}"
+    );
+
+    // Event barrier: the child's stdout pipe must reach EOF because the child is gone.
+    let eof = wait_for_fd_eof(stdout_fd, Duration::from_secs(5)).await;
+    assert!(
+        eof,
+        "setup failure must end the child and close its stdout pipe"
+    );
+    assert!(
+        !child_still_running(pid),
+        "setup failure must not leave the child running"
+    );
+    let reaped = wait_for_child_reaped(pid).await;
+    assert!(
+        reaped,
+        "child PID {pid} must be reaped after a setup failure"
+    );
+}
+/// Hosts supervisor mode inside the test binary, whose harness cannot take custom argv.
+#[cfg(unix)]
+#[test]
+#[ignore = "invoked as a subprocess by Owner::prepare through FERRYX_SSH_SUPERVISOR_LIBTEST"]
+fn ssh_bridge_transport_supervisor_entry() {
+    if let Some(code) = crate::ssh::transport_unix::run_supervisor_mode() {
+        std::process::exit(code);
+    }
+}
+
+#[cfg(unix)]
+fn prepare_test_owner(
+    command: &mut tokio::process::Command,
+    supervisor_program: Option<&std::path::Path>,
+) -> crate::ssh::transport_unix::Owner {
+    crate::ssh::transport_unix::Owner::prepare_for_test(command, true, supervisor_program)
+        .expect("prepare supervised owner")
+}
+
+/// Transport fixture that blocks on its stdin and never exits by timer: only an explicit kill, or
+/// the stdin EOF that follows its owner's death, can move it.
+#[cfg(unix)]
+fn blocked_transport_command() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("read -r _ <&0; exec sleep 1000000000");
+    command
+}
+
+/// Spawns a supervised blocked transport and reports both pids.
+#[cfg(unix)]
+async fn spawn_supervised_transport() -> (BridgeConnection, u32, u32) {
+    let mut command = blocked_transport_command();
+    let owner = prepare_test_owner(&mut command, None);
+    let child = command.spawn().expect("spawn supervisor");
+    let supervisor_pid = child.id().expect("supervisor pid");
+    let owner = owner.attach(&child).await.expect("attach owner");
+    let transport_pid = owner.transport_pid().expect("transport pid");
+    let connection =
+        BridgeConnection::from_supervised_child(child, owner).expect("supervised connection");
+    (connection, supervisor_pid, transport_pid)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervised_close_ends_transport() {
+    let (mut connection, supervisor_pid, transport_pid) = spawn_supervised_transport().await;
+    assert!(process_exists(transport_pid), "transport must be running");
+
+    connection
+        .close()
+        .await
+        .expect("close supervised connection");
+
+    assert!(
+        wait_for_process_gone(transport_pid).await,
+        "closing the lease must end transport {transport_pid}"
+    );
+    assert!(
+        wait_for_process_gone(supervisor_pid).await,
+        "supervisor {supervisor_pid} must exit after reaping its transport"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervised_drop_ends_transport() {
+    let (connection, supervisor_pid, transport_pid) = spawn_supervised_transport().await;
+    assert!(process_exists(transport_pid), "transport must be running");
+
+    drop(connection);
+
+    assert!(
+        wait_for_process_gone(transport_pid).await,
+        "dropping the owner must end transport {transport_pid}"
+    );
+    assert!(
+        wait_for_process_gone(supervisor_pid).await,
+        "supervisor {supervisor_pid} must exit after reaping its transport"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervised_release_keeps_transport_for_this_process() {
+    let (mut connection, _supervisor_pid, transport_pid) = spawn_supervised_transport().await;
+
+    connection.detach_without_kill();
+    drop(connection);
+
+    assert!(
+        process_exists(transport_pid),
+        "a released supervised transport must survive its connection while the lease is open"
+    );
+}
+
+/// A failed supervisor handshake must close the lease and leave nothing running.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervision_attach_failure_leaves_no_supervisor() {
+    let mut command = blocked_transport_command();
+    let owner = prepare_test_owner(&mut command, Some(std::path::Path::new("/bin/true")));
+    let mut child = command.spawn().expect("spawn supervisor");
+    let supervisor_pid = child.id().expect("supervisor pid");
+
+    let attach = owner.attach(&child).await;
+    assert!(
+        attach.is_err(),
+        "a silent supervisor must fail the handshake"
+    );
+    drop(attach);
+
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("supervisor must exit once the lease is closed")
+        .expect("supervisor wait");
+    assert!(
+        !process_exists(supervisor_pid) || status.code().is_some(),
+        "supervisor {supervisor_pid} must be reaped after the failed handshake"
+    );
+}
+
+/// Owner process for the two owner-death proofs: it holds a supervised blocked transport, reports
+/// readiness, then either parks for a `SIGKILL` or leaves through `std::process::exit`.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by the owner-death proof tests"]
+fn ssh_bridge_transport_owner_scenario() {
+    if std::env::var_os("FERRYX_TRANSPORT_OWNER_SCENARIO").is_none() {
+        return;
+    }
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let (_connection, supervisor_pid, transport_pid) = spawn_supervised_transport().await;
+        println!("SUPERVISOR_PID={supervisor_pid}");
+        println!("TRANSPORT_PID={transport_pid}");
+        println!("READY");
+        if std::env::var_os("FERRYX_TRANSPORT_OWNER_EXIT").is_some() {
+            std::process::exit(0);
+        }
+        std::future::pending::<()>().await;
+    });
+}
+
+/// Spawns the owner scenario and waits for its readiness report, keeping its stdout readable as
+/// the death barrier: the supervisor inherits that pipe, so it reaches EOF only once the owner is
+/// gone *and* the supervisor has finished killing and reaping the transport.
+#[cfg(unix)]
+async fn spawn_owner_scenario(
+    exit_cleanly: bool,
+) -> (
+    tokio::process::Child,
+    tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    u32,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    let current_exe = std::env::current_exe().expect("current test binary");
+    let mut command = tokio::process::Command::new(current_exe);
+    command
+        .args([
+            "--ignored",
+            "--nocapture",
+            "ssh_bridge_transport_owner_scenario",
+        ])
+        .env("FERRYX_TRANSPORT_OWNER_SCENARIO", "1")
+        .stdout(Stdio::piped());
+    if exit_cleanly {
+        command.env("FERRYX_TRANSPORT_OWNER_EXIT", "1");
+    }
+    let mut scenario = command.spawn().expect("spawn owner scenario");
+    let stdout = scenario.stdout.take().expect("scenario stdout");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut transport_pid = None;
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("owner scenario did not report readiness in time")
+            .expect("owner scenario stdout")
+            .expect("owner scenario exited before reporting readiness");
+        if line.trim() == "READY" {
+            break;
+        }
+        if let Some(pid) = parse_reported_pid(&line, "TRANSPORT_PID=") {
+            transport_pid = Some(pid);
+        }
+    }
+    let transport_pid = transport_pid.expect("owner scenario transport pid");
+    (scenario, lines, transport_pid)
+}
+
+#[cfg(unix)]
+async fn assert_scenario_stdout_closed(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut diagnostics: Vec<String> = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, lines.next_line()).await {
+            Ok(Ok(None)) => return,
+            Ok(Ok(Some(line))) => diagnostics.push(line),
+            Ok(Err(error)) => {
+                panic!("scenario stdout failed: {error}; lines seen: {diagnostics:?}")
+            }
+            Err(_) => panic!(
+                "scenario stdout did not reach EOF before the deadline; lines seen: {diagnostics:?}"
+            ),
+        }
+    }
+}
+
+/// `SIGKILL` of the owning process must end the supervised transport, not strand it.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_owner_sigkill_ends_supervised_transport() {
+    let (mut scenario, mut lines, transport_pid) = spawn_owner_scenario(false).await;
+
+    scenario.kill().await.expect("SIGKILL the owner scenario");
+    let _ = scenario.wait().await;
+
+    assert_scenario_stdout_closed(&mut lines).await;
+    assert!(
+        !process_exists(transport_pid),
+        "owner SIGKILL must end transport {transport_pid}"
+    );
+}
+
+/// `std::process::exit` of the owning process must end the supervised transport as well.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_owner_process_exit_ends_supervised_transport() {
+    let (mut scenario, mut lines, transport_pid) = spawn_owner_scenario(true).await;
+
+    let status = tokio::time::timeout(Duration::from_secs(10), scenario.wait())
+        .await
+        .expect("owner scenario did not exit in time")
+        .expect("owner scenario wait");
+    assert!(
+        status.success(),
+        "owner scenario must exit cleanly: {status}"
+    );
+
+    assert_scenario_stdout_closed(&mut lines).await;
+    assert!(
+        !process_exists(transport_pid),
+        "owner process exit must end transport {transport_pid}"
+    );
+}
+
+/// The supervised stdio wiring must carry the transport's own bytes: writing through the
+/// connection reaches the transport stdin and its stdout returns intact, with the supervisor's own
+/// stdio (a libtest harness here) kept out of the protocol.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervised_stdio_direction_round_trip() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut command = tokio::process::Command::new("/bin/cat");
+    let owner = prepare_test_owner(&mut command, None);
+    let child = command.spawn().expect("spawn supervisor");
+    let owner = owner.attach(&child).await.expect("attach owner");
+    let mut connection =
+        BridgeConnection::from_supervised_child(child, owner).expect("supervised connection");
+
+    let writer = connection.writer.as_mut().expect("connection writer");
+    writer
+        .write_all(b"supervised-stdio\n")
+        .await
+        .expect("write to transport stdin");
+    writer.flush().await.expect("flush transport stdin");
+
+    let reader = connection.reader.as_mut().expect("connection reader");
+    let mut chunk = [0u8; 17];
+    tokio::time::timeout(Duration::from_secs(10), reader.read_exact(&mut chunk))
+        .await
+        .expect("supervised stdio round trip timed out")
+        .expect("read transport stdout");
+    assert_eq!(&chunk, b"supervised-stdio\n");
+}

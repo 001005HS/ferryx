@@ -1,17 +1,26 @@
 //! Async framed OpenSSH client for remote helper communication and daemon reconnection.
 
+#[cfg(windows)]
+use super::transport_windows::{ChildSpec, TransportChild, TransportOwner};
 use crate::ipc::IpcError;
 use crate::scoped_contracts::{Epoch, TargetRef};
 use crate::ssh::direct;
 use crate::ssh::helper_setup::{self, HelperLocation};
 use crate::ssh::runtime::RemoteEnvironment;
+#[cfg(unix)]
+use crate::ssh::transport_unix;
 use crate::ssh::SshHost;
+#[cfg(any(unix, windows))]
+use crate::terminal::shell::ShellCommandPlan;
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(test)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,6 +195,16 @@ pub struct ReadChunk {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentStateSnapshot {
+    pub revision: RemoteCursor,
+    pub state: String,
+    pub agent: Option<String>,
+    pub provider_session: Option<serde_json::Value>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadResult {
     pub target: TargetRef,
     pub pid: RemotePid,
@@ -195,6 +214,8 @@ pub struct ReadResult {
     pub gap: bool,
     pub exited: bool,
     pub chunks: Vec<ReadChunk>,
+    #[serde(default)]
+    pub agent_state: Option<AgentStateSnapshot>,
 }
 
 impl ReadResult {
@@ -461,18 +482,31 @@ impl std::os::unix::io::AsRawFd for BridgeReaderStream {
 
 /// Transfer state for a single BridgeConnection containing duplicated raw file descriptors
 /// and buffer/child snapshot.
+///
+/// In-process handover only: the raw descriptor numbers are meaningful exclusively in the
+/// process that produced them. Moving this state to another process requires OS-level
+/// descriptor passing (e.g. `SCM_RIGHTS`) plus independently established child ownership;
+/// this structure provides neither.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeConnectionTransferState {
     pub stdin_fd: i32,
     pub stdout_fd: i32,
     pub stderr_fd: i32,
+    /// Informational pid of the bridge child spawned by the exporting process.
+    ///
+    /// The successor never owns this process: a raw pid is never signalled or reaped
+    /// from transferred state.
     pub child_pid: Option<u32>,
     pub captured_stderr: Vec<u8>,
     pub prefetch: Vec<u8>,
 }
 
 impl BridgeConnectionTransferState {
+    /// Closes the duplicated descriptors owned by this aborted handover.
+    ///
+    /// Deliberately never touches the child process: an aborted handover must not terminate
+    /// a bridge child that is owned by its spawning process.
     pub fn close_fds(&mut self) {
         #[cfg(unix)]
         unsafe {
@@ -523,12 +557,264 @@ impl SshBridgeTransferState {
     }
 }
 
+/// Ownership guard for a locally spawned SSH bridge child process.
+///
+/// Ownership contract:
+/// 1. A supervised transport (Unix, the production shape) is ended through its lease: the
+///    supervisor process terminates and reaps the exact `ssh` child, so this process never
+///    signals a pid and the transport still dies when this process dies.
+/// 2. An unsupervised child (transferred-state imports, tests, platforms without a supervisor)
+///    is killed through its own `tokio::process::Child` handle. `close()` never assumes `ssh`
+///    exits when its stdin reaches EOF, and a cancelled `close()` cannot strand it because the
+///    guard kills on drop.
+/// 3. Releasing (detach) gives up the local handles without ending the transport and leaves the
+///    lease open, so a handed-over transport survives this connection while it still dies with
+///    this process. Production does not use that path: a restart reconnects from a persisted
+///    descriptor.
+/// 4. A guard rebuilt from transferred state holds neither a handle nor a lease: its recorded
+///    pid is identity/diagnostic data that is never signalled.
+pub struct BridgeChildGuard {
+    child: Option<BridgeChildHandle>,
+    #[cfg(unix)]
+    owner: Option<transport_unix::Owner>,
+    #[cfg(windows)]
+    owner: Option<TransportOwner>,
+    pid: Option<u32>,
+    detached: bool,
+}
+
+impl BridgeChildGuard {
+    pub fn new(child: tokio::process::Child) -> Self {
+        let pid = child.id();
+        Self {
+            child: Some(BridgeChildHandle::Tokio(child)),
+            #[cfg(unix)]
+            owner: None,
+            #[cfg(windows)]
+            owner: None,
+            pid,
+            detached: false,
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn supervised(
+        child: tokio::process::Child,
+        owner: transport_unix::Owner,
+        transport_pid: Option<u32>,
+    ) -> Self {
+        Self {
+            pid: transport_pid.or_else(|| child.id()),
+            child: Some(BridgeChildHandle::Tokio(child)),
+            owner: Some(owner),
+            detached: false,
+        }
+    }
+
+    /// Guard for a connection rebuilt from transferred state.
+    ///
+    /// The successor process does not own the child: the recorded pid is retained for
+    /// identity/diagnostics and is never used as a signal target.
+    pub fn imported(pid: Option<u32>) -> Self {
+        Self {
+            child: None,
+            #[cfg(unix)]
+            owner: None,
+            #[cfg(windows)]
+            owner: None,
+            pid,
+            detached: true,
+        }
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        if self.owner.is_some() {
+            return self.pid;
+        }
+        #[cfg(windows)]
+        if self.owner.is_some() {
+            return self.pid;
+        }
+        self.child
+            .as_ref()
+            .and_then(|child| child.id())
+            .or(self.pid)
+    }
+
+    /// Returns the observed exit code, or `None` when the child has not exited yet or when no
+    /// local handle is held (imported connection). Liveness is never guessed by probing a pid.
+    pub fn try_wait_code(&mut self) -> Option<i32> {
+        self.child.as_mut().and_then(|child| child.try_wait_code())
+    }
+
+    /// Relinquishes the local child handle without ending the transport.
+    pub fn release_without_kill(&mut self) {
+        self.detached = true;
+        #[cfg(unix)]
+        if let Some(owner) = self.owner.as_mut() {
+            owner.release();
+        }
+        #[cfg(windows)]
+        if let Some(owner) = self.owner.take() {
+            std::mem::forget(owner);
+        }
+        if let Some(child) = self.child.take() {
+            std::mem::forget(child);
+        }
+    }
+
+    /// Ends the transport and waits a bounded time for the direct child to be reaped.
+    pub async fn shutdown_and_wait(&mut self, timeout_dur: Duration) {
+        if self.detached {
+            return;
+        }
+        let supervised = self.detach_supervision();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if !supervised {
+            let _ = child.start_kill();
+        }
+        let _ = tokio::time::timeout(timeout_dur, child.wait()).await;
+    }
+
+    #[cfg(unix)]
+    fn is_supervised(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    #[cfg(windows)]
+    fn is_supervised(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn is_supervised(&self) -> bool {
+        false
+    }
+
+    /// Closes the lease so the supervisor ends the transport; reports whether one was driving.
+    fn detach_supervision(&mut self) -> bool {
+        #[cfg(unix)]
+        if let Some(owner) = self.owner.as_mut() {
+            owner.shutdown();
+            return true;
+        }
+        #[cfg(windows)]
+        if let Some(owner) = self.owner.take() {
+            drop(owner);
+            return true;
+        }
+        false
+    }
+
+    #[cfg(windows)]
+    fn supervised(
+        child: TransportChild,
+        owner: TransportOwner,
+        transport_pid: Option<u32>,
+    ) -> Self {
+        Self {
+            pid: transport_pid.or_else(|| child.id()),
+            child: Some(BridgeChildHandle::Windows(child)),
+            owner: Some(owner),
+            detached: false,
+        }
+    }
+}
+
+impl Drop for BridgeChildGuard {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        if !self.is_supervised() {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.start_kill();
+            }
+        }
+        // A supervised child is ended by the owner dropped below the guard: the lease closes,
+        // the supervisor terminates and reaps the transport, and dropping the supervisor handle
+        // only hands it to the runtime's orphan reaper.
+    }
+}
+
+/// Ends a bridge child whose connection could not be set up.
+///
+/// `from_child` takes stdio before the ownership guard exists, so this function is the only
+/// owner until the guard is built. `start_kill` signals through the child handle itself (a
+/// successful kill also disarms tokio's `kill_on_drop`), and dropping the handle hands reaping
+/// to the runtime's orphan reaper.
+fn abandon_unusable_bridge_child(mut child: tokio::process::Child, message: &str) -> BridgeError {
+    let _ = child.start_kill();
+    drop(child);
+    BridgeError::ProcessSpawn(message.to_string())
+}
+
+/// The direct child a guard owns: the supervised Windows child, or - on Unix and for
+/// test/transfer children - the tokio child the bridge has always owned.
+enum BridgeChildHandle {
+    Tokio(tokio::process::Child),
+    #[cfg(windows)]
+    Windows(TransportChild),
+}
+
+impl BridgeChildHandle {
+    fn id(&self) -> Option<u32> {
+        match self {
+            Self::Tokio(child) => child.id(),
+            #[cfg(windows)]
+            Self::Windows(child) => child.id(),
+        }
+    }
+
+    fn try_wait_code(&mut self) -> Option<i32> {
+        match self {
+            Self::Tokio(child) => child
+                .try_wait()
+                .ok()
+                .flatten()
+                .and_then(|status| status.code()),
+            #[cfg(windows)]
+            Self::Windows(child) => child
+                .try_wait()
+                .ok()
+                .flatten()
+                .and_then(|status| status.code()),
+        }
+    }
+
+    async fn wait(&mut self) {
+        match self {
+            Self::Tokio(child) => {
+                let _ = child.wait().await;
+            }
+            #[cfg(windows)]
+            Self::Windows(child) => {
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    fn start_kill(&mut self) {
+        match self {
+            Self::Tokio(child) => {
+                let _ = child.start_kill();
+            }
+            #[cfg(windows)]
+            Self::Windows(child) => {
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
 /// A single framed SSH bridge connection managing an owned SSH child process.
 pub struct BridgeConnection {
     writer: Option<BufWriter<tokio::process::ChildStdin>>,
     reader: Option<BufReader<BridgeReaderStream>>,
-    child: Option<tokio::process::Child>,
-    child_pid: Option<u32>,
+    child_guard: Option<BridgeChildGuard>,
     stderr_fd: Option<RawFd>,
     stderr_capture: Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
@@ -542,36 +828,188 @@ pub struct BridgeConnection {
 
 impl BridgeConnection {
     /// Spawns a new framed OpenSSH bridge connection to `host`.
+    ///
+    /// On Unix the transport runs under owner-death supervision once the process entry point has
+    /// dispatched `transport_unix::run_supervisor_mode`; otherwise, and on other platforms, this
+    /// process owns the `ssh` child directly.
     pub async fn spawn(
         host: &SshHost,
         env: &RemoteEnvironment,
         location: &HelperLocation,
     ) -> Result<Self, BridgeError> {
         let plan = direct::bridge_plan(host, env, location)?;
-        let child = direct::spawn_child(&plan, Stdio::piped())
+        #[cfg(unix)]
+        {
+            return Self::spawn_supervised(&plan).await;
+        }
+        #[cfg(windows)]
+        {
+            return Self::spawn_supervised(&plan);
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = &plan;
+            Err(BridgeError::ProcessSpawn(
+                "Transport supervision is unavailable on this platform".into(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    async fn spawn_supervised(plan: &ShellCommandPlan) -> Result<Self, BridgeError> {
+        let mut command = tokio::process::Command::new(&plan.program);
+        command.args(&plan.args).envs(
+            crate::ssh::password::environment(&plan.args)
+                .map_err(|e| BridgeError::ProcessSpawn(e.message))?,
+        );
+        let owner = transport_unix::Owner::prepare(&mut command).map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to prepare transport supervision: {e}"))
+        })?;
+        let child = command.spawn().map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to start SSH supervisor: {e}"))
+        })?;
+        let owner = match owner.attach(&child).await {
+            Ok(owner) => owner,
+            Err(error) => {
+                // `attach` consumed the owner, so its drop already closed the lease and the
+                // supervisor ends any transport it started. Dropping the child handle last hands
+                // the supervisor to the runtime's orphan reaper, which reaps it once it exits.
+                drop(child);
+                return Err(BridgeError::ProcessSpawn(format!(
+                    "Failed to start transport supervision: {error}"
+                )));
+            }
+        };
+        Self::from_supervised_child(child, owner)
+    }
+
+    #[cfg(windows)]
+    fn spawn_supervised(plan: &ShellCommandPlan) -> Result<Self, BridgeError> {
+        let envs = crate::ssh::password::environment(&plan.args)
             .map_err(|e| BridgeError::ProcessSpawn(e.message))?;
-        Self::from_child(child)
+        let owner = TransportOwner::prepare().map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to prepare transport job: {e}"))
+        })?;
+        let mut spec = ChildSpec::new(plan.program.clone());
+        spec.args = plan.args.iter().map(OsString::from).collect();
+        spec.envs = envs
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect();
+        let mut child = owner.spawn(spec).map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to start SSH transport: {e}"))
+        })?;
+        let stdin = child
+            .take_stdin()
+            .ok_or_else(|| BridgeError::ProcessSpawn("Transport stdin not available".into()))?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| BridgeError::ProcessSpawn("Transport stdout not available".into()))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| BridgeError::ProcessSpawn("Transport stderr not available".into()))?;
+        Self::from_supervised_child(child, owner, stdin, stdout, stderr)
+    }
+
+    /// Creates a framed bridge connection for a supervised Windows transport.
+    ///
+    /// The child is the job member; dropping the owner closes the job handle and terminates it,
+    /// so the job handle lives in the guard owner slot rather than beside the child.
+    #[cfg(windows)]
+    fn from_supervised_child(
+        child: TransportChild,
+        owner: TransportOwner,
+        stdin: tokio::process::ChildStdin,
+        stdout: tokio::process::ChildStdout,
+        stderr: tokio::process::ChildStderr,
+    ) -> Result<Self, BridgeError> {
+        let transport_pid = child.id();
+        Self::assemble(stdin, stdout, stderr, move || {
+            BridgeChildGuard::supervised(child, owner, transport_pid)
+        })
     }
 
     /// Creates a framed bridge connection from any spawned `Child` with piped stdio.
+    ///
+    /// A setup failure ends the child through its own handle (see
+    /// `abandon_unusable_bridge_child`); the remaining failure paths cannot strand a child that
+    /// was spawned by this crate, because unsupervised children are spawned with
+    /// `kill_on_drop(true)` and supervised ones end with their lease.
     pub fn from_child(mut child: tokio::process::Child) -> Result<Self, BridgeError> {
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| BridgeError::ProcessSpawn("Child stdin not available".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| BridgeError::ProcessSpawn("Child stdout not available".into()))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| BridgeError::ProcessSpawn("Child stderr not available".into()))?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                return Err(abandon_unusable_bridge_child(
+                    child,
+                    "Child stdin not available",
+                ))
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                return Err(abandon_unusable_bridge_child(
+                    child,
+                    "Child stdout not available",
+                ))
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                return Err(abandon_unusable_bridge_child(
+                    child,
+                    "Child stderr not available",
+                ))
+            }
+        };
+        Self::assemble(stdin, stdout, stderr, move || BridgeChildGuard::new(child))
+    }
 
+    /// Creates a framed bridge connection for a supervised transport.
+    ///
+    /// The child is the supervisor; the transport stdio comes from the owner, because the
+    /// supervisor's own stdio must never be part of the bridge protocol.
+    #[cfg(unix)]
+    pub fn from_supervised_child(
+        child: tokio::process::Child,
+        mut owner: transport_unix::Owner,
+    ) -> Result<Self, BridgeError> {
+        let transport_pid = owner.transport_pid();
+        let (stdin, stdout, stderr) = owner.take_stdio().ok_or_else(|| {
+            BridgeError::ProcessSpawn("Transport supervisor stdio already consumed".into())
+        })?;
+        let stdin = tokio::process::ChildStdin::from_std(stdin.into()).map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to adopt supervised stdin: {e}"))
+        })?;
+        let stdout = tokio::process::ChildStdout::from_std(stdout.into()).map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to adopt supervised stdout: {e}"))
+        })?;
+        let stderr = tokio::process::ChildStderr::from_std(stderr.into()).map_err(|e| {
+            BridgeError::ProcessSpawn(format!("Failed to adopt supervised stderr: {e}"))
+        })?;
+        Self::assemble(stdin, stdout, stderr, move || {
+            BridgeChildGuard::supervised(child, owner, transport_pid)
+        })
+    }
+
+    fn assemble(
+        stdin: tokio::process::ChildStdin,
+        stdout: tokio::process::ChildStdout,
+        mut stderr: tokio::process::ChildStderr,
+        guard: impl FnOnce() -> BridgeChildGuard,
+    ) -> Result<Self, BridgeError> {
         #[cfg(unix)]
         let stderr_fd = {
             use std::os::unix::io::AsRawFd;
-            Some(dup_fd(stderr.as_raw_fd())?)
+            match dup_fd(stderr.as_raw_fd()) {
+                Ok(fd) => Some(fd),
+                Err(e) => {
+                    return Err(BridgeError::ProcessSpawn(format!(
+                        "Failed to duplicate stderr fd: {e}"
+                    )))
+                }
+            }
         };
         #[cfg(not(unix))]
         let stderr_fd = None;
@@ -594,13 +1032,10 @@ impl BridgeConnection {
             }
         });
 
-        let child_pid = child.id();
-
         Ok(Self {
             writer: Some(BufWriter::new(stdin)),
             reader: Some(BufReader::new(BridgeReaderStream::Child(stdout))),
-            child: Some(child),
-            child_pid,
+            child_guard: Some(guard()),
             stderr_fd,
             stderr_capture,
             stderr_task: Some(stderr_task),
@@ -613,9 +1048,12 @@ impl BridgeConnection {
         })
     }
 
-    /// Returns the OS process ID of the owned child process, if still active.
+    /// Returns the OS process ID recorded for this connection's bridge child, if known.
+    ///
+    /// For a connection rebuilt from transferred state this is only the pid of a child owned
+    /// by another process; it is reported for identity and diagnostics and is never signalled.
     pub fn child_id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(|c| c.id()).or(self.child_pid)
+        self.child_guard.as_ref().and_then(|g| g.pid())
     }
 
     fn check_stderr(&self) -> String {
@@ -681,22 +1119,10 @@ impl BridgeConnection {
             Ok(Some(v)) => v,
             Ok(None) => {
                 let stderr = self.check_stderr();
-                let exit_code = if let Some(child) = self.child.as_mut() {
-                    child.try_wait().ok().flatten().and_then(|s| s.code())
-                } else if let Some(pid) = self.child_pid {
-                    #[cfg(unix)]
-                    {
-                        let ret = unsafe { libc::kill(pid as i32, 0) };
-                        if ret != 0 {
-                            Some(1)
-                        } else {
-                            None
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        None
-                    }
+                // Exit status is observable only through a locally owned handle; an imported
+                // connection reports `None` (unknown) rather than probing its recorded pid.
+                let exit_code = if let Some(guard) = self.child_guard.as_mut() {
+                    guard.try_wait_code()
                 } else {
                     None
                 };
@@ -829,15 +1255,26 @@ impl BridgeConnection {
         cursor: impl Into<RemoteCursor>,
         wait_ms: u64,
     ) -> Result<ReadResult, BridgeError> {
+        self.pty_read_with_agent_state(target, cursor, wait_ms, None)
+            .await
+    }
+
+    /// Reads output chunks from an existing PTY session with optional agent state revision.
+    pub async fn pty_read_with_agent_state(
+        &mut self,
+        target: &TargetRef,
+        cursor: impl Into<RemoteCursor>,
+        wait_ms: u64,
+        agent_after_revision: Option<RemoteCursor>,
+    ) -> Result<ReadResult, BridgeError> {
         let cursor = cursor.into();
         let timeout = Duration::from_millis(wait_ms.saturating_add(5000));
-        let val = self
-            .request(
-                "pty.read",
-                json!({ "target": target, "cursor": cursor.to_string(), "waitMs": wait_ms }),
-                timeout,
-            )
-            .await?;
+        let mut params =
+            json!({ "target": target, "cursor": cursor.to_string(), "waitMs": wait_ms });
+        if let Some(rev) = agent_after_revision {
+            params["agentAfterRevision"] = json!(rev.to_string());
+        }
+        let val = self.request("pty.read", params, timeout).await?;
         let mut read_res: ReadResult = serde_json::from_value(val)
             .map_err(|e| BridgeError::Protocol(format!("Invalid read response: {e}")))?;
 
@@ -1043,8 +1480,12 @@ impl BridgeConnection {
 
     /// Detaches the connection without killing the local SSH child process.
     ///
-    /// Bypasses `impl Drop for BridgeConnection`'s child.start_kill() so that transferred
-    /// file descriptors and child processes remain active after handover delivery.
+    /// Releases the local child handle without signalling it and unregisters the transport, so
+    /// neither this process's exit hook nor its `Drop` can end a handed-over child. A successor
+    /// process cannot inherit a `tokio::process::Child`, so this transfers no kill rights, and
+    /// production does not use it: a restart reconnects from a persisted descriptor (see
+    /// `DaemonServer::restore_remote_sessions_at`). The given-up child stays alive and is
+    /// neither killed nor reaped by this process.
     pub fn detach_without_kill(&mut self) {
         self.detached = true;
         if let Some(task) = self.stderr_task.take() {
@@ -1058,9 +1499,8 @@ impl BridgeConnection {
         }
         drop(self.writer.take());
         drop(self.reader.take());
-        if let Some(child) = self.child.take() {
-            // Disarm drop kill: child is now owned by successor via transferred FDs.
-            std::mem::forget(child);
+        if let Some(mut guard) = self.child_guard.take() {
+            guard.release_without_kill();
         }
     }
 
@@ -1072,6 +1512,15 @@ impl BridgeConnection {
     }
 
     /// Rebuilds a live `BridgeConnection` from transferred raw file descriptors and captured state.
+    ///
+    /// In-process handover only. The state's descriptor numbers are meaningful exclusively in
+    /// the process that produced them, and the successor acquires no kill rights over
+    /// `child_pid`: the rebuilt connection can read/write the transferred pipes, close its own
+    /// descriptors, and report the recorded pid, but it never signals the child. Cross-process
+    /// handover needs real descriptor passing plus independent child ownership, neither of
+    /// which this path performs. Production does not use it either: a restart reconnects from a
+    /// persisted descriptor (`DaemonServer::restore_remote_sessions_at` ->
+    /// `RemoteRuntime::restore` -> a fresh `SshBridgeClient::connect`).
     pub fn from_transfer_state(state: BridgeConnectionTransferState) -> Result<Self, BridgeError> {
         #[cfg(unix)]
         {
@@ -1158,11 +1607,12 @@ impl BridgeConnection {
                 }
             });
 
+            let child_guard = BridgeChildGuard::imported(state.child_pid);
+
             Ok(Self {
                 writer: Some(BufWriter::new(tokio_stdin)),
                 reader: Some(BufReader::new(stream)),
-                child: None,
-                child_pid: state.child_pid,
+                child_guard: Some(child_guard),
                 stderr_fd: Some(stored_stderr_fd),
                 stderr_capture,
                 stderr_task: Some(stderr_task),
@@ -1210,18 +1660,10 @@ impl BridgeConnection {
             let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
         }
 
-        if !self.detached {
-            if let Some(mut child) = self.child.take() {
-                // First bounded wait for child to exit on stdin closure
-                let first_wait = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-                if first_wait.is_err() {
-                    let _ = child.start_kill();
-                    // Bounded wait after kill signal; NEVER unbounded!
-                    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-                }
-            }
-        } else {
-            self.child.take();
+        // Only a locally owned handle can be killed; an imported connection holds none and
+        // leaves the spawning process's child untouched.
+        if let Some(mut guard) = self.child_guard.take() {
+            guard.shutdown_and_wait(Duration::from_secs(2)).await;
         }
 
         Ok(())
@@ -1247,9 +1689,13 @@ impl Drop for BridgeConnection {
             task.abort();
         }
 
-        if !self.detached {
-            if let Some(mut child) = self.child.take() {
-                let _ = child.start_kill();
+        if let Some(mut guard) = self.child_guard.take() {
+            if self.detached {
+                // Detach normally removes the guard first; if one is still present it must
+                // never signal a child that has been handed over.
+                guard.release_without_kill();
+            } else {
+                drop(guard);
             }
         }
     }
@@ -1549,6 +1995,36 @@ impl SshBridgeClient {
         self.validate_target(target)?;
         let mut rdr = self.reader.lock().await;
         rdr.pty_read(target, cursor, wait_ms).await
+    }
+
+    /// True when the helper advertised the `agentStateV1` capability and therefore accepts
+    /// `agentAfterRevision` on `pty.read`.
+    pub fn supports_agent_state(&self) -> bool {
+        self.handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "agentStateV1")
+    }
+
+    /// Reads output on the dedicated reader connection, requesting agent state snapshots
+    /// after `agent_after_revision` only if the helper advertised `agentStateV1`.
+    pub async fn pty_read_with_agent_state(
+        &self,
+        target: &TargetRef,
+        cursor: impl Into<RemoteCursor>,
+        wait_ms: u64,
+        agent_after_revision: RemoteCursor,
+    ) -> Result<ReadResult, BridgeError> {
+        self.validate_target(target)?;
+        let send_agent_state = self.supports_agent_state();
+        let rev_opt = if send_agent_state {
+            Some(agent_after_revision)
+        } else {
+            None
+        };
+        let mut rdr = self.reader.lock().await;
+        rdr.pty_read_with_agent_state(target, cursor, wait_ms, rev_opt)
+            .await
     }
 
     /// Closes both control and read connections and reaps their child processes.

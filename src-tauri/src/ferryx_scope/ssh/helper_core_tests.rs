@@ -1798,3 +1798,707 @@ fn ssh_input_isolation_blocked_writer_does_not_stall_same_session_resize() {
         params: json!({ "target": target_a }),
     });
 }
+
+#[test]
+fn ssh_agent_state_real_tcp_close_after_write_updates_state() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-tcp-write");
+    register_project(&runtime, "tok-tcp-write", "p-tcp", project_dir.path()).unwrap();
+
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-tcp-write".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({ "projectId": "p-tcp" }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+        "detail": "indexing workspace",
+    });
+    stream.write_all(payload.to_string().as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    drop(stream);
+
+    // Await the exact ingestion of the close-after-write report on the session's report
+    // condvar: the report arrives over a real socket, so acceptance timing must never be
+    // raced by the next pty.read.
+    let server = runtime.agent_state_server().expect("agent state server");
+    assert!(
+        server.wait_for_agent_revision_for_test(&session_id, 1, Duration::from_secs(5)),
+        "close-after-write report must be ingested as revision 1"
+    );
+
+    let res = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-tcp-write".to_string(),
+            op: "pty.read".to_string(),
+            params: json!({
+                "target": target,
+                "agentAfterRevision": "0",
+                "waitMs": 0,
+            }),
+        })
+        .unwrap();
+    let state_obj = res.get("agentState").unwrap();
+    assert_eq!(state_obj["revision"], "1");
+    assert_eq!(state_obj["state"], "working");
+    assert_eq!(state_obj["agent"], "omo");
+    assert_eq!(state_obj["detail"], "indexing workspace");
+    assert!(state_obj.get("token").is_none());
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-tcp-write".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+}
+
+#[test]
+fn ssh_agent_state_auth_and_limits_rejected() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-auth-limits");
+    register_project(&runtime, "tok-auth-limits", "p-auth", project_dir.path()).unwrap();
+
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-auth-limits".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({ "projectId": "p-auth" }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    let mut s1 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let bad_token_payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": "wrong-token-value",
+    });
+    s1.write_all(bad_token_payload.to_string().as_bytes()).unwrap();
+    s1.write_all(b"\n").unwrap();
+    drop(s1);
+
+    let mut s2 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let wrong_session_payload = json!({
+        "type": "agentState",
+        "sessionId": "unknown-session-id",
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+    });
+    s2.write_all(wrong_session_payload.to_string().as_bytes()).unwrap();
+    s2.write_all(b"\n").unwrap();
+    drop(s2);
+
+    let mut s3 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let invalid_state_payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "unknown_state",
+        "agent": "omo",
+        "token": token,
+    });
+    s3.write_all(invalid_state_payload.to_string().as_bytes()).unwrap();
+    s3.write_all(b"\n").unwrap();
+    drop(s3);
+
+    let mut s4 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let wrong_type_payload = json!({
+        "type": "otherType",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+    });
+    s4.write_all(wrong_type_payload.to_string().as_bytes()).unwrap();
+    s4.write_all(b"\n").unwrap();
+    drop(s4);
+
+    let mut s5 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let oversized = vec![b'a'; 17 * 1024];
+    let _ = s5.write_all(&oversized);
+    drop(s5);
+
+    let mut s6 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let no_newline_payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+    });
+    s6.write_all(no_newline_payload.to_string().as_bytes()).unwrap();
+    drop(s6);
+
+    let res = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-auth-limits".to_string(),
+            op: "pty.read".to_string(),
+            params: json!({
+                "target": target,
+                "agentAfterRevision": "0",
+                "waitMs": 50,
+            }),
+        })
+        .unwrap();
+
+    assert!(
+        res.get("agentState").is_none(),
+        "No agentState should be accepted from invalid reports"
+    );
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-auth-limits".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+}
+
+/// Cross-platform silent child for agent-state barrier tests: it writes nothing and
+/// never exits, so a blocking `pty.read` has exactly one possible wake source — an
+/// agent-state revision change — and shell startup output can no longer release it.
+fn silent_agent_state_probe() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let comspec = std::env::var("COMSPEC")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string());
+        (
+            comspec,
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "set /p x=".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), "read x".to_string()],
+        )
+    }
+}
+
+/// Deterministically quiesces a PTY before a barrier read: consumes every buffered
+/// byte, answers ConPTY cursor queries so conhost stops prompting, and returns once a
+/// bounded wait observes no further output. No sleeps — every iteration is the helper's
+/// own bounded condvar wait, so this can never mask a wake by waiting longer.
+fn drain_pty_until_quiet(runtime: &Runtime, token: &str, target: &Value, cursor: &mut String) {
+    for _ in 0..20 {
+        let res = runtime
+            .handle(Request {
+                protocol: 1,
+                token: token.to_string(),
+                op: "pty.read".to_string(),
+                params: json!({
+                    "target": target,
+                    "cursor": cursor.clone(),
+                    "waitMs": 200,
+                }),
+            })
+            .expect("pty.read during drain must succeed");
+        if let Some(next) = res.get("cursor").and_then(Value::as_str) {
+            *cursor = next.to_string();
+        }
+        let chunks = res
+            .get("chunks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if chunks.is_empty() {
+            return;
+        }
+        let mut text = String::new();
+        for chunk in &chunks {
+            if let Some(b64) = chunk.get("data").and_then(Value::as_str) {
+                if let Ok(bytes) = BASE64_STANDARD.decode(b64) {
+                    text.push_str(&String::from_utf8_lossy(&bytes));
+                }
+            }
+        }
+        for _ in 0..text.matches("\x1b[6n").count() {
+            runtime
+                .handle(Request {
+                    protocol: 1,
+                    token: token.to_string(),
+                    op: "pty.write".to_string(),
+                    params: json!({ "target": target, "text": "\x1b[1;1R" }),
+                })
+                .expect("answering a ConPTY cursor query must succeed");
+        }
+    }
+}
+
+#[test]
+fn ssh_agent_state_idle_read_wake_wakes_blocked_reader() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-idle-wake");
+    register_project(&runtime, "tok-idle-wake", "p-wake", project_dir.path()).unwrap();
+
+    // Silent child: the PTY produces no output at all, so the blocking read below
+    // cannot be satisfied by shell output instead of the report (the old flake).
+    let (probe_program, probe_args) = silent_agent_state_probe();
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-idle-wake".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({
+                "projectId": "p-wake",
+                "program": probe_program,
+                "args": probe_args,
+            }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    // Reach a drained, quiet boundary before arming the barrier read.
+    let mut drained_cursor = "0".to_string();
+    drain_pty_until_quiet(&runtime, "tok-idle-wake", &target, &mut drained_cursor);
+
+    let rt = &runtime;
+    let target_for_thread = target.clone();
+    let cursor_for_thread = drained_cursor;
+
+    std::thread::scope(|s| {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+
+        let reader_handle = s.spawn(move || {
+            started_tx.send(()).unwrap();
+            let start = Instant::now();
+            let res = rt
+                .handle(Request {
+                    protocol: 1,
+                    token: "tok-idle-wake".to_string(),
+                    op: "pty.read".to_string(),
+                    params: json!({
+                        "target": target_for_thread,
+                        "cursor": cursor_for_thread,
+                        "agentAfterRevision": "0",
+                        "waitMs": 5000,
+                    }),
+                })
+                .unwrap();
+            (start.elapsed(), res)
+        });
+
+        // The report is a durable state change, so this ordering only needs the reader
+        // to be running: the quiet PTY leaves no other wake source either way.
+        started_rx.recv().unwrap();
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let payload = json!({
+            "type": "agentState",
+            "sessionId": session_id,
+            "state": "blocked",
+            "agent": "omo",
+            "token": token,
+            "detail": "waiting for permission",
+        });
+        stream.write_all(payload.to_string().as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+        drop(stream);
+
+        let (elapsed, res) = reader_handle.join().unwrap();
+        let state_obj = res.get("agentState").expect(
+            "blocking pty.read on a quiet PTY must be released by the agent-state report",
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "Idle reader should wake via condvar well before 5s timeout, took: {elapsed:?}"
+        );
+        assert_eq!(state_obj["revision"], "1");
+        assert_eq!(state_obj["state"], "blocked");
+        assert_eq!(state_obj["detail"], "waiting for permission");
+    });
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-idle-wake".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+}
+
+#[test]
+fn ssh_agent_state_ack_wait_and_revision_validation() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-rev-val");
+    register_project(&runtime, "tok-rev-val", "p-val", project_dir.path()).unwrap();
+
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-rev-val".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({ "projectId": "p-val" }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    let err_res = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-rev-val".to_string(),
+        op: "pty.read".to_string(),
+        params: json!({
+            "target": target,
+            "agentAfterRevision": "1",
+            "waitMs": 0,
+        }),
+    });
+    assert!(err_res.is_err());
+    assert!(err_res.unwrap_err().contains("INVALID_REQUEST"));
+
+    let err_non_canonical = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-rev-val".to_string(),
+        op: "pty.read".to_string(),
+        params: json!({
+            "target": target,
+            "agentAfterRevision": "01",
+            "waitMs": 0,
+        }),
+    });
+    assert!(err_non_canonical.is_err());
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "idle",
+        "agent": "omo",
+        "token": token,
+    });
+    stream.write_all(payload.to_string().as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    drop(stream);
+
+    // The report travels over a real TCP socket, so the accept loop may ingest it a park
+    // interval later than the write. Await that exact ingestion on the session's report
+    // condvar instead of retrying pty.read and racing the accept timing.
+    let server = runtime.agent_state_server().expect("agent state server");
+    assert!(
+        server.wait_for_agent_revision_for_test(&session_id, 1, Duration::from_secs(5)),
+        "valid report must be ingested as revision 1"
+    );
+
+    let rev1 = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-rev-val".to_string(),
+            op: "pty.read".to_string(),
+            params: json!({
+                "target": target,
+                "agentAfterRevision": "0",
+                "waitMs": 0,
+            }),
+        })
+        .unwrap();
+    let rev1_state = rev1
+        .get("agentState")
+        .expect("ingested revision 1 must be returned to pty.read");
+    assert_eq!(rev1_state["revision"], "1");
+    assert_eq!(rev1_state["state"], "idle");
+
+    let res_same_rev = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-rev-val".to_string(),
+            op: "pty.read".to_string(),
+            params: json!({
+                "target": target,
+                "agentAfterRevision": "1",
+                "waitMs": 20,
+            }),
+        })
+        .unwrap();
+    assert!(
+        res_same_rev.get("agentState").is_none(),
+        "agentState should not be included when not newer than requested revision"
+    );
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-rev-val".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+}
+
+#[test]
+fn ssh_agent_state_reconnect_snapshot_returns_latest_state() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-reconnect");
+    register_project(&runtime, "tok-reconnect", "p-rec", project_dir.path()).unwrap();
+
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-reconnect".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({ "projectId": "p-rec" }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+        "providerSession": { "id": "test-provider-session" },
+        "detail": "reconnect test detail",
+    });
+    stream.write_all(payload.to_string().as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    drop(stream);
+
+    // Await the exact report ingestion rather than retrying reads against accept timing.
+    let server = runtime.agent_state_server().expect("agent state server");
+    assert!(
+        server.wait_for_agent_revision_for_test(&session_id, 1, Duration::from_secs(5)),
+        "reconnect report must be ingested as revision 1"
+    );
+
+    let res = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-reconnect".to_string(),
+            op: "pty.read".to_string(),
+            params: json!({
+                "target": target,
+                "agentAfterRevision": "0",
+                "waitMs": 0,
+            }),
+        })
+        .unwrap();
+    let state = res
+        .get("agentState")
+        .expect("reconnect snapshot must return state")
+        .clone();
+    assert_eq!(state["revision"], "1");
+    assert_eq!(state["state"], "working");
+    assert_eq!(state["agent"], "omo");
+    assert_eq!(state["providerSession"]["id"], "test-provider-session");
+    assert_eq!(state["detail"], "reconnect test detail");
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-reconnect".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+}
+
+#[test]
+fn ssh_agent_state_env_scrubbing_and_idempotency() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-env-idemp");
+    register_project(&runtime, "tok-env-idemp", "p-env", project_dir.path()).unwrap();
+
+    let hs = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-env-idemp".to_string(),
+            op: "handshake".to_string(),
+            params: json!({}),
+        })
+        .unwrap();
+
+    assert_eq!(hs["protocol"], 1);
+    let caps = hs["capabilities"].as_array().unwrap();
+    assert!(caps.iter().any(|c| c == "agentStateV1"));
+    assert!(caps.iter().any(|c| c == "sshHelperV1"));
+
+    let spawn_params = json!({
+        "clientRequestId": "req-idemp-1",
+        "projectId": "p-env",
+        "env": {
+            "FERRYX_AGENT_STATE_SOCKET": "/tmp/evil.sock",
+            "ferryx_agent_state_socket": "/tmp/evil2.sock",
+            "FERRYX_SESSION_ID": "spoofed-session-id",
+            "FERRYX_AGENT_STATE_PORT": "9999",
+            "FERRYX_AGENT_STATE_TOKEN": "stolen-token",
+            "CUSTOM_VAR": "custom_value",
+        }
+    });
+
+    let spawn1 = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-env-idemp".to_string(),
+            op: "pty.spawn".to_string(),
+            params: spawn_params.clone(),
+        })
+        .unwrap();
+
+    let target1 = spawn1["target"].clone();
+    let pid1 = spawn1["pid"].as_u64().unwrap();
+    let session_id = target1["backendSessionId"].as_str().unwrap();
+    assert_ne!(session_id, "spoofed-session-id");
+
+    let spawn2 = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-env-idemp".to_string(),
+            op: "pty.spawn".to_string(),
+            params: spawn_params,
+        })
+        .unwrap();
+
+    assert_eq!(spawn2["target"], target1);
+    assert_eq!(spawn2["pid"], pid1);
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-env-idemp".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target1 }),
+    });
+}
+
+#[test]
+fn ssh_agent_state_revoked_on_stop_and_rollback_on_failed_spawn() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-rev-stop");
+    register_project(&runtime, "tok-rev-stop", "p-rev", project_dir.path()).unwrap();
+
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-rev-stop".to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({ "projectId": "p-rev" }),
+        })
+        .unwrap();
+
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    let port = runtime.agent_state_server().unwrap().port();
+    let token = runtime.session_token(&session_id).unwrap();
+
+    assert!(runtime.agent_state_server().unwrap().is_registered(&session_id));
+
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-rev-stop".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target }),
+    });
+
+    assert!(!runtime.agent_state_server().unwrap().is_registered(&session_id));
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let payload = json!({
+        "type": "agentState",
+        "sessionId": session_id,
+        "state": "working",
+        "agent": "omo",
+        "token": token,
+    });
+    stream.write_all(payload.to_string().as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    drop(stream);
+
+    let failed_spawn = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-rev-stop".to_string(),
+        op: "pty.spawn".to_string(),
+        params: json!({
+            "projectId": "p-rev",
+            "worktree": "../outside_project",
+        }),
+    });
+    assert!(failed_spawn.is_err());
+}
+
+#[test]
+fn ssh_agent_state_shutdown_is_allocation_independent() {
+    // The accept loop must stop on its own signal: no wake connection is created (an
+    // fd-exhausted process cannot create one), so nothing here ever connects to the port.
+    let server = agent_state::AgentStateServer::bind().expect("bind agent state server");
+
+    server.request_stop_for_test();
+    assert!(
+        server.wait_for_accept_exit_for_test(Duration::from_secs(5)),
+        "accept loop must exit on the allocation-free stop signal"
+    );
+    drop(server);
+
+    // Same contract through `Drop`: a server that was never connected to must still tear
+    // down, instead of leaving `accept()` blocked (the fd-exhaustion hang).
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let silent = agent_state::AgentStateServer::bind().expect("bind silent agent state server");
+        drop(silent);
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("agent state shutdown must complete with no wake connection available");
+    worker.join().expect("shutdown worker must join");
+}

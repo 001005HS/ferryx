@@ -18,6 +18,9 @@ mod dag_paths;
 #[path = "dag_stream.rs"]
 pub mod dag_stream;
 
+#[path = "agent_state.rs"]
+pub mod agent_state;
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const RING_BYTES: usize = 512 * 1024;
 
@@ -64,11 +67,13 @@ pub fn write_frame(writer: &mut impl Write, value: &Value) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
-struct Output {
+pub(crate) struct Output {
     next: u64,
     bytes: usize,
     chunks: VecDeque<(u64, Vec<u8>)>,
     exited: bool,
+    pub(crate) agent_revision: u64,
+    pub(crate) agent_state: Option<agent_state::AgentStateSnapshot>,
 }
 
 struct Session {
@@ -129,6 +134,7 @@ pub struct Runtime {
     spawns: Mutex<HashMap<String, SpawnState>>,
     spawns_cv: Condvar,
     dag_streams: dag_stream::DagStreams,
+    pub(crate) agent_state: Option<Arc<agent_state::AgentStateServer>>,
     #[cfg(test)]
     spawn_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
@@ -145,6 +151,13 @@ impl Runtime {
 
     pub fn new(root: PathBuf, host: String, token: String) -> Result<Self, String> {
         super::private_file(&root)?;
+        let agent_state = match agent_state::AgentStateServer::bind() {
+            Ok(server) => Some(Arc::new(server)),
+            Err(err) => {
+                eprintln!("Ferryx SSH helper agent state listener unavailable: {err}");
+                None
+            }
+        };
         Ok(Self {
             root: root.canonicalize().map_err(|e| e.to_string())?,
             host,
@@ -156,6 +169,7 @@ impl Runtime {
             spawns: Mutex::new(HashMap::new()),
             spawns_cv: Condvar::new(),
             dag_streams: dag_stream::DagStreams::new(),
+            agent_state,
             #[cfg(test)]
             spawn_hook: Mutex::new(None),
         })
@@ -188,6 +202,18 @@ impl Runtime {
         &self.dag_streams
     }
 
+    #[cfg(test)]
+    pub fn agent_state_server(&self) -> Option<&Arc<agent_state::AgentStateServer>> {
+        self.agent_state.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn session_token(&self, session_id: &str) -> Option<String> {
+        self.agent_state
+            .as_ref()
+            .and_then(|s| s.get_token(session_id))
+    }
+
     fn dispatch_on_connection(
         &self,
         op: &str,
@@ -195,16 +221,26 @@ impl Runtime {
         connection: u64,
     ) -> Result<Value, String> {
         match op {
-            "handshake" => Ok(json!({
-                "protocol": 1,
-                "capabilities": ["sshHelperV1", "dagStreamingV1", "dagSubscribeV1"],
-                "hostId": self.host,
-                "ownerId": self.owner,
-                "epoch": self.epoch,
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-                "helperVersion": super::process::HELPER_VERSION,
-            })),
+            "handshake" => {
+                let mut capabilities = vec![
+                    "sshHelperV1".to_string(),
+                    "dagStreamingV1".to_string(),
+                    "dagSubscribeV1".to_string(),
+                ];
+                if self.agent_state.is_some() {
+                    capabilities.push("agentStateV1".to_string());
+                }
+                Ok(json!({
+                    "protocol": 1,
+                    "capabilities": capabilities,
+                    "hostId": self.host,
+                    "ownerId": self.owner,
+                    "epoch": self.epoch,
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "helperVersion": super::process::HELPER_VERSION,
+                }))
+            }
             "project.register" => {
                 let id = text(p, "id")?;
                 let raw_path = text(p, "path")?;
@@ -444,12 +480,36 @@ impl Runtime {
                     .map_err(|e| e.to_string())?;
 
                 let id = uuid::Uuid::new_v4().to_string();
+
+                let output = Arc::new((
+                    Mutex::new(Output {
+                        next: 1,
+                        bytes: 0,
+                        chunks: VecDeque::new(),
+                        exited: false,
+                        agent_revision: 0,
+                        agent_state: None,
+                    }),
+                    Condvar::new(),
+                ));
+
+                let (agent_token_opt, mut registration_guard) = if let Some(server) = &self.agent_state {
+                    let tok = format!("{:032x}", rand::random::<u128>());
+                    server.register(&id, &tok, output.clone());
+                    let guard = agent_state::AgentRegistrationGuard::new(server.clone(), id.clone());
+                    (Some(tok), Some(guard))
+                } else {
+                    (None, None)
+                };
+
                 let mut command = CommandBuilder::new(&program);
                 for arg in &args {
                     command.arg(arg);
                 }
                 command.cwd(&cwd);
-                command.env("FERRYX_SESSION_ID", &id);
+
+                scrub_reserved_env_vars(&mut command);
+
                 if std::env::var("TERM")
                     .map(|t| t == "dumb" || t.is_empty())
                     .unwrap_or(true)
@@ -464,25 +524,36 @@ impl Runtime {
                     }
                 }
 
-                let child = pair
-                    .slave
-                    .spawn_command(command)
-                    .map_err(|e| e.to_string())?;
+                scrub_reserved_env_vars(&mut command);
+
+                command.env("FERRYX_SESSION_ID", &id);
+                if let (Some(server), Some(tok)) = (&self.agent_state, &agent_token_opt) {
+                    command.env("FERRYX_AGENT_STATE_PORT", server.port().to_string());
+                    command.env("FERRYX_AGENT_STATE_TOKEN", tok);
+                } else {
+                    command.env_remove("FERRYX_AGENT_STATE_PORT");
+                    command.env_remove("FERRYX_AGENT_STATE_TOKEN");
+                }
+
+                let child = match pair.slave.spawn_command(command) {
+                    Ok(c) => c,
+                    Err(e) => return Err(e.to_string()),
+                };
                 drop(pair.slave);
-                let pid = child.process_id().ok_or("REMOTE_SPAWN_FAILED: no PID")?;
+                let pid = match child.process_id() {
+                    Some(p) => p,
+                    None => return Err("REMOTE_SPAWN_FAILED: no PID".into()),
+                };
+
+                if let Some(guard) = registration_guard.as_mut() {
+                    guard.defuse();
+                }
 
                 let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
                 let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-                let output = Arc::new((
-                    Mutex::new(Output {
-                        next: 1,
-                        bytes: 0,
-                        chunks: VecDeque::new(),
-                        exited: false,
-                    }),
-                    Condvar::new(),
-                ));
                 let sink = output.clone();
+                let agent_server_for_exit = self.agent_state.clone();
+                let session_id_for_exit = id.clone();
                 std::thread::spawn(move || {
                     let mut buffer = [0; 8192];
                     loop {
@@ -507,6 +578,9 @@ impl Runtime {
                             }
                         }
                         signal.notify_all();
+                    }
+                    if let Some(server) = agent_server_for_exit {
+                        server.revoke(&session_id_for_exit);
                     }
                 });
 
@@ -663,6 +737,9 @@ impl Runtime {
                             child.kill().map_err(|e| e.to_string())?;
                             child.wait().map_err(|e| e.to_string())?;
                         }
+                        if let Some(server) = &self.agent_state {
+                            server.revoke(&target.backend_session_id);
+                        }
                         Ok(json!({ "stopped": true }))
                     }
                     _ => {
@@ -671,6 +748,7 @@ impl Runtime {
                         let cwd = session.cwd.clone();
 
                         let after = parse_cursor(p)?;
+                        let agent_after_revision = parse_agent_after_revision(p)?;
                         let wait = p
                             .get("waitMs")
                             .and_then(Value::as_u64)
@@ -679,11 +757,28 @@ impl Runtime {
 
                         let (lock, signal) = &*output;
                         let state = lock.lock().map_err(|e| e.to_string())?;
+
+                        if let Some(requested) = agent_after_revision {
+                            if requested > state.agent_revision {
+                                return Err(
+                                    "INVALID_REQUEST: agentAfterRevision exceeds current revision"
+                                        .into(),
+                                );
+                            }
+                        }
+
                         let (state, _) = signal
                             .wait_timeout_while(
                                 state,
                                 std::time::Duration::from_millis(wait),
-                                |s| s.next <= after.saturating_add(1) && !s.exited,
+                                |s| {
+                                    let no_output = s.next <= after.saturating_add(1);
+                                    let revision_unchanged = match agent_after_revision {
+                                        None => true,
+                                        Some(req) => s.agent_revision == req,
+                                    };
+                                    no_output && !s.exited && revision_unchanged
+                                },
                             )
                             .map_err(|e| e.to_string())?;
 
@@ -726,6 +821,13 @@ impl Runtime {
                         };
                         let cursor_str = cursor_num.to_string();
 
+                        let agent_state_json = match agent_after_revision {
+                            Some(requested) if state.agent_revision > requested => {
+                                state.agent_state.as_ref().map(|s| s.to_response_json())
+                            }
+                            _ => None,
+                        };
+
                         let mut response = json!({
                             "target": target,
                             "pid": pid,
@@ -736,6 +838,10 @@ impl Runtime {
                             "exited": state.exited,
                             "chunks": response_chunks,
                         });
+
+                        if let Some(agent_state) = agent_state_json {
+                            response["agentState"] = agent_state;
+                        }
 
                         while serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0)
                             >= MAX_FRAME
@@ -767,6 +873,54 @@ impl Runtime {
             }
             _ => Err("UNSUPPORTED: operation not allowlisted".into()),
         }
+    }
+}
+
+fn is_reserved_agent_var(key: &str) -> bool {
+    key.eq_ignore_ascii_case("FERRYX_AGENT_STATE_SOCKET")
+        || key.eq_ignore_ascii_case("FERRYX_AGENT_STATE_PORT")
+        || key.eq_ignore_ascii_case("FERRYX_AGENT_STATE_TOKEN")
+        || key.eq_ignore_ascii_case("FERRYX_SESSION_ID")
+}
+
+fn scrub_reserved_env_vars(cmd: &mut CommandBuilder) {
+    for (k, _) in std::env::vars() {
+        if is_reserved_agent_var(&k) {
+            cmd.env_remove(&k);
+        }
+    }
+    for var in [
+        "FERRYX_AGENT_STATE_SOCKET",
+        "ferryx_agent_state_socket",
+        "FERRYX_AGENT_STATE_PORT",
+        "ferryx_agent_state_port",
+        "FERRYX_AGENT_STATE_TOKEN",
+        "ferryx_agent_state_token",
+        "FERRYX_SESSION_ID",
+        "ferryx_session_id",
+    ] {
+        cmd.env_remove(var);
+    }
+}
+
+fn parse_agent_after_revision(p: &Value) -> Result<Option<u64>, String> {
+    match p.get("agentAfterRevision") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let n = s.parse::<u64>().map_err(|e| {
+                format!("INVALID_REQUEST: agentAfterRevision must be canonical decimal u64: {e}")
+            })?;
+            if n.to_string() != *s {
+                return Err(
+                    "INVALID_REQUEST: agentAfterRevision must be canonical decimal u64 string"
+                        .into(),
+                );
+            }
+            Ok(Some(n))
+        }
+        Some(_) => Err(
+            "INVALID_REQUEST: agentAfterRevision must be canonical decimal u64 string".into(),
+        ),
     }
 }
 

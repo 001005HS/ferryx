@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     future::Future,
-    path::PathBuf,
     pin::Pin,
     sync::{Arc, Weak},
     time::Duration,
@@ -165,23 +164,53 @@ pub struct RemoteExportState {
     pub bridge_transfer: Option<SshBridgeTransferState>,
 }
 
+pub(crate) trait AgentStateSink: Send + Sync {
+    /// Synchronously accept an agent state update. Returns true if accepted (or already in that state).
+    fn accept(&self, state: crate::daemon::agent_state::AgentState) -> bool;
+}
+
+impl AgentStateSink for crate::daemon::agent_state::AgentStateHub {
+    fn accept(&self, state: crate::daemon::agent_state::AgentState) -> bool {
+        if let Some(current) = self.current(&state.session_id) {
+            if current == state {
+                return true;
+            }
+        }
+        self.publish_canonical(state);
+        true
+    }
+}
+
 // Internal seam keeps deterministic tests at the actual controller boundary.
 pub(crate) trait Transport: Send + Sync {
     fn describe<'a>(&'a self, target: &'a TargetRef) -> Rpc<'a, DescribeResult>;
-    fn read<'a>(&'a self, target: &'a TargetRef, cursor: RemoteCursor) -> Rpc<'a, ReadResult>;
+    fn read<'a>(
+        &'a self,
+        target: &'a TargetRef,
+        cursor: RemoteCursor,
+        agent_after_revision: RemoteCursor,
+    ) -> Rpc<'a, ReadResult>;
     fn write<'a>(&'a self, target: &'a TargetRef, bytes: &'a [u8]) -> Rpc<'a, ()>;
     fn resize<'a>(&'a self, target: &'a TargetRef, cols: u16, rows: u16) -> Rpc<'a, ()>;
     fn stop<'a>(&'a self, target: &'a TargetRef) -> Rpc<'a, ()>;
     fn as_ssh_bridge(&self) -> Option<&SshBridgeClient> {
         None
     }
+    fn supports_agent_state(&self) -> bool {
+        false
+    }
 }
 impl Transport for SshBridgeClient {
     fn describe<'a>(&'a self, t: &'a TargetRef) -> Rpc<'a, DescribeResult> {
         Box::pin(self.reattach(t))
     }
-    fn read<'a>(&'a self, t: &'a TargetRef, c: RemoteCursor) -> Rpc<'a, ReadResult> {
-        Box::pin(self.pty_read(t, c, 1000))
+    fn read<'a>(
+        &'a self,
+        t: &'a TargetRef,
+        c: RemoteCursor,
+        agent_after_revision: RemoteCursor,
+    ) -> Rpc<'a, ReadResult> {
+        Box::pin(self.pty_read_with_agent_state(t, c, 1000, agent_after_revision))
     }
     fn write<'a>(&'a self, t: &'a TargetRef, b: &'a [u8]) -> Rpc<'a, ()> {
         Box::pin(async move {
@@ -206,6 +235,12 @@ impl Transport for SshBridgeClient {
     }
     fn as_ssh_bridge(&self) -> Option<&SshBridgeClient> {
         Some(self)
+    }
+    fn supports_agent_state(&self) -> bool {
+        self.handshake_info()
+            .capabilities
+            .iter()
+            .any(|c| c == "agentStateV1")
     }
 }
 pub(crate) trait Connector: Send + Sync {
@@ -243,6 +278,7 @@ pub(crate) struct Session {
     /// successful connect so pane geometry survives the connection race instead of
     /// leaving the remote PTY at its spawn defaults.
     pending_size: Option<(u16, u16, u64)>,
+    pub(crate) agent_ack: RemoteCursor,
 }
 const MAX_PENDING_OPERATIONS: usize = 17;
 const MAX_PENDING_BYTES: usize = 256 * 1024;
@@ -281,11 +317,21 @@ pub struct RemoteRuntime {
     sessions: Mutex<HashMap<String, Arc<Entry>>>,
     hub: Arc<TerminalOutputHub>,
     connector: Arc<dyn Connector>,
+    agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
 }
 const MAX_ATTEMPTS: u32 = 5;
 impl RemoteRuntime {
     pub fn new(hub: Arc<TerminalOutputHub>) -> Self {
         Self::with_connector(hub, Arc::new(SshConnector))
+    }
+    #[cfg(test)]
+    pub(crate) fn with_sink(
+        hub: Arc<TerminalOutputHub>,
+        sink: Arc<dyn AgentStateSink>,
+    ) -> Self {
+        let r = Self::with_connector(hub, Arc::new(SshConnector));
+        *r.agent_sink.write() = Some(sink);
+        r
     }
     pub(crate) fn with_connector(
         hub: Arc<TerminalOutputHub>,
@@ -295,7 +341,24 @@ impl RemoteRuntime {
             sessions: Mutex::new(HashMap::new()),
             hub,
             connector,
+            agent_sink: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_connector_and_sink(
+        hub: Arc<TerminalOutputHub>,
+        connector: Arc<dyn Connector>,
+        sink: Arc<dyn AgentStateSink>,
+    ) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            hub,
+            connector,
+            agent_sink: Arc::new(parking_lot::RwLock::new(Some(sink))),
+        }
+    }
+    pub(crate) fn set_agent_sink(&self, sink: Arc<dyn AgentStateSink>) {
+        *self.agent_sink.write() = Some(sink);
     }
     /// Only this method invokes pty.spawn. Caller supplies an immutable, durable request ID.
     pub async fn create(
@@ -406,6 +469,7 @@ impl RemoteRuntime {
                 transport: None,
                 task: None,
                 pending_size: None,
+                agent_ack: RemoteCursor(0),
             }),
             control: Arc::new(AsyncMutex::new(())),
             queue_tx,
@@ -510,8 +574,9 @@ impl RemoteRuntime {
         let e = entry.clone();
         let hub = self.hub.clone();
         let connector = self.connector.clone();
+        let sink = Arc::clone(&self.agent_sink);
         state.task = Some(tokio::spawn(async move {
-            run(e, hub, connector, generation, initial).await;
+            run(e, hub, connector, generation, initial, sink).await;
         }));
     }
     /// Explicit retry is deduplicated while reconnecting and only describes the stored target.
@@ -833,6 +898,7 @@ impl RemoteRuntime {
                 transport: transport.clone(),
                 task: None,
                 pending_size: state.pending_size,
+                agent_ack: RemoteCursor(0),
             }),
             control: Arc::new(AsyncMutex::new(())),
             queue_tx,
@@ -856,8 +922,9 @@ impl RemoteRuntime {
         let e = entry.clone();
         let hub = self.hub.clone();
         let connector = self.connector.clone();
+        let sink = Arc::clone(&self.agent_sink);
         state.task = Some(tokio::spawn(async move {
-            run_live(e, hub, connector, generation, client).await;
+            run_live(e, hub, connector, generation, client, sink).await;
         }));
     }
 }
@@ -900,12 +967,73 @@ fn fail(s: &mut Session, failure: RemoteFailure) {
     s.details.failure = Some(failure);
     Entry::notify(s);
 }
+
+fn process_agent_snapshot(
+    snapshot: &AgentStateSnapshot,
+    supports_agent_state: bool,
+    backend_session_id: &str,
+    current_ack: RemoteCursor,
+    sink: Option<&Arc<dyn AgentStateSink>>,
+) -> Option<RemoteCursor> {
+    if !supports_agent_state {
+        tracing::warn!(
+            session_id = backend_session_id,
+            "Ignoring unexpected agentState in read response: agentStateV1 capability was not negotiated"
+        );
+        return None;
+    }
+    if !matches!(snapshot.state.as_str(), "working" | "blocked" | "idle") {
+        tracing::debug!(
+            session_id = backend_session_id,
+            state = %snapshot.state,
+            "Rejecting agent state with invalid state string"
+        );
+        return None;
+    }
+    if snapshot.revision.0 == 0 || snapshot.revision <= current_ack {
+        return None;
+    }
+    let provider_session = snapshot
+        .provider_session
+        .as_ref()
+        .and_then(|val| {
+            serde_json::from_value::<crate::daemon::protocol::AgentProviderSession>(val.clone()).ok()
+        })
+        .filter(|provider| {
+            snapshot
+                .agent
+                .as_deref()
+                .is_some_and(|agent| {
+                    crate::terminal::shell::resolve_agent_resume_plan(agent, provider).is_ok()
+                })
+        });
+    let candidate = crate::daemon::agent_state::AgentState {
+        session_id: backend_session_id.to_string(),
+        state: snapshot.state.clone(),
+        agent: snapshot.agent.clone(),
+        provider_session,
+        detail: snapshot.detail.clone(),
+        origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+    };
+    let accepted = if let Some(sink) = sink {
+        sink.accept(candidate)
+    } else {
+        false
+    };
+    if accepted {
+        Some(snapshot.revision)
+    } else {
+        None
+    }
+}
+
 async fn run(
     e: Arc<Entry>,
     hub: Arc<TerminalOutputHub>,
     connector: Arc<dyn Connector>,
     mut generation: u64,
     mut initial: Option<Arc<dyn Transport>>,
+    sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
 ) {
     let mut attempts = 0;
     loop {
@@ -933,6 +1061,12 @@ async fn run(
             }
             if info.exited {
                 return Err(BridgeError::TargetNotFound);
+            }
+            if !client.supports_agent_state() {
+                tracing::info!(
+                    session_id = %d.backend_session_id,
+                    "Remote helper does not advertise agentStateV1; agent state reporting unavailable for this session"
+                );
             }
             let mut desired_size: Option<(u16, u16)> = None;
             {
@@ -989,7 +1123,7 @@ async fn run(
             // while the independent reader is in a long poll.
             let mut updates = e.state.lock().updates.subscribe();
             loop {
-                let cursor = {
+                let (cursor, agent_ack) = {
                     let s = e.state.lock();
                     if s.details.generation != generation {
                         return Ok(());
@@ -997,7 +1131,7 @@ async fn run(
                     if s.details.state != RemoteConnectionState::Connected {
                         return Err(BridgeError::ConnectionClosed);
                     }
-                    s.details.descriptor.remote_cursor
+                    (s.details.descriptor.remote_cursor, s.agent_ack)
                 };
                 let read = tokio::select! {
                     biased;
@@ -1005,7 +1139,7 @@ async fn run(
                         details.generation != generation
                             || details.state != RemoteConnectionState::Connected
                     }) => return Err(BridgeError::ConnectionClosed),
-                    result = client.read(&d.target, cursor) => result?,
+                    result = client.read(&d.target, cursor, agent_ack) => result?,
                 };
                 let mut s = e.state.lock();
                 if s.details.generation != generation {
@@ -1041,6 +1175,18 @@ async fn run(
                     }
                 }
                 s.details.descriptor.remote_cursor = read.cursor;
+                if let Some(ref snapshot) = read.agent_state {
+                    let sink_guard = sink.read();
+                    if let Some(new_ack) = process_agent_snapshot(
+                        snapshot,
+                        client.supports_agent_state(),
+                        &d.backend_session_id,
+                        s.agent_ack,
+                        sink_guard.as_ref(),
+                    ) {
+                        s.agent_ack = new_ack;
+                    }
+                }
                 Entry::notify(&s);
                 if read.exited {
                     return Err(BridgeError::TargetNotFound);
@@ -1092,7 +1238,14 @@ async fn run_live(
     _connector: Arc<dyn Connector>,
     generation: u64,
     client: Arc<dyn Transport>,
+    sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
 ) {
+    if !client.supports_agent_state() {
+        tracing::info!(
+            session_id = %e.state.lock().details.descriptor.backend_session_id,
+            "Remote helper does not advertise agentStateV1; agent state reporting unavailable for this session"
+        );
+    }
     let d = {
         let mut s = e.state.lock();
         if s.details.generation != generation {
@@ -1123,7 +1276,7 @@ async fn run_live(
 
     let mut updates = e.state.lock().updates.subscribe();
     loop {
-        let cursor = {
+        let (cursor, agent_ack) = {
             let s = e.state.lock();
             if s.details.generation != generation {
                 return;
@@ -1131,7 +1284,7 @@ async fn run_live(
             if s.details.state != RemoteConnectionState::Connected {
                 return;
             }
-            s.details.descriptor.remote_cursor
+            (s.details.descriptor.remote_cursor, s.agent_ack)
         };
         let read = tokio::select! {
             biased;
@@ -1141,7 +1294,7 @@ async fn run_live(
                         || details.state != RemoteConnectionState::Connected
                 }).await;
             } => return,
-            result = client.read(&d.target, cursor) => match result {
+            result = client.read(&d.target, cursor, agent_ack) => match result {
                 Ok(r) => r,
                 Err(error) => {
                     let _gate = e.control.lock().await;
@@ -1188,6 +1341,18 @@ async fn run_live(
             }
         }
         s.details.descriptor.remote_cursor = read.cursor;
+        if let Some(ref snapshot) = read.agent_state {
+            let sink_guard = sink.read();
+            if let Some(new_ack) = process_agent_snapshot(
+                snapshot,
+                client.supports_agent_state(),
+                &d.backend_session_id,
+                s.agent_ack,
+                sink_guard.as_ref(),
+            ) {
+                s.agent_ack = new_ack;
+            }
+        }
         Entry::notify(&s);
         if read.exited {
             let failure = RemoteFailure::new(RemoteFailureKind::Missing, "Remote target exited");
@@ -1230,7 +1395,12 @@ mod tests {
             })
         }
 
-        fn read<'a>(&'a self, _: &'a TargetRef, _: RemoteCursor) -> Rpc<'a, ReadResult> {
+        fn read<'a>(
+            &'a self,
+            _: &'a TargetRef,
+            _: RemoteCursor,
+            _: RemoteCursor,
+        ) -> Rpc<'a, ReadResult> {
             Box::pin(async move {
                 self.reads
                     .lock()
@@ -1411,6 +1581,7 @@ mod tests {
                 data_base64: "".into(),
                 bytes: b"hello live import".to_vec(),
             }],
+            agent_state: None,
         })).unwrap();
 
         // Wait for update

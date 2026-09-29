@@ -23,6 +23,12 @@ struct Fake {
     write_history: parking_lot::Mutex<Vec<Vec<u8>>>,
     resizes: AtomicUsize,
     last_resize: parking_lot::Mutex<Option<(u16, u16)>>,
+    supports_agent_state: bool,
+    agent_acks: parking_lot::Mutex<Vec<RemoteCursor>>,
+    /// Bumped inside `Transport::read` for every read the pump issues, before that read's
+    /// response can be consumed. Tests await it to order assertions against the pump's handling
+    /// of the previous response instead of polling the transport channel.
+    read_calls: watch::Sender<usize>,
 }
 impl Transport for Fake {
     fn describe<'a>(&'a self, t: &'a TargetRef) -> Rpc<'a, DescribeResult> {
@@ -39,7 +45,15 @@ impl Transport for Fake {
             })
         })
     }
-    fn read<'a>(&'a self, _: &'a TargetRef, _: RemoteCursor) -> Rpc<'a, ReadResult> {
+    fn read<'a>(
+        &'a self,
+        _: &'a TargetRef,
+        _: RemoteCursor,
+        agent_after_revision: RemoteCursor,
+    ) -> Rpc<'a, ReadResult> {
+        self.agent_acks.lock().push(agent_after_revision);
+        let issued = *self.read_calls.borrow() + 1;
+        self.read_calls.send_replace(issued);
         Box::pin(async move {
             self.reads
                 .lock()
@@ -80,6 +94,9 @@ impl Transport for Fake {
             self.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
+    }
+    fn supports_agent_state(&self) -> bool {
+        self.supports_agent_state
     }
 }
 struct Dialer {
@@ -130,6 +147,9 @@ fn fixture() -> (
         write_history: parking_lot::Mutex::new(Vec::new()),
         resizes: AtomicUsize::new(0),
         last_resize: parking_lot::Mutex::new(None),
+        supports_agent_state: false,
+        agent_acks: parking_lot::Mutex::new(Vec::new()),
+        read_calls: watch::channel(0usize).0,
     });
     let dialer = Arc::new(Dialer {
         fake,
@@ -176,6 +196,7 @@ fn output(cursor: u64, gap: bool) -> ReadResult {
             data_base64: String::new(),
             bytes: format!("record-{cursor};").into_bytes(),
         }],
+        agent_state: None,
     }
 }
 
@@ -926,4 +947,550 @@ async fn ssh_remote_input_coalesces_queued_writes_into_bounded_transport_batches
         b"key-1;key-2;key-3;key-4;",
         "concatenated bytes must match FIFO input order"
     );
+}
+
+struct TestSink {
+    published: parking_lot::Mutex<Vec<crate::daemon::agent_state::AgentState>>,
+    notify: Arc<tokio::sync::Notify>,
+    accept_updates: bool,
+}
+
+impl TestSink {
+    fn new() -> (Arc<Self>, Arc<tokio::sync::Notify>) {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        (
+            Arc::new(Self {
+                published: parking_lot::Mutex::new(Vec::new()),
+                notify: notify.clone(),
+                accept_updates: true,
+            }),
+            notify,
+        )
+    }
+}
+
+impl AgentStateSink for TestSink {
+    fn accept(&self, state: crate::daemon::agent_state::AgentState) -> bool {
+        if !self.accept_updates {
+            return false;
+        }
+        let mut list = self.published.lock();
+        if let Some(prev) = list.last() {
+            if prev == &state {
+                return true;
+            }
+        }
+        list.push(state);
+        self.notify.notify_one();
+        true
+    }
+}
+
+fn agent_fixture(supports_agent_state: bool) -> (
+    RemoteRuntime,
+    Arc<TerminalOutputHub>,
+    Arc<Dialer>,
+    mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
+    Arc<TestSink>,
+    Arc<tokio::sync::Notify>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let fake = Arc::new(Fake {
+        reads: Mutex::new(rx),
+        describes: AtomicUsize::new(0),
+        writes: AtomicUsize::new(0),
+        stops: AtomicUsize::new(0),
+        write_failure: parking_lot::Mutex::new(None),
+        write_entered: parking_lot::Mutex::new(None),
+        write_pause: parking_lot::Mutex::new(None),
+        write_history: parking_lot::Mutex::new(Vec::new()),
+        resizes: AtomicUsize::new(0),
+        last_resize: parking_lot::Mutex::new(None),
+        supports_agent_state,
+        agent_acks: parking_lot::Mutex::new(Vec::new()),
+        read_calls: watch::channel(0usize).0,
+    });
+    let dialer = Arc::new(Dialer {
+        fake,
+        calls: AtomicUsize::new(0),
+        clock: Arc::new(Semaphore::new(0)),
+        failure: parking_lot::Mutex::new(None),
+    });
+    let hub = Arc::new(TerminalOutputHub::default());
+    let (sink, notify) = TestSink::new();
+    let runtime = RemoteRuntime::with_connector_and_sink(hub.clone(), dialer.clone(), sink.clone());
+    (runtime, hub, dialer, tx, sink, notify)
+}
+
+fn agent_output(cursor: u64, snapshot: Option<AgentStateSnapshot>) -> ReadResult {
+    ReadResult {
+        target: descriptor().target,
+        pid: RemotePid(999999),
+        cwd: "/project/wt".into(),
+        cursor: RemoteCursor(cursor),
+        after_sequence: cursor,
+        gap: false,
+        exited: false,
+        chunks: vec![ReadChunk {
+            cursor: RemoteCursor(cursor),
+            sequence: cursor,
+            data_base64: String::new(),
+            bytes: format!("record-{cursor};").into_bytes(),
+        }],
+        agent_state: snapshot,
+    }
+}
+
+fn silent_agent_read(cursor: u64, snapshot: AgentStateSnapshot) -> ReadResult {
+    ReadResult {
+        target: descriptor().target,
+        pid: RemotePid(999999),
+        cwd: "/project/wt".into(),
+        cursor: RemoteCursor(cursor),
+        after_sequence: cursor,
+        gap: false,
+        exited: false,
+        chunks: Vec::new(),
+        agent_state: Some(snapshot),
+    }
+}
+
+/// Delivers one read response and waits (bounded) for the sink publication it must produce.
+/// The notified future is created before the send, so the wait cannot miss the notification.
+async fn deliver_read(
+    notify: &Arc<tokio::sync::Notify>,
+    tx: &mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
+    read: ReadResult,
+) {
+    let published = notify.notified();
+    tx.send(Ok(read)).expect("agent fixture retains sender");
+    tokio::time::timeout(Duration::from_secs(3), published)
+        .await
+        .expect("agent sink publication deadline");
+}
+
+/// Waits (bounded) until the pump has issued `expected` transport reads. `Transport::read`
+/// bumps the counter before that read's response can be consumed, so observing it is a
+/// happens-after for everything the pump did while handling the previous response (sink
+/// publication, ack updates), which keeps those assertions deterministic without polling.
+async fn reads_started(fake: &Arc<Fake>, expected: usize) {
+    let mut rx = fake.read_calls.subscribe();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        rx.wait_for(|issued| *issued >= expected),
+    )
+    .await
+    .expect("transport read deadline")
+    .expect("read counter channel retained");
+}
+
+#[tokio::test]
+async fn ssh_agent_state_silent_pty_read_publishes_agent_state() {
+    let (runtime, hub, _dialer, tx, sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // First read carries ordinary PTY output and no agent state.
+    tx.send(Ok(agent_output(1, None))).unwrap();
+    state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(1)).await;
+    assert!(sink.published.lock().is_empty());
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-1;");
+
+    // The agent then changes state while the PTY stays silent: the helper answers with no chunks
+    // and an unchanged cursor, carrying only the snapshot. That state must still be published.
+    let silent = AgentStateSnapshot {
+        revision: RemoteCursor(2),
+        state: "blocked".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: Some("Awaiting confirmation".into()),
+    };
+    deliver_read(&notify, &tx, silent_agent_read(1, silent)).await;
+
+    let published = sink.published.lock().clone();
+    assert_eq!(
+        published.len(),
+        1,
+        "a silent PTY read must still publish agent state"
+    );
+    assert_eq!(published[0].state, "blocked");
+    assert_eq!(published[0].agent.as_deref(), Some("claude"));
+    assert_eq!(
+        published[0].detail.as_deref(),
+        Some("Awaiting confirmation")
+    );
+    assert_eq!(
+        published[0].origin,
+        crate::daemon::protocol::AgentStateOrigin::Agent
+    );
+    // The silent read replayed no bytes and left the PTY cursor where it was.
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-1;");
+    assert_eq!(rx.borrow().descriptor.remote_cursor, RemoteCursor(1));
+}
+
+#[tokio::test]
+async fn ssh_agent_state_dedup_suppresses_duplicate_notifications() {
+    let (runtime, _, dialer, tx, sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let snap1 = AgentStateSnapshot {
+        revision: RemoteCursor(1),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify, &tx, agent_output(1, Some(snap1))).await;
+    assert_eq!(sink.published.lock().len(), 1);
+
+    // Send identical state with newer revision (periodic read / pulse). The sink must stay
+    // silent here, so the wait below is the cursor, not the publication notification.
+    let snap2 = AgentStateSnapshot {
+        revision: RemoteCursor(2),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    tx.send(Ok(agent_output(2, Some(snap2)))).unwrap();
+
+    // Verify session cursor advanced to 2 before the next read was issued.
+    state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(2)).await;
+    reads_started(&dialer.fake, 3).await;
+
+    // Published count must stay 1 because state was identical (deduped)...
+    assert_eq!(
+        sink.published.lock().len(),
+        1,
+        "an identical state must not notify the sink twice"
+    );
+    // ...while the deduplicated revision still advances the ack.
+    let acks = dialer.fake.agent_acks.lock().clone();
+    assert_eq!(acks[0], RemoteCursor(0));
+    assert_eq!(acks[1], RemoteCursor(1));
+    assert_eq!(acks[2], RemoteCursor(2), "got: {acks:?}");
+}
+
+#[tokio::test]
+async fn ssh_agent_state_provider_and_detail_change_notifies_sink() {
+    let (runtime, _, dialer, tx, sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let snap1 = AgentStateSnapshot {
+        revision: RemoteCursor(1),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify, &tx, agent_output(1, Some(snap1))).await;
+    assert_eq!(sink.published.lock().len(), 1);
+
+    // AgentProviderSessionKey is snake_case on the wire, so a resumable provider session must
+    // carry "session_id": the runtime publishes only sessions it can build a resume plan for.
+    let claude_session = serde_json::json!({
+        "id": "11111111-1111-1111-1111-111111111111",
+        "key": "session_id",
+    });
+    let snap2 = AgentStateSnapshot {
+        revision: RemoteCursor(2),
+        state: "blocked".into(),
+        agent: Some("claude".into()),
+        provider_session: Some(claude_session),
+        detail: Some("Awaiting user confirmation".into()),
+    };
+    deliver_read(&notify, &tx, agent_output(2, Some(snap2))).await;
+
+    let published = sink.published.lock().clone();
+    assert_eq!(published.len(), 2);
+    assert_eq!(published[1].state, "blocked");
+    assert_eq!(
+        published[1].detail.as_deref(),
+        Some("Awaiting user confirmation")
+    );
+    let provider = published[1]
+        .provider_session
+        .as_ref()
+        .expect("a validated provider session must be published");
+    assert_eq!(provider.id, "11111111-1111-1111-1111-111111111111");
+    assert_eq!(
+        provider.key,
+        crate::daemon::protocol::AgentProviderSessionKey::SessionId
+    );
+    assert_eq!(
+        published[1].origin,
+        crate::daemon::protocol::AgentStateOrigin::Agent
+    );
+    reads_started(&dialer.fake, 3).await;
+    assert_eq!(dialer.fake.agent_acks.lock()[2], RemoteCursor(2));
+}
+
+#[tokio::test]
+async fn ssh_agent_state_reconnect_resumes_ack_on_post_reconnect_read() {
+    let (runtime, _, dialer, tx, _sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let snap1 = AgentStateSnapshot {
+        revision: RemoteCursor(42),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify, &tx, agent_output(1, Some(snap1))).await;
+
+    // Trigger a transport outage; the redial parks on the delay clock.
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+
+    // Allow the reconnect via the dialer semaphore.
+    dialer.clock.add_permits(1);
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
+
+    // Read #3 is the first read issued on the new connection: read #2 died with the old one and
+    // already carried 42, so the assertion is pinned to the post-reconnect call, not "any 42".
+    reads_started(&dialer.fake, 3).await;
+    let acks = dialer.fake.agent_acks.lock().clone();
+    assert_eq!(acks[0], RemoteCursor(0));
+    assert_eq!(acks[1], RemoteCursor(42));
+    assert_eq!(
+        acks[2],
+        RemoteCursor(42),
+        "post-reconnect read must resume at ack 42; got: {acks:?}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_agent_state_fresh_runtime_replay_initializes_latest_state() {
+    let (runtime1, _, _dialer1, tx1, sink1, notify1) = agent_fixture(true);
+    let desc = descriptor();
+    runtime1.restore(desc.clone()).unwrap();
+    let mut rx1 = runtime1.subscribe("local-stable").unwrap();
+    state(&mut rx1, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let retained = AgentStateSnapshot {
+        revision: RemoteCursor(42),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify1, &tx1, agent_output(1, Some(retained.clone()))).await;
+    assert_eq!(sink1.published.lock().len(), 1);
+
+    // A fresh runtime has no ack history: its first read asks to replay everything (`0`), and
+    // that replayed latest state must initialize the new sink instead of leaving it empty.
+    let (runtime2, _, dialer2, tx2, sink2, notify2) = agent_fixture(true);
+    runtime2.restore(desc).unwrap();
+    let mut rx2 = runtime2.subscribe("local-stable").unwrap();
+    state(&mut rx2, |d| d.state == RemoteConnectionState::Connected).await;
+    assert!(sink2.published.lock().is_empty());
+
+    deliver_read(&notify2, &tx2, agent_output(1, Some(retained))).await;
+
+    let published = sink2.published.lock().clone();
+    assert_eq!(
+        published.len(),
+        1,
+        "the replayed latest state must initialize the fresh sink"
+    );
+    assert_eq!(published[0].state, "working");
+    assert_eq!(published[0].agent.as_deref(), Some("claude"));
+    reads_started(&dialer2.fake, 2).await;
+    let acks = dialer2.fake.agent_acks.lock().clone();
+    assert_eq!(
+        acks[0],
+        RemoteCursor(0),
+        "a fresh runtime must replay from 0"
+    );
+    assert_eq!(
+        acks[1],
+        RemoteCursor(42),
+        "the replay must advance the fresh ack to the retained revision"
+    );
+}
+
+#[tokio::test]
+async fn ssh_agent_state_stale_revision_from_previous_generation_is_not_republished() {
+    let (runtime, _, dialer, tx, sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let current = AgentStateSnapshot {
+        revision: RemoteCursor(5),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify, &tx, agent_output(1, Some(current))).await;
+    assert_eq!(sink.published.lock().len(), 1);
+
+    // The transport dies. The redial parks on the delay clock, so no read is pending and the
+    // stale frame can only be consumed by the first read of the new generation.
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+    let stale = AgentStateSnapshot {
+        revision: RemoteCursor(3),
+        state: "idle".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    tx.send(Ok(silent_agent_read(1, stale))).unwrap();
+    dialer.clock.add_permits(1);
+
+    // Read #3 consumes the stale frame and read #4 follows only if the session stayed healthy,
+    // so the wait also proves the stale revision was discarded rather than failed on.
+    reads_started(&dialer.fake, 4).await;
+    assert_eq!(
+        sink.published.lock().len(),
+        1,
+        "an already-acknowledged revision must not be republished"
+    );
+    let acks = dialer.fake.agent_acks.lock().clone();
+    assert_eq!(acks[2], RemoteCursor(5));
+    assert_eq!(
+        acks[3],
+        RemoteCursor(5),
+        "a stale revision must not regress the acknowledged revision; got: {acks:?}"
+    );
+    let details = rx.borrow().clone();
+    assert_eq!(details.state, RemoteConnectionState::Connected);
+    assert!(details.failure.is_none());
+}
+
+#[tokio::test]
+async fn ssh_agent_state_imported_live_pump_publishes_and_acks() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let fake = Arc::new(Fake {
+        reads: Mutex::new(rx),
+        describes: AtomicUsize::new(0),
+        writes: AtomicUsize::new(0),
+        stops: AtomicUsize::new(0),
+        write_failure: parking_lot::Mutex::new(None),
+        write_entered: parking_lot::Mutex::new(None),
+        write_pause: parking_lot::Mutex::new(None),
+        write_history: parking_lot::Mutex::new(Vec::new()),
+        resizes: AtomicUsize::new(0),
+        last_resize: parking_lot::Mutex::new(None),
+        supports_agent_state: true,
+        agent_acks: parking_lot::Mutex::new(Vec::new()),
+        read_calls: watch::channel(0usize).0,
+    });
+    let hub = Arc::new(TerminalOutputHub::default());
+    let (sink, notify) = TestSink::new();
+    let runtime = RemoteRuntime::with_sink(hub.clone(), sink.clone());
+
+    // Live import takes the exported state verbatim (exact generation and cursor) and attaches
+    // the transferred transport directly: no re-dial, no re-spawn.
+    let export = RemoteExportState {
+        descriptor: descriptor(),
+        generation: 1,
+        pending_size: None,
+        pid: Some(RemotePid(8888)),
+        bridge_transfer: None,
+    };
+    runtime
+        .live_import(export, Some(fake.clone() as Arc<dyn Transport>))
+        .unwrap();
+    let mut sub = runtime.subscribe("local-stable").unwrap();
+    state(&mut sub, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let snap = AgentStateSnapshot {
+        revision: RemoteCursor(5),
+        state: "idle".into(),
+        agent: Some("omo".into()),
+        provider_session: None,
+        detail: None,
+    };
+    deliver_read(&notify, &tx, agent_output(1, Some(snap))).await;
+
+    let published = sink.published.lock().clone();
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].state, "idle");
+    assert_eq!(published[0].agent.as_deref(), Some("omo"));
+    assert_eq!(
+        published[0].origin,
+        crate::daemon::protocol::AgentStateOrigin::Agent
+    );
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-1;");
+    reads_started(&fake, 2).await;
+    assert_eq!(
+        fake.agent_acks.lock()[1],
+        RemoteCursor(5),
+        "the live pump must acknowledge the published revision"
+    );
+}
+
+#[tokio::test]
+async fn ssh_agent_state_unnegotiated_capability_rejected() {
+    // supports_agent_state = false simulates old helper without agentStateV1
+    let (runtime, _, _dialer, tx, sink, _notify) = agent_fixture(false);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let snap = AgentStateSnapshot {
+        revision: RemoteCursor(1),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    // Unexpected agent_state in read response
+    tx.send(Ok(agent_output(1, Some(snap)))).unwrap();
+    state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(1)).await;
+
+    // Must be rejected/ignored; sink receives nothing
+    assert!(sink.published.lock().is_empty());
+}
+
+#[tokio::test]
+async fn ssh_agent_state_invalid_state_and_zero_revision_rejected() {
+    let (runtime, _, _dialer, tx, sink, _notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // 1. Invalid state string "not_a_valid_state"
+    let invalid_state = AgentStateSnapshot {
+        revision: RemoteCursor(1),
+        state: "not_a_valid_state".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    tx.send(Ok(agent_output(1, Some(invalid_state)))).unwrap();
+    state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(1)).await;
+    assert!(sink.published.lock().is_empty());
+
+    // 2. Zero revision
+    let zero_rev = AgentStateSnapshot {
+        revision: RemoteCursor(0),
+        state: "working".into(),
+        agent: Some("claude".into()),
+        provider_session: None,
+        detail: None,
+    };
+    tx.send(Ok(agent_output(2, Some(zero_rev)))).unwrap();
+    state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(2)).await;
+    assert!(sink.published.lock().is_empty());
 }

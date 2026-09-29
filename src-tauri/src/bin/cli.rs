@@ -6,6 +6,10 @@ use ferryx_lib::cli::{
 };
 
 fn main() {
+    #[cfg(unix)]
+    if let Some(code) = ferryx_lib::ssh::transport_unix::run_supervisor_mode() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()

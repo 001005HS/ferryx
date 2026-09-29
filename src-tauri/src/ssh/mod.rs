@@ -1,5 +1,4 @@
 pub mod bridge;
-pub(crate) mod agent_forward;
 pub mod browse;
 pub mod config;
 pub mod direct;
@@ -8,12 +7,15 @@ pub mod helper_assets;
 #[path = "../ferryx_scope/ssh/mod.rs"]
 pub mod helper_runtime;
 pub mod helper_setup;
-pub mod manual;
 pub mod operations;
 pub mod password;
 pub mod projects;
 pub mod runtime;
 pub mod state_bridge;
+#[cfg(unix)]
+pub mod transport_unix;
+#[cfg(windows)]
+pub mod transport_windows;
 pub mod worktree;
 
 use serde::{Deserialize, Serialize};

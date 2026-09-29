@@ -114,3 +114,33 @@ fn ssh_process_survival_bridge_allows_describe_without_stopping_runtime() {
         })
         .is_ok());
 }
+
+#[test]
+fn ssh_process_survival_agent_state_survives_bridge_eof() {
+    use std::net::TcpStream;
+
+    let dir = private_tempdir();
+    let bound = bind_runtime(dir.path(), "qa-agent-bridge".into()).unwrap();
+    let runtime = bound.runtime.clone();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = bound.listener.accept().unwrap();
+        serve(stream, bound.runtime.clone()).unwrap();
+    });
+
+    let mut input = Vec::new();
+    write_frame(
+        &mut input,
+        &json!({"protocol":1,"op":"handshake","params":{}}),
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    bridge(dir.path(), std::io::Cursor::new(input), &mut output).unwrap();
+    worker.join().unwrap();
+
+    let server_port = runtime.agent_state_server().unwrap().port();
+    let stream = TcpStream::connect(("127.0.0.1", server_port));
+    assert!(
+        stream.is_ok(),
+        "Agent state server must remain alive after bridge EOF"
+    );
+}
