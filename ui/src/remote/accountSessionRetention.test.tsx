@@ -7,10 +7,10 @@ import {
   storeAccountSessionToken,
   getStoredAccountSessionToken,
   clearStoredAccountSessionToken,
-  setAccountPreferredSessionId,
-  getAccountPreferredSessionId,
 } from "./accountSession";
 import { useAccountWorktrees } from "./useAccountWorktrees";
+
+const PREFERRED_SESSION_SENTINEL_KEY = "ferryx.account.preferred_session.custom_sentinel";
 
 function boundedSignal<T>(timeoutMs = 3000) {
   let resolve!: (value: T) => void;
@@ -49,10 +49,10 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
 
   it("Scenario (a): untyped HTML 403 is classified as LIST_MACHINES_FAILED, surfaces hook error, and PRESERVES account credentials and preferred sessions", async () => {
     storeAccountSessionToken("valid-active-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1", "sess1");
+    localStorage.setItem(PREFERRED_SESSION_SENTINEL_KEY, "sess1");
 
     expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
-    expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBe("sess1");
+    expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess1");
 
     globalThis.fetch = vi.fn().mockImplementation(async () =>
       new Response("<html><head><title>403 Forbidden</title></head><body>Cloudflare WAF Block</body></html>", {
@@ -95,7 +95,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
 
       expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBe(relayUrl);
-      expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBe("sess1");
+      expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess1");
     } finally {
       unmount();
     }
@@ -103,7 +103,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
 
   it("Scenario (a2): untyped plain text 401 is classified as LIST_MACHINES_FAILED and PRESERVES credentials and issuer origin", async () => {
     storeAccountSessionToken("valid-active-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1", "sess1");
+    localStorage.setItem(PREFERRED_SESSION_SENTINEL_KEY, "sess1");
 
     globalThis.fetch = vi.fn().mockImplementation(async () =>
       new Response("Unauthorized Gateway Proxy", {
@@ -145,7 +145,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
       expect(onUnauthorized).not.toHaveBeenCalled();
       expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBe(relayUrl);
-      expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBe("sess1");
+      expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess1");
     } finally {
       unmount();
     }
@@ -153,7 +153,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
 
   it("Scenario (a3): structured 403 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials", async () => {
     storeAccountSessionToken("valid-active-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1", "sess1");
+    localStorage.setItem(PREFERRED_SESSION_SENTINEL_KEY, "sess1");
 
     globalThis.fetch = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "Forbidden proxy override" }), {
@@ -195,7 +195,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
       expect(onUnauthorized).not.toHaveBeenCalled();
       expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBe(relayUrl);
-      expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBe("sess1");
+      expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess1");
     } finally {
       unmount();
     }
@@ -203,7 +203,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
 
   it("Scenario (a4): structured 500 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials", async () => {
     storeAccountSessionToken("valid-active-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1", "sess1");
+    localStorage.setItem(PREFERRED_SESSION_SENTINEL_KEY, "sess1");
 
     globalThis.fetch = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "Internal server error" }), {
@@ -245,15 +245,14 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
       expect(onUnauthorized).not.toHaveBeenCalled();
       expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBe(relayUrl);
-      expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBe("sess1");
+      expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess1");
     } finally {
       unmount();
     }
   });
 
-  it("Scenario (b): structured account 401 UNAUTHORIZED invokes onUnauthorized and erases credentials and preferred session", async () => {
+  it("Scenario (b): structured account 401 UNAUTHORIZED invokes onUnauthorized and erases credentials", async () => {
     storeAccountSessionToken("expired-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1", "sess1");
 
     globalThis.fetch = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "unknown or expired session" }), {
@@ -290,15 +289,14 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
       expect(onUnauthorized).toHaveBeenCalledTimes(1);
       expect(getStoredAccountSessionToken(relayUrl)).toBeNull();
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBeNull();
-      expect(getAccountPreferredSessionId(relayUrl, "m1", "ws1", "slug1")).toBeNull();
     } finally {
       unmount();
     }
   });
 
-  it("Scenario (c): downstream machine-specific 401 does NOT trigger onUnauthorized and preserves account credentials and preferred sessions", async () => {
+  it("Scenario (c): downstream machine-specific 401 does NOT trigger onUnauthorized and preserves account credentials", async () => {
     storeAccountSessionToken("valid-active-session-token", relayUrl);
-    setAccountPreferredSessionId(relayUrl, "machine-1", "ws-1", "slug-1", "sess-12345");
+    localStorage.setItem(PREFERRED_SESSION_SENTINEL_KEY, "sess-12345");
 
     const mockMachine = {
       machineRecordId: "rec-1",
@@ -350,7 +348,7 @@ describe("Account Worktrees Auth Classification & Session Retention Regressions"
       expect(onUnauthorized).not.toHaveBeenCalled();
       expect(getStoredAccountSessionToken(relayUrl)).toBe("valid-active-session-token");
       expect(localStorage.getItem("ferryx.account.tokenOrigin")).toBe(relayUrl);
-      expect(getAccountPreferredSessionId(relayUrl, "machine-1", "ws-1", "slug-1")).toBe("sess-12345");
+      expect(localStorage.getItem(PREFERRED_SESSION_SENTINEL_KEY)).toBe("sess-12345");
     } finally {
       unmount();
     }
