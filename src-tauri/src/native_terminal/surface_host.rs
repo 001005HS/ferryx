@@ -5196,6 +5196,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unpresented_bounds_ipc_returns_after_wait_bound_with_geometry_applied() {
+        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness._app.manage(harness.state.clone());
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        // An open synchronized-output transaction drops every frame without a presentation and,
+        // with no further output, nothing else would ever wake the request.
+        harness
+            .state
+            .with_session_terminal(&harness.request.session_id, |terminal| {
+                terminal.feed_str("\x1b[?2026hpartial")
+            })
+            .unwrap();
+        let narrowed_width = harness.request.bounds.width / 2.0;
+        let command = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: harness.request.bounds.x,
+                y: harness.request.bounds.y,
+                width: narrowed_width,
+                height: harness.request.bounds.height,
+            },
+            harness.request.bounds.scale_factor,
+        );
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+            .await
+            .expect("an unpresentable frame must not hold the bounds request open")
+            .unwrap();
+
+        assert!(!receipt.presented);
+        assert!(receipt.render_deferred);
+        assert_eq!(
+            harness
+                .state
+                .session_logical_bounds(&harness.request.session_id)
+                .unwrap()
+                .width,
+            narrowed_width
+        );
+        assert_eq!(
+            harness
+                .state
+                .with_session_terminal(&harness.request.session_id, |terminal| {
+                    terminal.dimensions()
+                })
+                .unwrap(),
+            (receipt.cols, receipt.rows)
+        );
+    }
+
+    #[tokio::test]
     async fn synchronized_output_pump_presents_only_the_completed_redraw() {
         let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
         harness

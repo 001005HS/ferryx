@@ -9,6 +9,17 @@ use crate::ipc::{IpcError, IpcErrorCode};
 pub const NATIVE_TERMINAL_RECEIPT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(250);
 
+/// Upper bound on how long a bounds request waits for its frame to reach the screen.
+///
+/// Geometry (layout, PTY size, child view frame) is applied synchronously inside the render call,
+/// so only the presentation acknowledgement is waited on. A frame can be dropped without any
+/// signal (an open synchronized-output transaction, a busy frame loan), and with no further
+/// output the wait would never end; the UI queues every newer measurement behind the in-flight
+/// request, so a split pane would keep its old width. Past this bound the deferred receipt is
+/// returned and the next queued geometry can go out.
+pub const NATIVE_TERMINAL_PRESENTATION_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
 /// Event carrying an input receipt that is no longer awaited inline.
 ///
 /// The receipt only positions the IME candidate window, but waiting for it used to hold the UI's
@@ -1001,6 +1012,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         .ok_or_else(|| IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())))?;
     let mut presentations = slot.subscribe_presentations();
     presentations.borrow_and_update();
+    let presentation_deadline = tokio::time::Instant::now() + NATIVE_TERMINAL_PRESENTATION_WAIT;
     let mut initial_request = Some(request);
     loop {
         let state_inner = state.inner().clone();
@@ -1050,6 +1062,10 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                     if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
                         return Ok(into_ipc_receipt(session_id, presented));
                     }
+                }
+                // The geometry is already applied; stop holding the caller's newer bounds back.
+                _ = tokio::time::sleep_until(presentation_deadline) => {
+                    return Ok(receipt);
                 }
                 // Terminal state moved on without a presentation (a suspended surface stops
                 // retrying); re-render so the pane cannot get stuck on an obsolete frame.
