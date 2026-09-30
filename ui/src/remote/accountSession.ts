@@ -196,10 +196,10 @@ function accountOriginProbeStorage(): Storage | null {
 
 /**
  * Resolves the origin that serves the account API for a page loaded from
- * `pageOrigin`. A 2xx health probe keeps `cleanOrigin(pageOrigin)`; anything
- * else -- non-2xx, network failure, blank input -- falls back to
- * {@link DEFAULT_ACCOUNT_ORIGIN}. Never throws, and caches its decision per
- * origin in sessionStorage so the probe runs at most once per session.
+ * `pageOrigin`. A 2xx health probe keeps `cleanOrigin(pageOrigin)`; a confirmed
+ * 404 falls back to {@link DEFAULT_ACCOUNT_ORIGIN} (e.g. desktop local server).
+ * Transient network or server errors retain candidate origin without caching fallback.
+ * Caches positive candidate or confirmed 404 in sessionStorage. Never throws.
  */
 export async function resolveAccountOrigin(pageOrigin: string): Promise<string> {
   const requested = typeof pageOrigin === "string" ? pageOrigin.trim() : "";
@@ -212,7 +212,11 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
   const storage = accountOriginProbeStorage();
   try {
     const cached = storage?.getItem(cacheKey);
-    if (cached && cached.trim().length > 0) return cached.trim();
+    // Cached candidate is trusted and fast; if a previous bug or transient failure cached
+    // a fallback different from the candidate, re-probe safely to recover poisoned state.
+    if (cached && cached.trim().length > 0 && cached.trim() === candidate) {
+      return cached.trim();
+    }
   } catch {
     // Unreadable storage: fall through to the probe.
   }
@@ -221,17 +225,26 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
   if (inFlight) return inFlight;
 
   const probe = (async (): Promise<string> => {
-    let resolved = DEFAULT_ACCOUNT_ORIGIN;
+    let resolved = candidate;
+    let shouldCache = false;
     try {
       const res = await fetch(`${candidate}${ACCOUNT_ORIGIN_HEALTH_PATH}`);
-      if (res.ok) resolved = candidate;
+      if (res.ok) {
+        resolved = candidate;
+        shouldCache = true;
+      } else if (res.status === 404) {
+        resolved = DEFAULT_ACCOUNT_ORIGIN;
+        shouldCache = true;
+      }
     } catch {
-      // Unreachable or blocked probe: keep the product default.
+      // Transient network or connection failure: retains candidate and shouldCache=false
     }
-    try {
-      storage?.setItem(cacheKey, resolved);
-    } catch {
-      // A full or blocked sessionStorage must not change the resolved origin.
+    if (shouldCache) {
+      try {
+        storage?.setItem(cacheKey, resolved);
+      } catch {
+        // A full or blocked sessionStorage must not change the resolved origin.
+      }
     }
     accountOriginProbes.delete(candidate);
     return resolved;
@@ -405,15 +418,21 @@ export async function listMachines(
   if (!res.ok) {
     let code = "LIST_MACHINES_FAILED";
     let message = `Failed to list account machines (${res.status})`;
-    if (res.status === 401 || res.status === 403) {
-      code = "UNAUTHORIZED";
-      message = "Account session expired or unauthorized.";
-    }
     try {
       const data = await res.json();
-      if (data?.code) code = data.code;
-      if (data?.message) message = data.message;
+      if (typeof data?.code === "string" && data.code.trim().length > 0) {
+        code = data.code.trim();
+      }
+      if (typeof data?.message === "string" && data.message.trim().length > 0) {
+        message = data.message.trim();
+      }
     } catch {}
+    if (code === "UNAUTHORIZED" && res.status !== 401) {
+      code = "LIST_MACHINES_FAILED";
+    }
+    if (res.status === 401 && code === "UNAUTHORIZED") {
+      message = "Account session expired or unauthorized.";
+    }
     throw new AccountSessionError(code, message, res.status);
   }
 

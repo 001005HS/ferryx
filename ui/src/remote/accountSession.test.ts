@@ -592,11 +592,11 @@ describe("accountSession client module", () => {
     expect(fetchCalls[0].url).toBe("http://127.0.0.1:43821/api/account/v1/health");
   });
 
-  it("resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe fails on the network", async () => {
+  it("resolveAccountOrigin retains candidate origin when the health probe fails on the network", async () => {
     const pageOrigin = "https://app-origin-network-fail.example.com";
     globalThis.fetch = vi.fn().mockImplementation(() => Promise.reject(new Error("ECONNREFUSED")));
 
-    await expect(resolveAccountOrigin(pageOrigin)).resolves.toBe(DEFAULT_ACCOUNT_ORIGIN);
+    await expect(resolveAccountOrigin(pageOrigin)).resolves.toBe(pageOrigin);
     expect(fetchCalls).toHaveLength(0);
   });
 
