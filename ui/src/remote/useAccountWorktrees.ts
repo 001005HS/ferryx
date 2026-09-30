@@ -36,6 +36,7 @@ export interface MachineDiscoveryStatus {
 
 export interface UseAccountWorktreesResult {
   loading: boolean;
+  initialized: boolean;
   error: string | null;
   machines: AccountMachineView[];
   machineStatuses: Record<string, MachineDiscoveryStatus>;
@@ -64,7 +65,8 @@ export function useAccountWorktrees(
   onUnauthorized?: () => void,
 ): UseAccountWorktreesResult {
   const [machines, setMachines] = useState<AccountMachineView[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(() => enabled && Boolean(accountSessionToken));
+  const [initialized, setInitialized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [machineStatuses, setMachineStatuses] = useState<Record<string, MachineDiscoveryStatus>>({});
 
@@ -252,6 +254,7 @@ export function useAccountWorktrees(
       setMachines([]);
       setMachineStatuses({});
       setLoading(false);
+      setInitialized(false);
       setError(null);
       return;
     }
@@ -263,6 +266,7 @@ export function useAccountWorktrees(
     closeAllExcept(null);
     setMachineStatuses({});
     setLoading(true);
+    setInitialized(false);
     setError(null);
 
     const isGenerationAlive = () =>
@@ -273,6 +277,7 @@ export function useAccountWorktrees(
         if (!isGenerationAlive()) return;
         setMachines(data);
         setLoading(false);
+        setInitialized(true);
 
         const attachKey = await getOrCreateAttachKey();
         if (!attachKey) throw new Error("Failed to prepare initiator attach key");
@@ -302,6 +307,7 @@ export function useAccountWorktrees(
         }
         setError(err instanceof Error ? err.message : "Failed to load account machines");
         setLoading(false);
+        setInitialized(true);
       });
 
     return () => {
@@ -420,6 +426,7 @@ export function useAccountWorktrees(
 
   return {
     loading,
+    initialized,
     error,
     machines,
     machineStatuses,

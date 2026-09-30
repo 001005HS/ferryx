@@ -47,6 +47,8 @@ import {
   AccountSessionError,
   allocateSession,
   clearStoredAccountSessionToken,
+  getStoredAccountTokenOrigin,
+  logoutAccountSession,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   storeAccountOrigin,
@@ -182,7 +184,7 @@ export function RemoteSection({
         if (!active) return;
         if (
           err instanceof AccountSessionError &&
-          (err.code === "UNAUTHORIZED" || err.status === 401)
+          err.code === "UNAUTHORIZED"
         ) {
           clearStoredAccountSessionToken();
           setAccountToken(null);
@@ -239,6 +241,10 @@ export function RemoteSection({
   };
 
   const handleSignOut = () => {
+    if (accountToken) {
+      const issuerOrigin = getStoredAccountTokenOrigin() || accountOrigin;
+      void logoutAccountSession(issuerOrigin, accountToken);
+    }
     clearStoredAccountSessionToken();
     setAccountToken(null);
     setAccountMachines([]);
