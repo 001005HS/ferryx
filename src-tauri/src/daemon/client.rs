@@ -1986,7 +1986,8 @@ impl DaemonClient {
         }
 
         if let DaemonRequest::Write { ref session_id, .. }
-        | DaemonRequest::Resize { ref session_id, .. } = req
+        | DaemonRequest::Resize { ref session_id, .. }
+        | DaemonRequest::RemoteSessionDetails { ref session_id } = req
         {
             // Per-session connection slots for local Write/Resize isolate
             // cross-session head-of-line blocking (e.g. one stalled local session
@@ -2757,7 +2758,12 @@ impl DaemonClient {
     // Never infer a remote generation after an await. Generation-less platform
     // callbacks are local-only; remote panes must supply their observed generation.
     async fn require_local_control(&self, session_id: &str) -> Result<(), IpcError> {
-        match self.remote_session_status(session_id).await? {
+        match self
+            .send_interactive_request(DaemonRequest::RemoteSessionDetails {
+                session_id: session_id.into(),
+            })
+            .await?
+        {
             DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => Ok(()),
             DaemonResponse::RemoteSessionDetailsOk {
                 details: Some(_), ..
@@ -2849,7 +2855,12 @@ impl DaemonClient {
         // input: resolving the remote's CURRENT generation here is safe (the daemon
         // applies it under its live connection), unlike generation-less writes which
         // must be rejected for remote sessions.
-        match self.remote_session_status(session_id).await? {
+        match self
+            .send_interactive_request(DaemonRequest::RemoteSessionDetails {
+                session_id: session_id.into(),
+            })
+            .await?
+        {
             DaemonResponse::RemoteSessionDetailsOk {
                 details: Some(details),
                 ..
@@ -3386,6 +3397,429 @@ impl DaemonClient {
                 "Unexpected daemon response",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod local_control_isolation_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn stream_pair() -> (DaemonStream, DaemonStream) {
+        tokio::net::UnixStream::pair().unwrap()
+    }
+
+    #[cfg(not(unix))]
+    async fn stream_pair() -> (DaemonStream, DaemonStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (client, accepted) = tokio::join!(client, listener.accept());
+        (client.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn public_local_control_bypasses_busy_general_and_shared_interactive_connections() {
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+
+        let client = DaemonClient::new();
+        let session_id = "isolated-public-local-control";
+        let (reader, writer) = client_stream.into_split();
+        client.local_connections.lock().insert(
+            session_id.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader),
+                    writer,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        // Hold BOTH the general connection lock AND the shared interactive_connection lock.
+        // Public local write and resize MUST finish over the session-dedicated slot without waiting on either.
+        let general_guard = client.connection.lock().await;
+        let interactive_guard = client.interactive_connection.lock().await;
+
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server_stream.into_split();
+            let mut reader = BufReader::new(reader);
+            for index in 0..4 {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                let response = match (index, request) {
+                    (0 | 2, DaemonRequest::RemoteSessionDetails { session_id: id }) => {
+                        assert_eq!(id, session_id);
+                        DaemonResponse::RemoteSessionDetailsOk {
+                            details: None,
+                            legacy_direct_ssh: false,
+                        }
+                    }
+                    (1, DaemonRequest::Write { session_id: id, data }) => {
+                        assert_eq!(id, session_id);
+                        assert_eq!(data, b"x");
+                        DaemonResponse::WriteOk
+                    }
+                    (3, DaemonRequest::Resize { session_id: id, cols, rows }) => {
+                        assert_eq!(id, session_id);
+                        assert_eq!((cols, rows), (100, 30));
+                        DaemonResponse::ResizeOk
+                    }
+                    (_, request) => panic!("unexpected request: {request:?}"),
+                };
+                writer
+                    .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            client.write_terminal_at_generation(session_id, None, b"x".to_vec()).await?;
+            client.resize_terminal_at_generation(session_id, None, 100, 30).await
+        })
+        .await;
+
+        drop(interactive_guard);
+        drop(general_guard);
+
+        if result.is_err() {
+            server.abort();
+        }
+        result
+            .expect("local control waited on general or shared interactive connection")
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_session_contention_session_b_proceeds_while_session_a_classification_withheld() {
+        #[cfg(unix)]
+        let (client_a, server_a) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_a, server_a) = stream_pair().await;
+
+        #[cfg(unix)]
+        let (client_b, server_b) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_b, server_b) = stream_pair().await;
+
+        let client = DaemonClient::new();
+        let session_a = "session-a-withheld";
+        let session_b = "session-b-unblocked";
+
+        let (reader_a, writer_a) = client_a.into_split();
+        client.local_connections.lock().insert(
+            session_a.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader_a),
+                    writer: writer_a,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        let (reader_b, writer_b) = client_b.into_split();
+        client.local_connections.lock().insert(
+            session_b.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader_b),
+                    writer: writer_b,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        let (a_entered_tx, a_entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (a_release_tx, a_release_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let server_a_task = tokio::spawn(async move {
+            let (reader, mut writer) = server_a.into_split();
+            let mut reader = BufReader::new(reader);
+
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let req: DaemonRequest = serde_json::from_str(&line).unwrap();
+            match req {
+                DaemonRequest::RemoteSessionDetails { session_id } => {
+                    assert_eq!(session_id, session_a);
+                }
+                other => panic!("expected RemoteSessionDetails for session A, got: {other:?}"),
+            }
+
+            let _ = a_entered_tx.send(());
+            let _ = a_release_rx.await;
+
+            let details_resp = DaemonResponse::RemoteSessionDetailsOk {
+                details: None,
+                legacy_direct_ssh: false,
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&details_resp).unwrap()).as_bytes())
+                .await
+                .unwrap();
+
+            line.clear();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let write_req: DaemonRequest = serde_json::from_str(&line).unwrap();
+            match write_req {
+                DaemonRequest::Write { session_id, data } => {
+                    assert_eq!(session_id, session_a);
+                    assert_eq!(data, b"bytes-a");
+                }
+                other => panic!("expected Write for session A, got: {other:?}"),
+            }
+
+            let write_resp = DaemonResponse::WriteOk;
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&write_resp).unwrap()).as_bytes())
+                .await
+                .unwrap();
+
+            // Assert exactly-once delivery: no further requests, client closes connection
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "server A observed unexpected extra request"
+            );
+        });
+
+        let server_b_task = tokio::spawn(async move {
+            let (reader, mut writer) = server_b.into_split();
+            let mut reader = BufReader::new(reader);
+
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let req: DaemonRequest = serde_json::from_str(&line).unwrap();
+            match req {
+                DaemonRequest::RemoteSessionDetails { session_id } => {
+                    assert_eq!(session_id, session_b);
+                }
+                other => panic!("expected RemoteSessionDetails for session B, got: {other:?}"),
+            }
+            let details_resp = DaemonResponse::RemoteSessionDetailsOk {
+                details: None,
+                legacy_direct_ssh: false,
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&details_resp).unwrap()).as_bytes())
+                .await
+                .unwrap();
+
+            line.clear();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let write_req: DaemonRequest = serde_json::from_str(&line).unwrap();
+            match write_req {
+                DaemonRequest::Write { session_id, data } => {
+                    assert_eq!(session_id, session_b);
+                    assert_eq!(data, b"bytes-b");
+                }
+                other => panic!("expected Write for session B, got: {other:?}"),
+            }
+            let write_resp = DaemonResponse::WriteOk;
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&write_resp).unwrap()).as_bytes())
+                .await
+                .unwrap();
+
+            // Assert exactly-once delivery: no further requests, client closes connection
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "server B observed unexpected extra request"
+            );
+        });
+
+        let client_a = client.clone();
+        let client_b = client.clone();
+
+        let a_task = tokio::spawn(async move {
+            client_a
+                .write_terminal_at_generation(session_a, None, b"bytes-a".to_vec())
+                .await
+        });
+
+        if let Err(e) = tokio::time::timeout(Duration::from_secs(2), a_entered_rx).await {
+            let _ = a_release_tx.send(());
+            a_task.abort();
+            server_a_task.abort();
+            server_b_task.abort();
+            panic!("session A classification timed out before reaching server: {e}");
+        }
+
+        let b_result = tokio::time::timeout(Duration::from_secs(2), async {
+            client_b
+                .write_terminal_at_generation(session_b, None, b"bytes-b".to_vec())
+                .await
+        })
+        .await;
+
+        if let Err(e) = &b_result {
+            let _ = a_release_tx.send(());
+            a_task.abort();
+            server_a_task.abort();
+            server_b_task.abort();
+            panic!("session B local write blocked on session A: {e}");
+        }
+        b_result.unwrap().expect("session B write returned error");
+
+        // Now release session A and ensure its write completes
+        let _ = a_release_tx.send(());
+
+        let a_result = tokio::time::timeout(Duration::from_secs(2), a_task).await;
+        if let Err(e) = &a_result {
+            server_a_task.abort();
+            server_b_task.abort();
+            panic!("session A timed out after release: {e}");
+        }
+        a_result
+            .unwrap()
+            .unwrap()
+            .expect("session A write returned error");
+
+        // Drop client slots to close write halves so server tasks see EOF for exactly-once check
+        client.local_connections.lock().clear();
+
+        server_a_task.await.unwrap();
+        server_b_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_generation_fence_rejects_unversioned_write_and_preserves_local_slot() {
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+
+        let client = DaemonClient::new();
+        let session_id = "remote-session-fenced";
+        let (reader, writer) = client_stream.into_split();
+        client.local_connections.lock().insert(
+            session_id.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader),
+                    writer,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server_stream.into_split();
+            let mut reader = BufReader::new(reader);
+
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+            match request {
+                DaemonRequest::RemoteSessionDetails { session_id: id } => {
+                    assert_eq!(id, session_id);
+                    let details = crate::terminal::remote::RemoteSessionDetails {
+                        descriptor: crate::terminal::remote::RemoteSessionDescriptor {
+                            backend_session_id: id.to_string(),
+                            target: crate::scoped_contracts::TargetRef {
+                                host_id: "test-host".to_string(),
+                                owner_id: "test-owner".to_string(),
+                                epoch: crate::scoped_contracts::Epoch(42),
+                                backend_session_id: "remote-target-id".to_string(),
+                            },
+                            config: crate::terminal::remote::RemoteSessionConfig {
+                                host: crate::ssh::SshHost {
+                                    id: "test-host".to_string(),
+                                    label: "test-host".to_string(),
+                                    hostname: "127.0.0.1".to_string(),
+                                    username: None,
+                                    port: None,
+                                    identity_file: None,
+                                    jump_host: None,
+                                    source: crate::ssh::SshHostSource::Config,
+                                    auth_method: crate::ssh::SshAuthMethod::Agent,
+                                    disabled: None,
+                                },
+                                environment: crate::ssh::runtime::RemoteEnvironment {
+                                    platform: crate::ssh::runtime::RemotePlatform::Posix,
+                                    executor: crate::ssh::runtime::RemoteExecutor::Sh,
+                                    version: "test".to_string(),
+                                    home: "/home".to_string(),
+                                    temp: "/tmp".to_string(),
+                                    git: true,
+                                },
+                                helper: crate::ssh::helper_setup::HelperLocation {
+                                    executable: "/bin/helper".to_string(),
+                                    root: "/tmp".to_string(),
+                                },
+                                project_id: "proj".to_string(),
+                                project_path: "/proj".to_string(),
+                                worktree: None,
+                                agent_identity: None,
+                            },
+                            client_request_id: "req-123".to_string(),
+                            remote_cursor: crate::ssh::bridge::RemoteCursor(0),
+                            cols: 100,
+                            rows: 30,
+                        },
+                        state: crate::terminal::remote::RemoteConnectionState::Connected,
+                        generation: 42,
+                        attempts: 0,
+                        failure: None,
+                        replay_gap: None,
+                        pid: None,
+                    };
+                    let resp = DaemonResponse::RemoteSessionDetailsOk {
+                        details: Some(details),
+                        legacy_direct_ssh: false,
+                    };
+                    writer
+                        .write_all(format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes())
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected RemoteSessionDetails, got {other:?}"),
+            }
+
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "server observed mutating write after classification rejected"
+            );
+        });
+
+        let write_result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.write_terminal_at_generation(session_id, None, b"unversioned-payload".to_vec()),
+        )
+        .await;
+
+        client.local_connections.lock().clear();
+
+        if let Err(e) = &write_result {
+            server.abort();
+            panic!("generation fence write timed out: {e}");
+        }
+
+        let err = write_result
+            .unwrap()
+            .expect_err("generation-less write on remote session must be rejected");
+
+        assert_eq!(err.code, IpcErrorCode::InternalError);
+        let details = err.details.expect("details object");
+        assert_eq!(details["kind"], "staleGeneration");
+        assert_eq!(details["inputWritten"], false);
+
+        server.await.unwrap();
     }
 }
 
