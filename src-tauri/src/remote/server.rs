@@ -3222,7 +3222,7 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2"];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
@@ -3709,14 +3709,46 @@ async fn paste_upload_boundary(
         .decode(&req.data)
         .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_BASE64"))?;
 
-    let saved = crate::clipboard_image::save_paste_chunk(
-        &req.upload_id,
-        &req.file_name,
-        req.chunk_index,
-        req.total_chunks,
-        &chunk_bytes,
-    )
-    .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?;
+    let saved = match (req.offset, req.total_bytes) {
+        (Some(offset), Some(total_bytes)) => {
+            let upload_id = req.upload_id.clone();
+            let file_name = req.file_name.clone();
+            crate::ipc::run_blocking(move || {
+                crate::clipboard_image::save_paste_chunk_v2(
+                    &upload_id,
+                    &file_name,
+                    req.chunk_index,
+                    req.total_chunks,
+                    offset,
+                    total_bytes,
+                    &chunk_bytes,
+                )
+            })
+            .await
+            .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?
+        }
+        (None, None) => {
+            let upload_id = req.upload_id.clone();
+            let file_name = req.file_name.clone();
+            crate::ipc::run_blocking(move || {
+                crate::clipboard_image::save_paste_chunk(
+                    &upload_id,
+                    &file_name,
+                    req.chunk_index,
+                    req.total_chunks,
+                    &chunk_bytes,
+                )
+            })
+            .await
+            .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?
+        }
+        _ => {
+            return Err(machine_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST: offset and totalBytes must both be present or both absent",
+            ));
+        }
+    };
 
     let res = super::machine_protocol::PasteUploadChunkResult {
         remote_path: saved.map(|p| p.to_string_lossy().into_owned()),
