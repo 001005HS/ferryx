@@ -124,7 +124,7 @@ export type WorkspaceServices = {
     shell?: string | null;
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
-  }) => Promise<{ sessionId: string; session?: { cwd?: string | null } | null }>;
+  }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null } | null }>;
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
@@ -388,6 +388,16 @@ export function useWorkspaceStore({
     },
     [],
   );
+
+  const dispatchToOwner = useCallback((action: WorkspaceAction, owner?: string) => {
+    if (!owner || owner === mountedWorkspaceIdRef.current) { dispatch(action); return; }
+    const snapshot = getWorkspaceSnapshot(owner);
+    if (!snapshot) return;
+    const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
+    setWorkspaceSnapshot(owner, next);
+    setHmrWorkspaceState(owner, next);
+    bumpParkedActivity();
+  }, [dispatch, bumpParkedActivity]);
 
   useEffect(() => {
     const owningWorkspaceId = renderedState.workspaceId ?? workspaceId;
@@ -664,6 +674,17 @@ export function useWorkspaceStore({
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
       if (mountedWorkspaceIdRef.current !== workspaceId) {
+        if (isRemoteWorkspaceId(workspaceId)) {
+          const originSnapshot = getWorkspaceSnapshot(workspaceId);
+          if (originSnapshot) {
+            if (!originSnapshot.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
+              dispatchToOwner({ type: "SET_WORKTREES", worktrees: [...originSnapshot.worktrees, worktree] }, workspaceId);
+            }
+            dispatchToOwner({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath }, workspaceId);
+            dispatchToOwner({ type: "SELECT_WORKTREE", path: capturedWorktreePath }, workspaceId);
+            return binding.tab.id;
+          }
+        }
         switchDebug("terminal.open.discarded", {
           requestedWorkspaceId: workspaceId,
           mountedWorkspaceId: mountedWorkspaceIdRef.current,
@@ -690,7 +711,7 @@ export function useWorkspaceStore({
       });
       return binding.tab.id;
     },
-    [createSpawnedTab, dispatch, services, workspaceId],
+    [createSpawnedTab, dispatch, dispatchToOwner, services, workspaceId],
   );
 
   const sshRecoveryKey = Object.values(renderedState.sessions)
@@ -1010,6 +1031,7 @@ export function useWorkspaceStore({
       }
 
       let backendSessionId: string | null = null;
+      let daemonEpoch: string | null = null;
       let inheritedCwd = sourceSession.cwd;
       try {
         await services.ensureTerminalEvents();
@@ -1024,6 +1046,7 @@ export function useWorkspaceStore({
             inheritFromSessionId: sourceSession.backendSessionId,
           });
           backendSessionId = result.sessionId;
+          daemonEpoch = result.daemonEpoch ?? null;
           inheritedCwd = result.session?.cwd ?? inheritedCwd;
         } else {
           // Mock/test services without detailed spawn: resolve live cwd explicitly.
@@ -1043,14 +1066,20 @@ export function useWorkspaceStore({
           });
         }
 
-        const currentSession = stateRef.current.sessions[localSessionId];
+        const isRemote = isRemoteWorkspaceId(workspaceId) || isRemoteWorkspaceId(sourceSession.workspaceId);
+        const owningWorkspaceId = isRemote ? (sourceSession.workspaceId || workspaceId) : mountedWorkspaceIdRef.current;
+        const ownerState = owningWorkspaceId === mountedWorkspaceIdRef.current
+          ? stateRef.current
+          : getWorkspaceSnapshot(owningWorkspaceId);
+        const currentSession = ownerState?.sessions[localSessionId];
         if (currentSession && currentSession.backendSessionId === null) {
-          dispatch({
+          dispatchToOwner({
             type: "REBIND_SESSION_BACKEND",
             sessionId: localSessionId,
             backendSessionId,
             cwd: inheritedCwd,
-          });
+            ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+          }, owningWorkspaceId);
         } else {
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
@@ -1060,16 +1089,18 @@ export function useWorkspaceStore({
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
         }
-        dispatch({
+        const isRemote = isRemoteWorkspaceId(workspaceId) || isRemoteWorkspaceId(sourceSession.workspaceId);
+        const owningWorkspaceId = isRemote ? (sourceSession.workspaceId || workspaceId) : mountedWorkspaceIdRef.current;
+        dispatchToOwner({
           type: "SESSION_BACKEND_UNAVAILABLE",
           sessionId: localSessionId,
           backendSessionId: null,
           reason: toIpcError(error).message,
-        });
+        }, owningWorkspaceId);
         throw error;
       }
     },
-    [dispatch, services, workspaceId],
+    [dispatchToOwner, services, workspaceId],
   );
 
   const moveTabToGroup = useCallback(
@@ -1333,16 +1364,6 @@ export function useWorkspaceStore({
     activityListenersRef.current.add(listener);
     return () => { activityListenersRef.current.delete(listener); };
   }, []);
-
-  const dispatchToOwner = useCallback((action: WorkspaceAction, owner?: string) => {
-    if (!owner || owner === mountedWorkspaceIdRef.current) { dispatch(action); return; }
-    const snapshot = getWorkspaceSnapshot(owner);
-    if (!snapshot) return;
-    const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
-    setWorkspaceSnapshot(owner, next);
-    setHmrWorkspaceState(owner, next);
-    bumpParkedActivity();
-  }, [dispatch, bumpParkedActivity]);
 
   const createBrowserTab = useCallback(
     async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string; opener?: { browserId: string; handle: string } }) => {
