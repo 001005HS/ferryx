@@ -97,6 +97,41 @@ describe("sessionLifecycle", () => {
     expect(stored!.endsWith("tail")).toBe(true);
   });
 
+  it("adopts a daemon-reported suspension the GUI did not perform (restart case)", async () => {
+    // Regression: after a GUI restart the persisted pane said "running" while the daemon's
+    // process was SIGSTOPped, so no overlay or auto-resume ever fired and the pane froze.
+    const describeSpy = vi.spyOn(tauri, "describeTerminal").mockResolvedValue({
+      sessionId: "backend-stopped", cols: 80, rows: 24, running: true, suspended: true,
+    });
+    try {
+      const restored = session("backend-stopped", "running");
+      registerSessionSnapshot(restored, "idle");
+      await vi.waitFor(() => expect(isSessionSleeping(restored.id)).toBe(true));
+      expect(describeSpy).toHaveBeenCalledWith("backend-stopped");
+
+      // Re-registering the same binding must not query the daemon again.
+      registerSessionSnapshot(restored, "idle");
+      expect(describeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      describeSpy.mockRestore();
+    }
+  });
+
+  it("leaves a running daemon session awake", async () => {
+    const describeSpy = vi.spyOn(tauri, "describeTerminal").mockResolvedValue({
+      sessionId: "backend-live", cols: 80, rows: 24, running: true, suspended: false,
+    });
+    try {
+      const live = session("backend-live", "running");
+      registerSessionSnapshot(live, "idle");
+      await vi.waitFor(() => expect(describeSpy).toHaveBeenCalledWith("backend-live"));
+      await Promise.resolve();
+      expect(isSessionSleeping(live.id)).toBe(false);
+    } finally {
+      describeSpy.mockRestore();
+    }
+  });
+
   it("suspendRegisteredSession preserves backendSessionId and marks processState suspended", async () => {
     const live = session("backend-live-1", "running");
     registerSessionSnapshot(live, "idle");
@@ -182,7 +217,8 @@ describe("sessionLifecycle", () => {
         const live = session("backend-live-1", "running");
         registerSessionSnapshot(live, "idle");
         await vi.advanceTimersByTimeAsync(31 * 60_000);
-        expect(spies.describeSpy).not.toHaveBeenCalled();
+        // Only the one-time suspension reconcile on registration; the disabled sweep never asks.
+        expect(spies.describeSpy).toHaveBeenCalledTimes(1);
         expect(spies.suspendSpy).not.toHaveBeenCalled();
         expect(isSessionSleeping(live.id)).toBe(false);
       } finally {

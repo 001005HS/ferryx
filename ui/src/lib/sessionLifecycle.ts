@@ -65,6 +65,8 @@ const manualHibernateHoldIds = new Set<string>();
 const sleepingListeners = new Set<() => void>();
 const actionListeners = new Set<(action: SessionLifecycleAction, sessionId: string) => void>();
 const inFlightResumes = new Map<string, Promise<void>>();
+/** `${sessionId}\0${backendSessionId}` pairs whose suspension was already read from the daemon. */
+const reconciledSuspendBindings = new Set<string>();
 let sleepingSnapshot = "";
 let monitoringStarted = false;
 let idleSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -163,6 +165,38 @@ export function registerSessionSnapshot(
     activityState: activityState ?? previous?.activityState ?? null,
   });
   ensureLifecycleMonitoring();
+  reconcileDaemonSuspension(session);
+}
+
+/**
+ * The sleeping set and `processState` live only in this GUI process, but the suspended process
+ * lives in the daemon. After a GUI restart (or a suspend issued by another client) the pane would
+ * otherwise render a stopped process as running: no overlay, no auto-resume, a frozen terminal.
+ * Ask the daemon once per backend binding and adopt its kernel-observed answer.
+ */
+function reconcileDaemonSuspension(session: TerminalSession): void {
+  const backendSessionId = session.backendSessionId;
+  if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) return;
+  if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return;
+  const key = `${session.id}\u0000${backendSessionId}`;
+  if (reconciledSuspendBindings.has(key)) return;
+  reconciledSuspendBindings.add(key);
+  void Promise.resolve()
+    .then(() => describeTerminal(backendSessionId))
+    .then((details) => {
+      if (!details?.suspended) return;
+      const entry = registeredSessions.get(session.id);
+      // The pane may have been rebound or resumed while the query was in flight.
+      if (!entry || entry.session.backendSessionId !== backendSessionId || inFlightResumes.has(session.id)) return;
+      entry.session = { ...entry.session, processState: "suspended" };
+      entry.idleSince = null;
+      setSessionSleeping(session.id, true);
+    })
+    .catch((error) => {
+      // Unknown is not suspended; allow a later registration to ask again.
+      reconciledSuspendBindings.delete(key);
+      console.warn("Failed to read daemon suspension state:", error);
+    });
 }
 
 export function setSessionActive(sessionId: string, active: boolean): void {
@@ -458,6 +492,7 @@ export function resetSessionLifecycleForTests(): void {
   sleepingSessionIds.clear();
   manualHibernateHoldIds.clear();
   inFlightResumes.clear();
+  reconciledSuspendBindings.clear();
   sleepingSnapshot = "";
   monitoringStarted = false;
   if (idleSweepTimer) clearInterval(idleSweepTimer);

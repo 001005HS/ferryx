@@ -3947,6 +3947,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                     start_sequence: Some(1),
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
+                                    suspended: false,
                                 },
                             })
                             .unwrap()
@@ -4261,6 +4262,7 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                     start_sequence: Some(1),
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
+                                    suspended: false,
                                 },
                             })
                             .unwrap()

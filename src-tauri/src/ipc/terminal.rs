@@ -2258,6 +2258,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 start_sequence: Some(remote_session.start_sequence.0),
                 end_sequence: Some(remote_session.end_sequence.0),
                 last_output_age_ms: None,
+                suspended: false,
             },
         }
     } else {

@@ -169,6 +169,8 @@ export type TerminalDescribeResult = {
   endSequence?: number | null;
   /** Milliseconds since the daemon last read PTY output. Null/absent = unknown. */
   lastOutputAgeMs?: number | null;
+  /** Daemon-observed process suspension (kernel stop state). Absent on older daemons. */
+  suspended?: boolean;
 };
 
 export function isTauriRuntime() {

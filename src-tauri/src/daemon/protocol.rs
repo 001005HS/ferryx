@@ -109,6 +109,11 @@ pub struct DaemonSessionDetails {
     /// owning daemon has not observed any output yet (or predates this field).
     #[serde(default)]
     pub last_output_age_ms: Option<u64>,
+    /// The session's process is suspended (job-control stopped on Unix). Read from the kernel
+    /// on every describe, so a restarted GUI learns about a suspension it did not perform.
+    /// Absent from older daemons, which decode as not suspended.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1396,6 +1401,7 @@ mod tests {
                 start_sequence: Some(5),
                 end_sequence: Some(50),
                 last_output_age_ms: None,
+                suspended: false,
             },
         };
         let desc_resp_json = serde_json::to_string(&desc_resp).expect("serialize describe resp");

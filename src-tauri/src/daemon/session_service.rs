@@ -2331,6 +2331,7 @@ impl DaemonSessionService {
                     start_sequence,
                     end_sequence,
                     last_output_age_ms: None,
+                    suspended: false,
                 },
             };
         }
@@ -2354,6 +2355,7 @@ impl DaemonSessionService {
                         start_sequence,
                         end_sequence,
                         last_output_age_ms: None,
+                        suspended: false,
                     },
                 };
             }
@@ -2406,6 +2408,12 @@ impl DaemonSessionService {
                 start_sequence,
                 end_sequence,
                 last_output_age_ms: pty_session.last_output_age_ms(),
+                // Unix answers from the kernel; Windows has no queryable NtSuspendProcess
+                // state, so it falls back to the daemon's own lifecycle record.
+                suspended: pty_session.process_stopped()
+                    || (cfg!(windows)
+                        && self.terminal_service.process_state(session_id)
+                            == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended)),
             },
         }
     }

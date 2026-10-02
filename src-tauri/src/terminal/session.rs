@@ -122,6 +122,19 @@ fn live_process_group(pid: u32) -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 fn process_is_zombie(pid: u32) -> bool {
+    kinfo_proc_stat(pid) == Some(libc::SZOMB)
+}
+
+/// Whether the kernel reports `pid` as job-control stopped (SIGSTOP/SIGTSTP). This is the
+/// ground truth for "suspended": it survives GUI restarts and daemon handovers, which the
+/// in-memory lifecycle registry and the frontend's sleeping set do not.
+#[cfg(target_os = "macos")]
+fn process_is_stopped(pid: u32) -> bool {
+    kinfo_proc_stat(pid) == Some(libc::SSTOP)
+}
+
+#[cfg(target_os = "macos")]
+fn kinfo_proc_stat(pid: u32) -> Option<u32> {
     // proc_pidinfo answers ESRCH for a zombie, so only the kinfo_proc sysctl can see one.
     // libc does not bind kinfo_proc on Apple targets; read extern_proc.p_stat by offset
     // (identical on arm64 and x86_64: 648-byte struct, p_stat at 36).
@@ -140,19 +153,29 @@ fn process_is_zombie(pid: u32) -> bool {
             0,
         )
     };
-    read == 0 && len == KINFO_PROC_SIZE && u32::from(info[P_STAT_OFFSET]) == libc::SZOMB
+    (read == 0 && len == KINFO_PROC_SIZE).then(|| u32::from(info[P_STAT_OFFSET]))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn process_is_zombie(pid: u32) -> bool {
+    proc_stat_state(pid) == Some('Z')
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_is_stopped(pid: u32) -> bool {
+    // 'T' is a job-control stop; 't' is a ptrace stop, which is not a Ferryx suspension.
+    proc_stat_state(pid) == Some('T')
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn proc_stat_state(pid: u32) -> Option<char> {
     // The state field follows the parenthesised command name, which may itself contain ')'.
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|stat| {
             stat.rsplit_once(')')
-                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
         })
-        .unwrap_or(false)
 }
 
 #[cfg(all(
@@ -160,6 +183,14 @@ fn process_is_zombie(pid: u32) -> bool {
     not(any(target_os = "macos", target_os = "linux", target_os = "android"))
 ))]
 fn process_is_zombie(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn process_is_stopped(_pid: u32) -> bool {
     false
 }
 
@@ -490,6 +521,19 @@ impl PtySession {
 
     pub fn state(&self) -> PtySessionState {
         self.state.lock().clone()
+    }
+
+    /// Kernel-observed job-control stop of the session's process. Windows has no queryable
+    /// equivalent for `NtSuspendProcess`; callers combine this with the lifecycle registry.
+    pub fn process_stopped(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.pid().is_some_and(process_is_stopped)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     #[cfg(unix)]
@@ -1280,6 +1324,28 @@ mod tests {
     #[test]
     fn output_age_is_none_before_first_output() {
         assert_eq!(last_output_age_from(0), None);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn process_stop_state_tracks_sigstop_and_sigcont() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let wait_for = |want: bool| {
+            // Signal delivery is asynchronous; the kernel state settles within milliseconds.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while process_is_stopped(pid) != want {
+                assert!(std::time::Instant::now() < deadline, "stop state never became {want}");
+                std::thread::yield_now();
+            }
+        };
+        assert!(!process_is_stopped(pid));
+        unsafe { libc::kill(pid as i32, libc::SIGSTOP) };
+        wait_for(true);
+        unsafe { libc::kill(pid as i32, libc::SIGCONT) };
+        wait_for(false);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]
