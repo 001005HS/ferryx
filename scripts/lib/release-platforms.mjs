@@ -798,8 +798,8 @@ export function submitForNotarization({ path, notaryProfile, exec = macExec }) {
  * Tauri bundler produced before the app was re-signed, notarized, and stapled.
  */
 export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExec }) {
-  const appName = basename(appPath);
-  const volumeName = appName.replace(/\.app$/, "");
+  const appName = "Ferryx.app";
+  const volumeName = "Ferryx";
   exec("rm", ["-rf", stagingDir]);
   exec("mkdir", ["-p", stagingDir]);
   exec("ditto", [appPath, join(stagingDir, appName)]);

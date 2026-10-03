@@ -810,15 +810,18 @@ test("submitForNotarization: returns the parsed Accepted result and requests JSO
   assert.match(calls[0], /--wait/);
 });
 
-test("recreateDmgFromApp: replaces the existing image with one built from the given app", () => {
+for (const appName of ["Ferryx.app", "Ferryx-2026.1003.1.app"]) {
+test(`recreateDmgFromApp: packages ${appName} as Ferryx.app`, () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-dmg-recreate-"));
   try {
     const fixture = createMacFinalizeFixture(tmp);
     writeFileSync(join(fixture.appPath, "Contents", "MacOS", "ferryx"), "macho:main+signed");
+    const appPath = join(tmp, appName);
+    cpSync(fixture.appPath, appPath, { recursive: true });
     const stagingDir = join(fixture.workspaceDir, "dmg-staging");
 
     const { volumeName } = recreateDmgFromApp({
-      appPath: fixture.appPath,
+      appPath,
       dmgPath: fixture.dmgPath,
       stagingDir,
       exec: fixture.exec,
@@ -827,6 +830,8 @@ test("recreateDmgFromApp: replaces the existing image with one built from the gi
     assert.equal(volumeName, "Ferryx");
     const snapshot = JSON.parse(readFileSync(fixture.dmgPath, "utf8"));
     assert.equal(snapshot["Ferryx.app/Contents/MacOS/ferryx"], "macho:main+signed");
+    assert.deepEqual([...new Set(Object.keys(snapshot).map((entry) => entry.split(/[\\/]/)[0]))].sort(), ["Applications", "Ferryx.app"]);
+    assert.equal(readFileSync(join(appPath, "Contents", "MacOS", "ferryx"), "utf8"), "macho:main+signed");
     assert.equal(existsSync(stagingDir), false, "staging directory must be cleaned up");
     assert.match(
       fixture.calls.find((c) => c.startsWith("hdiutil create")),
@@ -836,6 +841,7 @@ test("recreateDmgFromApp: replaces the existing image with one built from the gi
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+}
 
 test("signUpdaterArtifact: fails closed when signing keys are absent from environment", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-test-sign-fail-"));
