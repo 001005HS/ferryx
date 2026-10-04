@@ -11,6 +11,8 @@ on:
   push:
     branches:
       - main
+      - e2e-a
+      - e2e-b
   workflow_dispatch:
 
 concurrency:
