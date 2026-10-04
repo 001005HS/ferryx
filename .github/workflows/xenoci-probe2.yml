@@ -1,0 +1,30 @@
+name: xenoci env probe2
+on:
+  push:
+    branches: [xo-probe2]
+jobs:
+  probe:
+    runs-on: xenoci-macos
+    steps:
+      - name: probe2
+        shell: bash
+        run: |
+          JS='ObjC.import("AppKit"); var p=$.NSPasteboard.pasteboardWithUniqueName; (p && !p.isNil()) ? "PB_OK" : "PB_NULL"'
+          U=$(id -un); UIDN=$(id -u)
+          PW=$(LC_ALL=C tr -dc A-Za-z0-9 </dev/urandom | head -c 24)
+          T0=$(date +%s)
+          sudo -n dscl . -passwd "/Users/$U" "$PW"
+          printf '%s' "$PW" | perl -e 'my @k=(0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F); local $/; my $p=<STDIN>; $p .= chr(0) x (12-(length($p)%12)); my $o=""; for my $i (0..length($p)-1) { $o .= chr(ord(substr($p,$i,1)) ^ $k[$i%11]); } binmode STDOUT; print $o;' | sudo -n tee /etc/kcpassword >/dev/null
+          sudo -n chown root:wheel /etc/kcpassword; sudo -n chmod 600 /etc/kcpassword
+          sudo -n defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$U"
+          echo "console before: $(stat -f%Su /dev/console)"
+          sudo -n killall loginwindow || true
+          for i in $(seq 1 60); do [ "$(stat -f%Su /dev/console)" = "$U" ] && break; sleep 1; done
+          echo "console after: $(stat -f%Su /dev/console) t=$(( $(date +%s)-T0 ))s"
+          launchctl print gui/$UIDN 2>&1 | head -3
+          ps -axo user,comm | grep -E "Finder|Dock|pboard|SetupAssistant|MiniBuddy" | grep -v grep
+          echo "direct: $(osascript -l JavaScript -e "$JS" 2>&1)"
+          echo "sudo-asuser: $(sudo -n launchctl asuser $UIDN sudo -n -u $U osascript -l JavaScript -e "$JS" 2>&1)"
+          echo "sudo-asuser-env: $(sudo -n launchctl asuser $UIDN sudo -n -u $U env HOME=$HOME osascript -l JavaScript -e "$JS" 2>&1)"
+          sleep 10
+          echo "late console: $(stat -f%Su /dev/console)"; echo "late sudo-asuser: $(sudo -n launchctl asuser $UIDN sudo -n -u $U osascript -l JavaScript -e "$JS" 2>&1)"
