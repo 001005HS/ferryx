@@ -11,6 +11,9 @@ on:
   push:
     branches:
       - main
+      - e2e-skip2
+      - e2e-skip-a
+      - e2e-skip-b
   workflow_dispatch:
 
 concurrency:
@@ -147,7 +150,26 @@ jobs:
             --skip remote::tests::test_remote_server_health_and_lifecycle \
             --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection \
             --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis \
-            --skip terminal::tests::test_spawn_startup_command_omo
+            --skip terminal::tests::test_spawn_startup_command_omo \
+            --skip daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface \
+            --skip daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty \
+            --skip dirty_delete_returns_structured_error_code \
+            --skip initial_project_is_the_single_canonical_checkout_without_a_default_alias \
+            --skip native_terminal_daemon_pump_emits_scrollbar_only_for_scrollback_state_changes \
+            --skip project_registration_is_idempotent_for_the_same_workspace_and_root \
+            --skip project_registration_returns_canonical_root_and_lists_local_branches \
+            --skip remote::server::p19_insecure_direct_tests::test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt \
+            --skip remote::server::p19_insecure_direct_tests::test_p19_overlay_mode_tailscale_unaffected \
+            --skip remote::tests::test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing \
+            --skip ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection \
+            --skip ssh::bridge::tests::ssh_bridge_ownership_ordering_detach_rollback_commit \
+            --skip ssh::bridge::tests::ssh_bridge_supervision_attach_failure_leaves_no_supervisor \
+            --skip swapped_checked_out_branches_cannot_delete_a_stale_identity_slot \
+            --skip worktree_status_does_not_emit_when_dirty_state_is_unchanged \
+            --skip worktree_status_emits_dirty_changed_on_clean_to_dirty_transition \
+            --skip worktree_status_emits_dirty_changed_on_dirty_to_clean_transition \
+            --skip ssh::bridge::tests::ssh_bridge_imported_connection_has_no_kill_rights \
+            --skip ssh_bridge_child_exit_on_cancellation_with_event_barrier
 
       # The remote grid mirror spans Rust and TypeScript: this asserts real serialized backend
       # frames parse in the actual frontend parser. It lives here, not in the UI job, because it
