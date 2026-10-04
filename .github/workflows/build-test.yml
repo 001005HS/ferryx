@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - xo-gh-control
   workflow_dispatch:
 
 concurrency:
@@ -23,7 +24,7 @@ jobs:
   # =========================================================================
   precheck:
     name: Lint, unit and integration tests (macOS)
-    runs-on: xenoci-macos
+    runs-on: macos-latest
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
       CARGO_BUILD_JOBS: '1'
