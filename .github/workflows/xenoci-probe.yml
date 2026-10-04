@@ -1,0 +1,24 @@
+name: xenoci env probe
+on:
+  push:
+    branches: [xo-probe]
+jobs:
+  probe:
+    runs-on: xenoci-macos
+    steps:
+      - name: probe
+        shell: bash
+        run: |
+          set -x
+          id; who || true; stat -f%Su /dev/console || true
+          launchctl managername || true
+          launchctl print gui/$(id -u) 2>&1 | head -5 || true
+          launchctl print user/$(id -u) 2>&1 | head -3 || true
+          ps -axo pid,user,comm | grep -E "loginwindow|WindowServer|pboard|Dock|Finder" | grep -v grep || true
+          ps -o pid,ppid,comm -p $$ -p $PPID || true
+          JS='ObjC.import("AppKit"); var p=$.NSPasteboard.pasteboardWithUniqueName; (p && !p.isNil()) ? "PB_OK" : "PB_NULL"'
+          echo "direct: $(osascript -l JavaScript -e "$JS" 2>&1)"
+          echo "asuser: $(launchctl asuser $(id -u) osascript -l JavaScript -e "$JS" 2>&1)"
+          echo "sudo-asuser: $(sudo -n launchctl asuser $(id -u) sudo -n -u $(id -un) osascript -l JavaScript -e "$JS" 2>&1)"
+          echo "general: $(osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSPasteboard.generalPasteboard.isNil() ? "GEN_NULL":"GEN_OK"' 2>&1)"
+          sw_vers; defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>&1 || true
